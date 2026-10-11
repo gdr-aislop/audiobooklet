@@ -52,6 +52,10 @@ Settings, in the light theme
 
 ![Light mode](docs/images/shot1.png)
 
+## Thanks
+
+Mr. 4551 for testing the initial versions and [operator](https://vis.social/@operator/117412571374748382) for the name suggestion
+
 ## Installing
 
 ### Installing the Flatpak
