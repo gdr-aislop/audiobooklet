@@ -90,7 +90,14 @@ pub fn apply_theme(theme: abs_core::settings::Theme) {
 pub fn build_application(state: AppState) -> adw::Application {
     let app = adw::Application::builder().application_id(APP_ID).build();
 
+    // A second launch while the app runs only activates this copy again. It brings the existing
+    // window forward rather than opening another one: a second window would hold a second login
+    // session for the same account, and the two would keep invalidating each other's rotating
+    // refresh token.
     app.connect_activate(move |app| {
+        if present_existing_window(app) {
+            return;
+        }
         build_window(app, &state);
         crate::perf::start_main_loop_watchdog();
     });
@@ -113,6 +120,18 @@ fn quit_cleanly_on_termination_signals(app: &adw::Application) {
             app.quit();
             glib::ControlFlow::Break
         });
+    }
+}
+
+/// Presents the app's window, if it has one; returns whether it did.
+pub(crate) fn present_existing_window(app: &adw::Application) -> bool {
+    match app.windows().into_iter().find(|window| window.is::<adw::ApplicationWindow>()) {
+        Some(window) => {
+            tracing::info!("activated again; showing the open window instead of opening another");
+            window.present();
+            true
+        }
+        None => false,
     }
 }
 
@@ -547,6 +566,25 @@ pub(crate) mod tests {
                 );
             }
         }
+    }
+
+    /// Not a `#[test]` itself — see `main.rs`'s `mod tests`. A second activation (the app launched
+    /// again while it runs) must bring the open window forward rather than build another, and
+    /// only the app's main window counts: an open shortcuts window doesn't stand in for it.
+    pub(crate) fn run_activating_again_presents_the_open_window(_runtime: &tokio::runtime::Runtime) {
+        let app = adw::Application::new(Some("io.github.gdr_aislop.audiobooklet.Test"), gtk4::gio::ApplicationFlags::NON_UNIQUE);
+        app.register(gtk4::gio::Cancellable::NONE).expect("register the test application");
+        assert!(!present_existing_window(&app), "nothing to present before the first window");
+
+        let shortcuts = gtk4::Window::builder().application(&app).build();
+        assert!(!present_existing_window(&app), "a secondary window isn't the app's window");
+
+        let window = adw::ApplicationWindow::builder().application(&app).build();
+        assert!(present_existing_window(&app), "the open window is presented");
+        assert_eq!(app.windows().len(), 2, "and no window is added");
+
+        shortcuts.destroy();
+        window.destroy();
     }
 
     /// Not a `#[test]` itself — see `main.rs`'s `mod tests`. The modifier-less shortcuts must sit

@@ -240,6 +240,7 @@ mod tests {
 
     gtk_scenarios! {
         (application_single_key_shortcuts_defer_to_the_focused_widget, crate::application::tests::run_single_key_shortcuts_defer_to_the_focused_widget),
+        (application_activating_again_presents_the_open_window, crate::application::tests::run_activating_again_presents_the_open_window),
         (error_reporting_shows_one_toast, crate::error_reporting::tests::run_report_background_error_shows_one_toast),
         (icons_every_icon_the_app_uses_is_in_the_theme, crate::icons::tests::run_every_icon_the_app_uses_is_in_the_theme),
         (welcome_connect, crate::screens::welcome::tests::run),

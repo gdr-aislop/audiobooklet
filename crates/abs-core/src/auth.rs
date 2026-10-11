@@ -79,6 +79,15 @@ pub fn jwt_exp_seconds(token: &str) -> Option<i64> {
     json.get("exp")?.as_i64()
 }
 
+/// Whether an access token stays valid through [`FRESH_MARGIN_SECONDS`]; a token without an `exp`
+/// claim never expires.
+fn is_fresh(token: &str) -> bool {
+    match jwt_exp_seconds(token) {
+        None => true,
+        Some(exp) => exp > chrono::Utc::now().timestamp() + FRESH_MARGIN_SECONDS,
+    }
+}
+
 /// How long a local-address probe result stays trusted. Long enough that a sync cycle or a
 /// multi-track download doesn't re-probe per call; short enough that switching networks (leaving
 /// home Wi-Fi) is noticed on the next probe after the TTL lapses.
@@ -138,6 +147,10 @@ struct Tokens {
     recovering: bool,
     /// Whether the server refused the remembered password; it isn't tried again by this session.
     password_rejected: bool,
+    /// The pair the database held when this session last read or wrote it. A different stored
+    /// pair was written by another session (see [`Session::adopt_newer_stored_pair`]); this
+    /// session's own pair differing from it only means persisting that pair failed.
+    stored_pair: (String, Option<String>),
 }
 
 /// When an unconfirmed refresh was sent, on both clocks: the wall clock keeps counting while the
@@ -196,6 +209,7 @@ impl Session {
                     unconfirmed: None,
                     recovering: false,
                     password_rejected: false,
+                    stored_pair: (account.token.clone(), account.refresh_token.clone()),
                 }),
                 stored_token: std::sync::Mutex::new(account.token.clone()),
                 probe_cache: tokio::sync::Mutex::new(None),
@@ -310,12 +324,16 @@ impl Session {
     /// failed refresh isn't tried again for [`REFRESH_RETRY_AFTER`].
     pub async fn access_token(&self) -> String {
         let mut tokens = self.inner.tokens.lock().await;
-        let fresh = match jwt_exp_seconds(&tokens.access_token) {
-            None => true,
-            Some(exp) => exp > chrono::Utc::now().timestamp() + FRESH_MARGIN_SECONDS,
-        };
+        let fresh = is_fresh(&tokens.access_token);
         // Offline: the stored token is all there is; a refresh would be a server call.
         if fresh || self.is_offline() {
+            return tokens.access_token.clone();
+        }
+
+        // Another session on this account (a second window, a second copy of the app) may have
+        // refreshed already, rotating the refresh token this one holds; its pair is the one the
+        // server accepts now.
+        if self.adopt_newer_stored_pair(&mut tokens).await && is_fresh(&tokens.access_token) {
             return tokens.access_token.clone();
         }
 
@@ -399,10 +417,42 @@ impl Session {
                 } else if matches!(err, abs_api::LoginError::SessionExpired) {
                     // The server has answered for this token for good; nothing left to recover.
                     tokens.unconfirmed = None;
-                    self.sign_in_again(tokens, &client).await;
+                    // Unless another session rotated it in the meantime: then its pair is the
+                    // live one, and signing in again would only knock that session out.
+                    if !self.adopt_newer_stored_pair(tokens).await {
+                        self.sign_in_again(tokens, &client).await;
+                    }
                 }
             }
         }
+    }
+
+    /// Takes the pair stored in the database when it differs from this session's: another session
+    /// on the same account (a second window, a second copy of the app on the same data) refreshed
+    /// or signed in since this one last did. Refresh tokens rotate on every use, so the stored
+    /// pair is the one the server accepts, and refreshing with this session's older token would
+    /// soon be rejected for good. Returns whether a newer pair was taken; a failed read takes
+    /// nothing.
+    async fn adopt_newer_stored_pair(&self, tokens: &mut Tokens) -> bool {
+        let stored = match abs_storage::repo::accounts::get(&self.inner.pool, &self.inner.account_id).await {
+            Ok(stored) => stored,
+            Err(err) => {
+                tracing::warn!(%err, account_id = %self.inner.account_id, "couldn't check the stored token pair");
+                return false;
+            }
+        };
+        let stored_pair = (stored.token, stored.refresh_token);
+        if stored_pair == tokens.stored_pair || (stored_pair.0 == tokens.access_token && stored_pair.1 == tokens.refresh_token) {
+            return false;
+        }
+        tracing::info!(account_id = %self.inner.account_id, "took the token pair another session of this account stored");
+        tokens.access_token = stored_pair.0.clone();
+        tokens.refresh_token = stored_pair.1.clone();
+        tokens.stored_pair = stored_pair;
+        tokens.refresh_failed_at = None;
+        tokens.unconfirmed = None;
+        *self.inner.stored_token.lock().unwrap_or_else(|poisoned| poisoned.into_inner()) = tokens.access_token.clone();
+        true
     }
 
     /// Takes a new token pair from the server as the session's own, persisted. A missing refresh
@@ -410,10 +460,9 @@ impl Session {
     /// may omit it, which is also what the server's own grace window (v2.35.0+) tolerates.
     async fn adopt_pair(&self, tokens: &mut Tokens, access_token: String, refresh_token: Option<String>) {
         let refresh_token = refresh_token.or_else(|| tokens.refresh_token.clone());
-        if let Err(err) =
-            abs_storage::repo::accounts::set_tokens(&self.inner.pool, &self.inner.account_id, &access_token, refresh_token.as_deref()).await
-        {
-            tracing::warn!(%err, "got a new access token but couldn't persist it; it will be renewed again next launch");
+        match abs_storage::repo::accounts::set_tokens(&self.inner.pool, &self.inner.account_id, &access_token, refresh_token.as_deref()).await {
+            Ok(()) => tokens.stored_pair = (access_token.clone(), refresh_token.clone()),
+            Err(err) => tracing::warn!(%err, "got a new access token but couldn't persist it; it will be renewed again next launch"),
         }
         tokens.access_token = access_token;
         tokens.refresh_token = refresh_token;
@@ -502,6 +551,12 @@ impl Session {
         // Offline mode allows no server calls; wait for it to end while the window lasts.
         if self.is_offline() {
             return true;
+        }
+        // Another session of this account got the new pair (its refresh with the same old token
+        // was answered within the grace window): nothing left to recover.
+        if self.adopt_newer_stored_pair(&mut tokens).await {
+            tokens.recovering = false;
+            return false;
         }
         let Some(refresh_token) = tokens.refresh_token.clone() else {
             tokens.unconfirmed = None;
@@ -782,6 +837,108 @@ mod tests {
             1,
             "one shared refresh, not one per caller (a refresh token rotates on use — racing refreshes would strand all but one caller)"
         );
+    }
+
+    #[tokio::test]
+    async fn a_second_session_takes_the_pair_the_first_one_refreshed_instead_of_refreshing_its_stale_token() {
+        // Two windows (or two copies of the app) on one account: each has its own Session, and
+        // the refresh token rotates on use — the second refreshing with the token the first one
+        // already used would be rejected once the server's grace window passes.
+        let mock_server = MockServer::start().await;
+        let expired = chrono::Utc::now().timestamp() - 10;
+        let (pool, account, _) = pool_with_account(&mock_server.uri(), &jwt_with_exp(expired), Some("old-refresh")).await;
+        Mock::given(method("POST"))
+            .and(path("/auth/refresh"))
+            .and(header("x-refresh-token", "old-refresh"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(new_pair()))
+            .expect(1)
+            .mount(&mock_server)
+            .await;
+        let first = session_for(&pool, &account).await;
+        let second = session_for(&pool, &account).await;
+
+        assert_eq!(first.access_token().await, "new-access");
+        assert_eq!(second.access_token().await, "new-access", "the second session takes the stored pair");
+        assert_eq!(second.stored_access_token(), "new-access");
+        assert_eq!(second.inner.tokens.lock().await.refresh_token.as_deref(), Some("new-refresh"));
+    }
+
+    #[tokio::test]
+    async fn a_second_session_refreshes_with_the_rotated_refresh_token_when_the_stored_access_token_is_stale_too() {
+        let mock_server = MockServer::start().await;
+        let expired = chrono::Utc::now().timestamp() - 10;
+        let (pool, account, _) = pool_with_account(&mock_server.uri(), &jwt_with_exp(expired), Some("old-refresh")).await;
+        let second = session_for(&pool, &account).await;
+        // Another session refreshed long enough ago that the access token it stored has expired.
+        abs_storage::repo::accounts::set_tokens(&pool, &account.id, &jwt_with_exp(expired + 1), Some("rotated-refresh")).await.unwrap();
+        Mock::given(method("POST"))
+            .and(path("/auth/refresh"))
+            .and(header("x-refresh-token", "rotated-refresh"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(new_pair()))
+            .expect(1)
+            .mount(&mock_server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/auth/refresh"))
+            .and(header("x-refresh-token", "old-refresh"))
+            .respond_with(ResponseTemplate::new(401))
+            .expect(0)
+            .mount(&mock_server)
+            .await;
+
+        assert_eq!(second.access_token().await, "new-access");
+        let stored = abs_storage::repo::accounts::get(&pool, &account.id).await.unwrap();
+        assert_eq!(stored.refresh_token.as_deref(), Some("new-refresh"));
+    }
+
+    #[tokio::test]
+    async fn a_pair_that_failed_to_persist_is_not_replaced_by_the_older_stored_one() {
+        // The database holding a different pair than the session only means "another session
+        // wrote it" when the database changed since this session last saw it.
+        let mock_server = MockServer::start().await;
+        let expired = chrono::Utc::now().timestamp() - 10;
+        let (pool, account, _) = pool_with_account(&mock_server.uri(), &jwt_with_exp(expired), Some("old-refresh")).await;
+        let session = session_for(&pool, &account).await;
+        {
+            let mut tokens = session.inner.tokens.lock().await;
+            tokens.access_token = jwt_with_exp(expired + 1);
+            tokens.refresh_token = Some("unpersisted-refresh".into());
+            assert!(!session.adopt_newer_stored_pair(&mut tokens).await);
+            assert_eq!(tokens.refresh_token.as_deref(), Some("unpersisted-refresh"));
+        }
+    }
+
+    #[tokio::test]
+    async fn a_rejected_refresh_takes_a_pair_another_session_stored_instead_of_signing_in_again() {
+        let mock_server = MockServer::start().await;
+        let expired = chrono::Utc::now().timestamp() - 10;
+        let (pool, account, _) = pool_with_account(&mock_server.uri(), &jwt_with_exp(expired), Some("old-refresh")).await;
+        let session = session_for(&pool, &account).await;
+        session.set_password_store(Arc::new(crate::passwords::MemoryPasswords::with(&account.id, "hunter2")));
+        // The other session rotates the pair while this one's refresh is on its way.
+        let rotated_pool = pool.clone();
+        let account_id = account.id.clone();
+        Mock::given(method("POST"))
+            .and(path("/auth/refresh"))
+            .respond_with(move |_: &wiremock::Request| {
+                let pool = rotated_pool.clone();
+                let account_id = account_id.clone();
+                std::thread::spawn(move || {
+                    tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap().block_on(
+                        abs_storage::repo::accounts::set_tokens(&pool, &account_id, "other-access", Some("other-refresh")),
+                    )
+                })
+                .join()
+                .unwrap()
+                .unwrap();
+                ResponseTemplate::new(401).set_body_json(serde_json::json!({ "error": "Invalid refresh token" }))
+            })
+            .mount(&mock_server)
+            .await;
+        Mock::given(method("POST")).and(path("/login")).respond_with(ResponseTemplate::new(500)).expect(0).mount(&mock_server).await;
+
+        assert_eq!(session.access_token().await, "other-access");
+        assert_eq!(session.inner.tokens.lock().await.refresh_token.as_deref(), Some("other-refresh"));
     }
 
     #[tokio::test]
