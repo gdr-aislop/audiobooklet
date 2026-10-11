@@ -75,6 +75,8 @@ See [docs/i18n.md](docs/i18n.md) for how translations work.
 
 ## Alpine Linux and postmarketOS
 
+*As of v0.9.7, this is mostly theoretical, untested on a real PMOS/Nura device*
+
 postmarketOS is based on Alpine, and the same steps apply. Verified on Alpine 3.24 (x86_64);
 postmarketOS itself, aarch64 and older Alpine branches were not tested, so package names or versions
 may differ slightly there.
