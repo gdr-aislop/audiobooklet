@@ -14,10 +14,13 @@ offline mode and network loss detection.
 
 *Phone, not Gnome* - a mobile app, not a responsive desktop program. Pause
 on call, handle headphones unplugging, battery efficiency, playback
-notification. Tested on a real, slow phone.
+notification. Tested on a real, slow phone. 
 
 *Comfortable* - has playback speed, sleep timer, fast forward/rewind, search
 and filtering.
+
+*Fast* - native Rust code, no Javascript in sight. Low-memory setting for disabling
+non-essential features and making it even faster.
 
 *Free Software* - GPLv3 licensed, only makes network calls to your Audiobookshelf
 server
@@ -51,6 +54,10 @@ Settings
 Settings, in the light theme
 
 ![Light mode](docs/images/shot1.png)
+
+## Thanks
+
+Mr. 4551 for testing the initial versions and [operator](https://vis.social/@operator/117412571374748382) for the name suggestion
 
 ## Installing
 
