@@ -115,6 +115,11 @@ Check it against `gpg --fingerprint` after importing `audiobooklet-signing-key.a
 file is hosted alongside the binaries it verifies and shouldn't be the only
 source trusted for the key itself.
 
+### Building from source
+
+To build just the `audiobooklet` binary — on PureOS Crimson / Debian, or on Alpine /
+postmarketOS — see [BUILD.md](BUILD.md).
+
 ### Building an AppImage manually
 
 ```sh
