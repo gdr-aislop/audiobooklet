@@ -36,6 +36,7 @@ pub struct PlayerScreen {
 
 #[cfg(test)]
 pub struct TestHooks {
+    pub window_title: adw::WindowTitle,
     pub title_label: gtk4::Label,
     pub author_label: gtk4::Label,
     pub chapter_label: gtk4::Label,
@@ -105,7 +106,9 @@ pub fn build(
         }
     });
     header.pack_start(&collapse_button);
-    header.set_title_widget(Some(&adw::WindowTitle::new(&tr("Now Playing"), "")));
+    // The subtitle says where the audio comes from; see `PlayerSnapshot::source_is_local`.
+    let window_title = adw::WindowTitle::new(&tr("Now Playing"), "");
+    header.set_title_widget(Some(&window_title));
 
     // Surfaces `PlayerSnapshot::last_error` — see that field's doc comment for why this exists at
     // all (previously a playback failure was completely invisible: logged, silently paused, done).
@@ -627,6 +630,7 @@ pub fn build(
     });
 
     let update = {
+        let window_title = window_title.clone();
         let title_label = title_label.clone();
         let author_label = author_label.clone();
         let chapter_label = chapter_label.clone();
@@ -646,6 +650,16 @@ pub fn build(
         let cover = cover.clone();
         let error_banner = error_banner.clone();
         move |snapshot: &PlayerSnapshot| {
+            // Unknown until a book has loaded. `update` runs 4 times a second, so only touch the
+            // subtitle when it changes.
+            let source = match (snapshot.is_loading, snapshot.source_is_local) {
+                (true, _) => String::new(),
+                (false, true) => tr("On this device"),
+                (false, false) => tr("Streaming"),
+            };
+            if window_title.subtitle() != source {
+                window_title.set_subtitle(&source);
+            }
             title_label.set_label(&snapshot.title);
             author_label.set_label(snapshot.author.as_deref().unwrap_or(""));
             author_label.set_visible(snapshot.author.is_some());
@@ -746,6 +760,7 @@ pub fn build(
         #[cfg(test)]
         hooks: TestHooks {
             cover: cover.clone(),
+            window_title,
             title_label,
             author_label,
             chapter_label,
@@ -1006,6 +1021,7 @@ pub(crate) mod tests {
         // The screen paints from `controller.snapshot()` immediately on build, before any tick.
         assert_eq!(hooks.title_label.label(), "Test Book");
         assert_eq!(hooks.author_label.label(), "Some Author");
+        assert_eq!(hooks.window_title.subtitle(), "Streaming", "nothing is downloaded, so the header says the book streams");
 
         // Let a tick or two land so the scrubber/labels reflect a live position.
         pump_until(|| hooks.scrubber.value() >= 0.0, Duration::from_millis(500));
