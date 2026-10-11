@@ -3,7 +3,7 @@
 #
 msgid ""
 msgstr ""
-"Project-Id-Version: audiobooklet 0.9.6\n"
+"Project-Id-Version: audiobooklet 0.9.7\n"
 "Report-Msgid-Bugs-To: https://github.com/gdr-aislop/audiobooklet/issues\n"
 "PO-Revision-Date: 2026-10-09 12:00+0000\n"
 "Last-Translator: \n"
