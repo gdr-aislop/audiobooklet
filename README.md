@@ -61,28 +61,12 @@ Mr. 4551 for testing the initial versions and [operator](https://vis.social/@ope
 
 ## Installing
 
-### Installing the Flatpak
-
-The recommended way — adds a remote once, then `flatpak update` picks up
-every new tagged release automatically:
-
-```sh
-flatpak remote-add --user --if-not-exists audiobooklet \
-  https://gdr-aislop.github.io/audiobooklet/io.github.gdr_aislop.audiobooklet.flatpakrepo
-flatpak install --user audiobooklet io.github.gdr_aislop.audiobooklet
-```
-
-Alternatively, download the `.flatpak` file from a
-[release](../../releases) and install it directly, with no remote added:
-
-```sh
-flatpak install --user ./audiobooklet-<version>-<arch>.flatpak   # <arch>: x86_64 or aarch64
-```
-
 ### Installing the .deb via APT
 
-The recommended way — adds the repo once, then `apt upgrade` picks up every
-new tagged release automatically (arm64 and amd64 only):
+The .deb files are currently built for PureOS Crimson, which is mostly the same 
+as Debian Bookworm, x86_64 and aarch64.
+
+Either use the repo as described below, or install .deb from Releases
 
 ```sh
 sudo curl -fsSL https://gdr-aislop.github.io/audiobooklet/apt/audiobooklet.asc \
@@ -92,11 +76,6 @@ echo "deb [signed-by=/etc/apt/keyrings/audiobooklet.asc] https://gdr-aislop.gith
 sudo apt update
 sudo apt install audiobooklet
 ```
-
-This repo always carries the *latest* tagged release only (not a full
-version history) — older `.deb`s stay available from
-[past releases](../../releases) directly, via `sudo apt install
-./audiobooklet_<version>-1_<arch>.deb` (`<arch>`: `amd64` or `arm64`).
 
 ### Verifying a standalone `.deb` or `.AppImage`
 
@@ -140,6 +119,25 @@ Output lands in `build/appimage/audiobooklet-<version>-<arch>.AppImage`.
 `scripts/build-appimage.sh --help` documents environment overrides
 (`ABS_APP_BIN`, `LINUXDEPLOY`, `APPIMAGE_TOOLS_DIR`); the docker wrapper
 mirrors the CI job's package set via `scripts/appimage-builder-bookworm.Dockerfile`.
+
+### Installing the Flatpak
+
+The recommended way — adds a remote once, then `flatpak update` picks up
+every new tagged release automatically:
+
+```sh
+flatpak remote-add --user --if-not-exists audiobooklet \
+  https://gdr-aislop.github.io/audiobooklet/io.github.gdr_aislop.audiobooklet.flatpakrepo
+flatpak install --user audiobooklet io.github.gdr_aislop.audiobooklet
+```
+
+Alternatively, download the `.flatpak` file from a
+[release](../../releases) and install it directly, with no remote added:
+
+```sh
+flatpak install --user ./audiobooklet-<version>-<arch>.flatpak   # <arch>: x86_64 or aarch64
+```
+
 
 ## Reporting problems
 
