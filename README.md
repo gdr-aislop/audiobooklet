@@ -61,28 +61,12 @@ Mr. 4551 for testing the initial versions and [operator](https://vis.social/@ope
 
 ## Installing
 
-### Installing the Flatpak
-
-The recommended way — adds a remote once, then `flatpak update` picks up
-every new tagged release automatically:
-
-```sh
-flatpak remote-add --user --if-not-exists audiobooklet \
-  https://gdr-aislop.github.io/audiobooklet/io.github.gdr_aislop.audiobooklet.flatpakrepo
-flatpak install --user audiobooklet io.github.gdr_aislop.audiobooklet
-```
-
-Alternatively, download the `.flatpak` file from a
-[release](../../releases) and install it directly, with no remote added:
-
-```sh
-flatpak install --user ./audiobooklet-<version>-<arch>.flatpak   # <arch>: x86_64 or aarch64
-```
-
 ### Installing the .deb via APT
 
-The recommended way — adds the repo once, then `apt upgrade` picks up every
-new tagged release automatically (arm64 and amd64 only):
+The .deb files are currently built for PureOS Crimson, which is mostly the same 
+as Debian Bookworm, x86_64 and aarch64.
+
+Either use the repo as described below, or install .deb from Releases
 
 ```sh
 sudo curl -fsSL https://gdr-aislop.github.io/audiobooklet/apt/audiobooklet.asc \
@@ -92,11 +76,6 @@ echo "deb [signed-by=/etc/apt/keyrings/audiobooklet.asc] https://gdr-aislop.gith
 sudo apt update
 sudo apt install audiobooklet
 ```
-
-This repo always carries the *latest* tagged release only (not a full
-version history) — older `.deb`s stay available from
-[past releases](../../releases) directly, via `sudo apt install
-./audiobooklet_<version>-1_<arch>.deb` (`<arch>`: `amd64` or `arm64`).
 
 ### Verifying a standalone `.deb` or `.AppImage`
 
@@ -146,32 +125,33 @@ Output lands in `build/appimage/audiobooklet-<version>-<arch>.AppImage`.
 (`ABS_APP_BIN`, `LINUXDEPLOY`, `APPIMAGE_TOOLS_DIR`); the docker wrapper
 mirrors the CI job's package set via `scripts/appimage-builder-bookworm.Dockerfile`.
 
-## Translations
+### Installing the Flatpak
 
-The interface is translatable with gettext and available in English and Polish. It follows the
-system language by default; Settings → Appearance → Language overrides that. Improving a
-translation or adding a language is a `po/<lang>.po` file (Polish: [`po/pl.po`](po/pl.po)); see
-[docs/i18n.md](docs/i18n.md) for how to extract, translate and test strings.
+The recommended way — adds a remote once, then `flatpak update` picks up
+every new tagged release automatically:
+
+```sh
+flatpak remote-add --user --if-not-exists audiobooklet \
+  https://gdr-aislop.github.io/audiobooklet/io.github.gdr_aislop.audiobooklet.flatpakrepo
+flatpak install --user audiobooklet io.github.gdr_aislop.audiobooklet
+```
+
+Alternatively, download the `.flatpak` file from a
+[release](../../releases) and install it directly, with no remote added:
+
+```sh
+flatpak install --user ./audiobooklet-<version>-<arch>.flatpak   # <arch>: x86_64 or aarch64
+```
+
 
 ## Reporting problems
 
-When reporting a bug, attach the contents of `~/.local/state/io.github.gdr_aislop.audiobooklet/`:
+For non-crashes, there's a "Show logs" button in Settings, which will open a text editor
+with the latest log file in it. Please attach this log to your bug report. The files
+are in  `~/.local/state/io.github.gdr_aislop.audiobooklet/`
 
-- `logs/audiobooklet.*` (Settings → Diagnostics → "Open latest log file" opens the
-  newest one) — a rotating, human-readable log file (last 7 days kept).
-  A Rust panic always logs its full backtrace here, even without
-  `RUST_BACKTRACE` set. By default the log is anonymized: server addresses,
-  URLs, usernames, access tokens and your home directory are replaced with
-  placeholders such as `<url>`, `<server>` and `<user>`, so it is safe to
-  attach. Settings → Diagnostics → "Anonymize logs" turns this off, which is
-  only useful while debugging a connection problem yourself. (Crash dumps
-  below are not anonymized; they contain no log text but can include memory
-  contents.)
-- `crashes/crash-<timestamp>-<pid>.dmp` — a Breakpad-format minidump written
-  for a native (signal-level) crash a Rust panic hook can't catch (a
-  segfault/abort inside GTK/GStreamer/glib). It's binary, not directly
-  readable: turn it into a stack trace with
-  [`minidump-stackwalk`](https://crates.io/crates/minidump-stackwalk)
-  (`cargo install minidump-stackwalk`), which also needs debug symbols from
-  a build matching the exact version that crashed (an unstripped binary, or
-  a separately retained `.debug` file).
+For crashes, there's `~/.local/state/io.github.gdr_aislop.audiobooklet/crashes/crash-<timestamp>-<pid>.dmp`
+which can be processed with [`minidump-stackwalk`](https://crates.io/crates/minidump-stackwalk)
+if you feel like solving it yourself.
+
+Try to reproduce the bug before reporting, and describe the steps.
