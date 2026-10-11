@@ -215,6 +215,9 @@ pub struct PlayerSnapshot {
     /// The chapter the position falls in, for the full player's chapter line. `None` while a
     /// start is still resolving or when the book has no chapters.
     pub chapter: Option<CurrentChapter>,
+    /// Whether the track playing now is read from a file on the device rather than streamed.
+    /// Meaningless (`false`) while a start is still resolving.
+    pub source_is_local: bool,
 }
 
 /// Which chapter is playing, as the full player shows it: "<title> · <number> of <count>".
@@ -854,6 +857,7 @@ impl Inner {
                 will_play_when_loaded: pending.wants_play,
                 has_chapters: false,
                 chapter: None,
+                source_is_local: false,
             });
         }
         let now_playing = self.now_playing.as_ref()?;
@@ -879,6 +883,7 @@ impl Inner {
             will_play_when_loaded: false,
             has_chapters: !now_playing.chapters.is_empty(),
             chapter,
+            source_is_local: now_playing.current_source_is_local,
         })
     }
 
@@ -4740,6 +4745,7 @@ pub(crate) mod tests {
             !requests.iter().any(|r| r.url.path() == "/api/items/item-1/file/1"),
             "a downloaded track must be played from disk, not re-streamed"
         );
+        assert!(controller.snapshot().unwrap().source_is_local, "the snapshot says the track plays from the device");
         controller.stop();
     }
 
@@ -4776,6 +4782,7 @@ pub(crate) mod tests {
             requests.iter().any(|r| r.url.path() == "/api/items/item-1/file/1"),
             "an untrustworthy Complete row (missing file) must fall back to streaming"
         );
+        assert!(!controller.snapshot().unwrap().source_is_local, "the snapshot says the track is streamed");
         controller.stop();
     }
 

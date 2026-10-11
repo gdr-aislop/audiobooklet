@@ -785,6 +785,14 @@ msgid "End of chapter"
 msgstr ""
 
 #: app/src/screens/player.rs
+msgid "On this device"
+msgstr ""
+
+#: app/src/screens/player.rs
+msgid "Streaming"
+msgstr ""
+
+#: app/src/screens/player.rs
 msgid "{title} · {number} of {total}"
 msgstr ""
 
