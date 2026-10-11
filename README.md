@@ -141,32 +141,14 @@ Output lands in `build/appimage/audiobooklet-<version>-<arch>.AppImage`.
 (`ABS_APP_BIN`, `LINUXDEPLOY`, `APPIMAGE_TOOLS_DIR`); the docker wrapper
 mirrors the CI job's package set via `scripts/appimage-builder-bookworm.Dockerfile`.
 
-## Translations
-
-The interface is translatable with gettext and available in English and Polish. It follows the
-system language by default; Settings → Appearance → Language overrides that. Improving a
-translation or adding a language is a `po/<lang>.po` file (Polish: [`po/pl.po`](po/pl.po)); see
-[docs/i18n.md](docs/i18n.md) for how to extract, translate and test strings.
-
 ## Reporting problems
 
-When reporting a bug, attach the contents of `~/.local/state/io.github.gdr_aislop.audiobooklet/`:
+For non-crashes, there's a "Show logs" button in Settings, which will open a text editor
+with the latest log file in it. Please attach this log to your bug report. The files
+are in  `~/.local/state/io.github.gdr_aislop.audiobooklet/`
 
-- `logs/audiobooklet.*` (Settings → Diagnostics → "Open latest log file" opens the
-  newest one) — a rotating, human-readable log file (last 7 days kept).
-  A Rust panic always logs its full backtrace here, even without
-  `RUST_BACKTRACE` set. By default the log is anonymized: server addresses,
-  URLs, usernames, access tokens and your home directory are replaced with
-  placeholders such as `<url>`, `<server>` and `<user>`, so it is safe to
-  attach. Settings → Diagnostics → "Anonymize logs" turns this off, which is
-  only useful while debugging a connection problem yourself. (Crash dumps
-  below are not anonymized; they contain no log text but can include memory
-  contents.)
-- `crashes/crash-<timestamp>-<pid>.dmp` — a Breakpad-format minidump written
-  for a native (signal-level) crash a Rust panic hook can't catch (a
-  segfault/abort inside GTK/GStreamer/glib). It's binary, not directly
-  readable: turn it into a stack trace with
-  [`minidump-stackwalk`](https://crates.io/crates/minidump-stackwalk)
-  (`cargo install minidump-stackwalk`), which also needs debug symbols from
-  a build matching the exact version that crashed (an unstripped binary, or
-  a separately retained `.debug` file).
+For crashes, there's `~/.local/state/io.github.gdr_aislop.audiobooklet/crashes/crash-<timestamp>-<pid>.dmp`
+which can be processed with [`minidump-stackwalk`](https://crates.io/crates/minidump-stackwalk)
+if you feel like solving it yourself.
+
+Try to reproduce the bug before reporting, and describe the steps.
