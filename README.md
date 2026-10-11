@@ -14,7 +14,7 @@ offline mode and network loss detection.
 
 *Phone, not Gnome* - a mobile app, not a responsive desktop program. Pause
 on call, handle headphones unplugging, battery efficiency, playback
-notification. Tested on a real, slow phone.
+notification. Tested on a real, slow phone. Not an [Electron](https://tauri.app/) in sight.
 
 *Comfortable* - has playback speed, sleep timer, fast forward/rewind, search
 and filtering.
