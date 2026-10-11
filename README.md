@@ -14,10 +14,13 @@ offline mode and network loss detection.
 
 *Phone, not Gnome* - a mobile app, not a responsive desktop program. Pause
 on call, handle headphones unplugging, battery efficiency, playback
-notification. Tested on a real, slow phone. Not an [Electron](https://tauri.app/) in sight.
+notification. Tested on a real, slow phone. 
 
 *Comfortable* - has playback speed, sleep timer, fast forward/rewind, search
 and filtering.
+
+*Fast* - native Rust code, no Javascript in sight. Low-memory setting for disabling
+non-essential features and making it even faster.
 
 *Free Software* - GPLv3 licensed, only makes network calls to your Audiobookshelf
 server
