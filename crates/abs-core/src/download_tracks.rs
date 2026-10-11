@@ -304,6 +304,21 @@ pub async fn local_track_path(pool: &SqlitePool, server_id: &str, item_id: &str,
     }
 }
 
+/// Which of `inos` a download has to fetch: every one that isn't a usable local file by the same
+/// check playback makes ([`track_source`]). So asking for a download also re-checks the chapters
+/// already marked downloaded: one whose file is gone or the wrong size is written off (see
+/// [`mark_damaged`]) and fetched again from the first byte, instead of being reported as done.
+/// Only the size can be checked — the server gives no checksum for a file.
+pub async fn tracks_to_fetch(pool: &SqlitePool, server_id: &str, item_id: &str, inos: impl IntoIterator<Item = String>) -> Vec<String> {
+    let mut to_fetch = Vec::new();
+    for ino in inos {
+        if !matches!(track_source(pool, server_id, item_id, &ino).await, TrackSource::Local(_)) {
+            to_fetch.push(ino);
+        }
+    }
+    to_fetch
+}
+
 /// Which of an item's tracks are fully downloaded — what `chapter_offline_markers` needs to turn
 /// into per-chapter glyphs, without the Player screen having to reach into `abs_storage` directly
 /// (the same boundary `item_offline_availability` above already respects).
@@ -1190,6 +1205,40 @@ mod tests {
         assert_eq!(outcome, TrackDownloadOutcome::Completed);
         assert_eq!(tokio::fs::read(&file_path).await.unwrap(), b"helloworld");
         assert!(matches!(track_source(&pool, &server_id, "item-1", "ino-1").await, TrackSource::Local(_)));
+    }
+
+    /// Asking for a download re-checks what's already downloaded: an intact track is left alone,
+    /// while one marked complete whose file is the wrong size, or gone, is fetched again (and no
+    /// longer counts as downloaded meanwhile), along with anything failed or never downloaded.
+    #[tokio::test]
+    async fn tracks_to_fetch_rechecks_tracks_already_marked_downloaded() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (pool, server_id) = pool_with_synced_tracks("item-1", &["intact", "truncated", "gone", "failed", "never"]).await;
+        let complete = |ino: &'static str, on_disk: Option<&'static [u8]>| {
+            let (pool, server_id) = (pool.clone(), server_id.clone());
+            let file_path = tmp.path().join(format!("{ino}.mp3"));
+            async move {
+                if let Some(bytes) = on_disk {
+                    tokio::fs::write(&file_path, bytes).await.unwrap();
+                }
+                abs_storage::repo::download_tracks::upsert_pending(&pool, &server_id, "item-1", ino, file_path.to_str().unwrap()).await.unwrap();
+                abs_storage::repo::download_tracks::mark_complete(&pool, &server_id, "item-1", ino, 10).await.unwrap();
+            }
+        };
+        complete("intact", Some(b"helloworld")).await;
+        complete("truncated", Some(b"hello")).await;
+        complete("gone", None).await;
+        abs_storage::repo::download_tracks::mark_failed(&pool, &server_id, "item-1", "failed", "connection reset").await.unwrap();
+
+        let all = ["intact", "truncated", "gone", "failed", "never"].map(String::from);
+        let to_fetch = tracks_to_fetch(&pool, &server_id, "item-1", all).await;
+
+        assert_eq!(to_fetch, ["truncated", "gone", "failed", "never"]);
+        assert_eq!(
+            complete_inos_for_item(&pool, &server_id, "item-1").await.unwrap(),
+            BTreeSet::from(["intact".to_string()]),
+            "the damaged ones no longer count as downloaded"
+        );
     }
 
     /// Straight to `download_track`, without playback noticing first: a complete row whose file

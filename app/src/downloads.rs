@@ -26,7 +26,6 @@ use abs_core::auth::Session;
 use abs_core::download_tracks::TrackDownloadOutcome;
 use abs_core::downloads::DownloadScope;
 use abs_player::network_watch::NetworkMonitor;
-use abs_storage::models::DownloadStatus;
 use abs_storage::AppPaths;
 
 use crate::i18n::{tr, tr_args};
@@ -310,12 +309,12 @@ impl DownloadManager {
                 abs_core::download_tracks::tracks_needed_for_chapters(&tracks, &chapters, &chapter_indices)
             };
 
-            // Filter out tracks already fully downloaded — `download_track` itself is idempotent
-            // on a completed track, but filtering here keeps this batch's `total` (and therefore
-            // its progress bookkeeping) accurate rather than counting cache hits as "in flight".
-            let downloads = abs_storage::repo::download_tracks::list_for_item(&pool, &server_id, &item_id).await.unwrap_or_default();
-            let complete: HashSet<&str> = downloads.iter().filter(|d| d.status == DownloadStatus::Complete).map(|d| d.ino.as_str()).collect();
-            let pending_inos: Vec<String> = needed.into_iter().filter(|ino| !complete.contains(ino.as_str())).collect();
+            // Filter out tracks already downloaded — `download_track` itself is idempotent on a
+            // completed track, but filtering here keeps this batch's `total` (and therefore its
+            // progress bookkeeping) accurate rather than counting cache hits as "in flight". A
+            // track only counts as downloaded if its file checks out, so a download re-fetches
+            // a damaged one rather than reporting the item complete over it.
+            let pending_inos = abs_core::download_tracks::tracks_to_fetch(&pool, &server_id, &item_id, needed).await;
 
             if pending_inos.is_empty() {
                 inner_rc.borrow().publish(DownloadEvent::ItemStateChanged { item_id, state: ItemDownloadState::Complete });
@@ -599,6 +598,7 @@ pub(crate) fn follow_downloaded_items(
 pub(crate) mod tests {
     use super::*;
     use crate::test_support::{pool, pump_until, test_paths};
+    use abs_storage::models::DownloadStatus;
     use std::time::Duration;
     use wiremock::matchers::{method, path};
     use wiremock::{Mock, MockServer, ResponseTemplate};
