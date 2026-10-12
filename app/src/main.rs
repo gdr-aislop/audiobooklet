@@ -168,6 +168,11 @@ async fn setup(paths: abs_storage::AppPaths) -> AppState {
     tracing::info!(?playback_settings, "loaded playback settings");
     let theme = abs_core::settings::load_theme(&pool).await.expect("load theme");
 
+    // A database left with accounts but none active (signing out of the active account used to
+    // do that) starts on the most recently used one instead of the first-run screen.
+    if let Err(err) = abs_core::accounts::ensure_active(&pool).await {
+        tracing::warn!(%err, "couldn't pick an account to start with");
+    }
     let active_account = abs_storage::repo::accounts::get_active(&pool)
         .await
         .expect("check for an active account");
@@ -350,6 +355,7 @@ mod tests {
         (settings_low_memory_mode_switch_persists_and_hints_at_burst_buffering, crate::screens::settings::tests::run_low_memory_mode_switch_persists_and_hints_at_burst_buffering),
         (settings_account_and_servers_rows_reflect_the_database, crate::screens::settings::tests::run_account_and_servers_rows_reflect_the_database),
         (settings_servers_menu_actions_rebuild_the_shell, crate::screens::settings::tests::run_servers_menu_actions_rebuild_the_shell),
+        (settings_signing_out_of_the_active_account_lands_on_another, crate::screens::settings::tests::run_signing_out_of_the_active_account_lands_on_another),
         (settings_add_server_row_opens_welcome_and_cancels_back, crate::screens::settings::tests::run_add_server_row_opens_welcome_and_cancels_back),
         (settings_failed_setting_saves_toast, crate::screens::settings::tests::run_failed_setting_saves_toast),
         (offline_mode_failed_persist_is_reported, crate::offline_mode::tests::run_failed_persist_is_reported),

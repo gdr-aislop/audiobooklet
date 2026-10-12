@@ -698,9 +698,10 @@ pub(crate) mod tests {
         app_window.present();
         pump_until(|| app_window.is_mapped(), Duration::from_secs(5));
 
-        // The URL row: host as title, the full URL as the subtitle (a literal value being
-        // confirmed), flagged for the monospace stylesheet.
-        assert_eq!(screen.hooks.url_row.title(), "library.example");
+        // The URL row: the address without its scheme as title (the path kept: two servers on one
+        // host differ only there), the full URL as the subtitle (a literal value being confirmed),
+        // flagged for the monospace stylesheet.
+        assert_eq!(screen.hooks.url_row.title(), "library.example/abs");
         assert_eq!(screen.hooks.url_row.subtitle().as_deref(), Some("https://library.example/abs"));
         assert!(screen.hooks.url_row.has_css_class("mono-subtitle"));
 
