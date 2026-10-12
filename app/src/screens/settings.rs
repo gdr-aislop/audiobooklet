@@ -768,7 +768,7 @@ fn open_latest_log(paths: &AppPaths, toast_overlay: &adw::ToastOverlay) {
     match paths.latest_log_file() {
         Ok(Some(path)) => {
             let uri = gtk4::gio::File::for_path(&path).uri();
-            if let Err(err) = gtk4::gio::AppInfo::launch_default_for_uri(&uri, None::<&gtk4::gio::AppLaunchContext>) {
+            if let Err(err) = crate::external_apps::launch_default_for_uri(&uri) {
                 crate::error_reporting::report_background_error(toast_overlay, &tr("Opening the log file"), err);
             }
         }
@@ -849,7 +849,7 @@ pub(crate) fn push_about(window: &adw::ApplicationWindow) {
             // Firing the launch is all this needs to wait for — the default handler (a browser
             // via the desktop's URL-opening portal) runs as its own detached process, so there's
             // nothing further to await.
-            if let Err(err) = gtk4::gio::AppInfo::launch_default_for_uri(WEBSITE_URL, None::<&gtk4::gio::AppLaunchContext>) {
+            if let Err(err) = crate::external_apps::launch_default_for_uri(WEBSITE_URL) {
                 crate::error_reporting::report_background_error(&toast_overlay, &tr("Opening the website"), err);
             }
         }

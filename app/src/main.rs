@@ -2,6 +2,7 @@ mod application;
 mod crash_reporting;
 mod downloads;
 mod error_reporting;
+mod external_apps;
 mod i18n;
 mod icons;
 mod keep_awake;

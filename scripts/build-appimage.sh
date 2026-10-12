@@ -266,6 +266,19 @@ cat > "$APPDIR/apprun-hooks/$APP_NAME.sh" <<'EOF'
 APPDIR="${APPDIR:-"$(readlink -f "$(dirname "${BASH_SOURCE[0]}")/..")"}"
 export APPDIR
 
+# Everything below points the app at the bundle — but apps it launches on the host (the log
+# file's text editor, the website's browser) must not inherit that, or they load our libraries
+# instead of their own and die ("mousepad: symbol lookup error: ... g_once_init_leave_pointer").
+# Record the host's values first (AUDIOBOOKLET_HOST_<VAR>, absent if the variable was unset);
+# app/src/external_apps.rs puts them back for those launches. Kept from an earlier run of this
+# hook, if any, so the values recorded are always the host's.
+if [ -z "${AUDIOBOOKLET_BUNDLE_ENV+x}" ]; then
+    export AUDIOBOOKLET_BUNDLE_ENV="LD_LIBRARY_PATH GTK_PATH GTK_EXE_PREFIX GSETTINGS_SCHEMA_DIR GDK_PIXBUF_MODULE_FILE GDK_PIXBUF_MODULEDIR GIO_MODULE_DIR GST_PLUGIN_SYSTEM_PATH GST_REGISTRY_FORK GST_PLUGIN_SCANNER XDG_DATA_DIRS"
+    for var in $AUDIOBOOKLET_BUNDLE_ENV; do
+        if [ -n "${!var+x}" ]; then export "AUDIOBOOKLET_HOST_$var=${!var}"; fi
+    done
+fi
+
 export LD_LIBRARY_PATH="$APPDIR/usr/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
 export GTK_PATH="$APPDIR/usr/lib/gtk-4.0"
 export GTK_EXE_PREFIX="$APPDIR/usr" # keep module lookups (immodules, media) inside the bundle
