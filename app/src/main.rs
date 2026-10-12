@@ -408,6 +408,8 @@ mod tests {
         (playback_controls_on_a_book_that_failed_to_start_do_not_crash, crate::player::tests::run_controls_on_a_book_that_failed_to_start_do_not_crash),
         (playback_an_error_during_a_track_load_is_not_overridden, crate::player::tests::run_an_error_during_a_track_load_is_not_overridden),
         (playback_changes_during_a_track_load_are_applied_by_it, crate::player::tests::run_changes_during_a_track_load_are_applied_by_it),
+        (playback_speed_picked_before_preroll_applies_once_ready, crate::player::tests::run_speed_picked_before_preroll_applies_once_ready),
+        (playback_speed_refused_by_a_ready_pipeline_shows_the_running_speed, crate::player::tests::run_speed_refused_by_a_ready_pipeline_shows_the_running_speed),
         (playback_a_load_after_a_pause_is_not_a_stuck_pause, crate::player::tests::run_a_load_after_a_pause_is_not_a_stuck_pause),
         (playback_resuming_adopts_newer_progress_already_pulled_locally, crate::player::tests::run_resuming_adopts_newer_progress_already_pulled_locally),
         (playback_starting_at_a_chapter, crate::player::tests::run_starting_at_a_chapter),
