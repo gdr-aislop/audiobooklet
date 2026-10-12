@@ -251,6 +251,7 @@ mod tests {
         (icons_every_icon_the_app_uses_is_in_the_theme, crate::icons::tests::run_every_icon_the_app_uses_is_in_the_theme),
         (welcome_connect, crate::screens::welcome::tests::run),
         (welcome_relogin_flow, crate::screens::welcome::tests::run_relogin_flow),
+        (welcome_api_key_and_advanced, crate::screens::welcome::tests::run_api_key_and_advanced),
         (home_renders_synced_library_and_recently_added_item, crate::screens::home::tests::run_renders_synced_library_and_recently_added_item),
         (home_finished_books_dont_show_under_continue_listening, crate::screens::home::tests::run_finished_books_dont_show_under_continue_listening),
         (home_shelf_headers_invoke_on_open_shelf, crate::screens::home::tests::run_shelf_headers_invoke_on_open_shelf),

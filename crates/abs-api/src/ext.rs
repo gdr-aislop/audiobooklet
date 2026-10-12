@@ -47,6 +47,19 @@ pub struct LoginResult {
     pub refresh_token: Option<String>,
 }
 
+/// The user an API key belongs to; see [`Client::whoami`].
+#[derive(Debug, Clone, PartialEq)]
+pub struct Whoami {
+    pub user_id: String,
+    pub username: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct WhoamiBody {
+    id: String,
+    username: String,
+}
+
 #[derive(Debug, thiserror::Error)]
 pub enum LoginError {
     #[error("invalid username or password")]
@@ -55,6 +68,19 @@ pub enum LoginError {
     SessionExpired,
     #[error("couldn't verify this server's TLS certificate: {0}")]
     Tls(reqwest::Error),
+    /// The server wants a client certificate or doesn't accept the one given: a TLS alert from the
+    /// peer, or (behind nginx) an HTTP 400 saying so. Told apart from [`LoginError::Tls`], which
+    /// is about the *server's* certificate.
+    #[error("the server needs a client certificate, or doesn't accept the one given")]
+    ClientCertificate(Option<reqwest::Error>),
+    /// HTTP 403 or 407: not an answer Audiobookshelf itself gives to a login (it says 401), so a
+    /// proxy or firewall in front of it is refusing the request.
+    #[error("the server refused the request (HTTP {0})")]
+    Blocked(u16),
+    /// Any other unsuccessful HTTP status (404 for a wrong address or path, 5xx for a server
+    /// problem, …).
+    #[error("the server answered HTTP {0}")]
+    HttpStatus(u16),
     #[error("couldn't connect to this server: {0}")]
     Connect(reqwest::Error),
     #[error("timed out waiting for this server to respond: {0}")]
@@ -77,9 +103,14 @@ impl LoginError {
     pub fn details(&self) -> Option<String> {
         let err: &(dyn std::error::Error + 'static) = match self {
             LoginError::Tls(e) | LoginError::Connect(e) | LoginError::Timeout(e) | LoginError::Network(e) => e,
-            LoginError::InvalidCredentials | LoginError::SessionExpired | LoginError::NoAnswer | LoginError::UnexpectedResponse(_) => {
-                return None
-            }
+            LoginError::ClientCertificate(Some(e)) => e,
+            LoginError::ClientCertificate(None)
+            | LoginError::Blocked(_)
+            | LoginError::HttpStatus(_)
+            | LoginError::InvalidCredentials
+            | LoginError::SessionExpired
+            | LoginError::NoAnswer
+            | LoginError::UnexpectedResponse(_) => return None,
         };
         Some(error_chain(err))
     }
@@ -97,6 +128,9 @@ impl LoginError {
             LoginError::InvalidCredentials
             | LoginError::SessionExpired
             | LoginError::Tls(_)
+            | LoginError::ClientCertificate(_)
+            | LoginError::Blocked(_)
+            | LoginError::HttpStatus(_)
             | LoginError::Connect(_)
             | LoginError::UnexpectedResponse(_) => false,
         }
@@ -107,6 +141,9 @@ impl LoginError {
 fn classify_transport_error(err: reqwest::Error) -> LoginError {
     if err.is_timeout() {
         return LoginError::Timeout(err);
+    }
+    if is_client_certificate_error(&err) {
+        return LoginError::ClientCertificate(Some(err));
     }
     if is_tls_error(&err) {
         return LoginError::Tls(err);
@@ -124,6 +161,59 @@ fn classify_transport_error(err: reqwest::Error) -> LoginError {
 /// keeps this working across whatever backend or version actually surfaces the error, at the cost
 /// of being best-effort — a false negative just falls through to `Connect`/`Network`, never wrong
 /// in the dangerous direction (it never *hides* a real TLS error as a credentials problem).
+/// TLS alerts a *server* sends when it wants a client certificate or won't take ours (OpenSSL
+/// words them `tlsv13 alert certificate required`, `tlsv1 alert unknown ca`, …). Matched on the
+/// "alert" wording on purpose: a failure to verify the server's own certificate says
+/// "certificate verify failed … certificate has expired", which must stay a plain TLS error.
+const CLIENT_CERTIFICATE_ALERTS: [&str; 8] = [
+    "alert certificate required",
+    "alert unknown ca",
+    "alert bad certificate",
+    "alert certificate unknown",
+    "alert certificate expired",
+    "alert certificate revoked",
+    "alert unsupported certificate",
+    "alert access denied",
+];
+
+/// Whether the error chain's text (see [`error_chain`]) is a peer's rejection of the client
+/// certificate. Pure on the text, so it is testable without a socket.
+fn is_client_certificate_text(text: &str) -> bool {
+    let text = text.to_lowercase();
+    CLIENT_CERTIFICATE_ALERTS.iter().any(|alert| text.contains(alert))
+}
+
+fn is_client_certificate_error(err: &(dyn std::error::Error + 'static)) -> bool {
+    is_client_certificate_text(&error_chain(err))
+}
+
+/// Whether an HTTP error body is a proxy complaining about a missing client certificate (nginx:
+/// "400 Bad Request — No required SSL certificate was sent").
+fn is_client_certificate_body(body: &str) -> bool {
+    let body = body.to_lowercase();
+    body.contains("ssl certificate") || body.contains("client certificate")
+}
+
+/// The most specific [`LoginError`] for an unsuccessful (and not 401) HTTP answer to a login,
+/// refresh or `/api/me` call. Reads the start of the body for a 400, the status nginx uses for a
+/// missing client certificate.
+async fn status_error(response: reqwest::Response) -> LoginError {
+    let status = response.status();
+    if status == reqwest::StatusCode::FORBIDDEN || status == reqwest::StatusCode::PROXY_AUTHENTICATION_REQUIRED {
+        return LoginError::Blocked(status.as_u16());
+    }
+    if status == reqwest::StatusCode::BAD_REQUEST {
+        let mut response = response;
+        if let Ok(Some(chunk)) = response.chunk().await {
+            let start = &chunk[..chunk.len().min(512)];
+            if is_client_certificate_body(&String::from_utf8_lossy(start)) {
+                return LoginError::ClientCertificate(None);
+            }
+        }
+    }
+    LoginError::HttpStatus(status.as_u16())
+}
+
 fn is_tls_error(err: &(dyn std::error::Error + 'static)) -> bool {
     const MARKERS: [&str; 6] =
         ["certificate", "self signed", "self-signed", "ssl", "tls", "handshake"];
@@ -1049,10 +1139,7 @@ impl Client {
             return Err(LoginError::InvalidCredentials);
         }
         if !response.status().is_success() {
-            return Err(LoginError::UnexpectedResponse(format!(
-                "login returned HTTP {}",
-                response.status()
-            )));
+            return Err(status_error(response).await);
         }
 
         let body: LoginResponseBody = response.json().await.map_err(classify_transport_error)?;
@@ -1069,6 +1156,24 @@ impl Client {
             access_token,
             refresh_token: body.user.refresh_token,
         })
+    }
+
+    /// Who this client's token belongs to (`GET /api/me`), for signing in with an API key: a key
+    /// is a bearer token with no username attached, so the account row is named after what the
+    /// server says. 401 means the token isn't accepted.
+    pub async fn whoami(&self) -> Result<Whoami, LoginError> {
+        let response = self.client().get(format!("{}/api/me", self.baseurl())).send().await.map_err(classify_transport_error)?;
+        if response.status() == reqwest::StatusCode::UNAUTHORIZED {
+            return Err(LoginError::InvalidCredentials);
+        }
+        if !response.status().is_success() {
+            return Err(status_error(response).await);
+        }
+        let body: WhoamiBody = response
+            .json()
+            .await
+            .map_err(|err| if err.is_decode() { LoginError::UnexpectedResponse("GET /api/me didn't answer with a user".into()) } else { classify_transport_error(err) })?;
+        Ok(Whoami { user_id: body.id, username: body.username })
     }
 
     /// Exchange a refresh token for a fresh token pair. Hand-written (no auth endpoints are in the
@@ -1109,10 +1214,7 @@ impl Client {
             return Err(LoginError::SessionExpired);
         }
         if !response.status().is_success() {
-            return Err(LoginError::UnexpectedResponse(format!(
-                "token refresh returned HTTP {}",
-                response.status()
-            )));
+            return Err(status_error(response).await);
         }
 
         let body: LoginResponseBody = response.json().await.map_err(classify_transport_error)?;
@@ -1380,18 +1482,88 @@ mod tests {
         assert!(matches!(err, LoginError::InvalidCredentials));
     }
 
+    /// What a login's unsuccessful HTTP answers become: a proxy's 403/407 is "blocked", nginx's
+    /// 400 about a missing client certificate is a client-certificate problem, everything else
+    /// is its status (a wrong path is 404, a server problem 5xx).
     #[tokio::test]
-    async fn server_error_surfaces_as_unexpected_response() {
+    async fn unsuccessful_login_statuses_are_told_apart() {
+        async fn login_answering(status: u16, body: &str) -> LoginError {
+            let server = MockServer::start().await;
+            Mock::given(method("POST"))
+                .and(path("/login"))
+                .respond_with(ResponseTemplate::new(status).set_body_string(body))
+                .mount(&server)
+                .await;
+            Client::new(&server.uri()).login("jane", "hunter2").await.unwrap_err()
+        }
+
+        assert!(matches!(login_answering(500, "").await, LoginError::HttpStatus(500)));
+        assert!(matches!(login_answering(404, "<html>Not found</html>").await, LoginError::HttpStatus(404)));
+        assert!(matches!(login_answering(403, "blocked by the proxy").await, LoginError::Blocked(403)));
+        assert!(matches!(login_answering(407, "").await, LoginError::Blocked(407)));
+        assert!(matches!(login_answering(400, "plain old bad request").await, LoginError::HttpStatus(400)));
+        let nginx = "<html><head><title>400 No required SSL certificate was sent</title></head></html>";
+        assert!(matches!(login_answering(400, nginx).await, LoginError::ClientCertificate(None)));
+    }
+
+    #[tokio::test]
+    async fn refresh_and_whoami_classify_statuses_the_same_way() {
         let server = MockServer::start().await;
-        Mock::given(method("POST"))
-            .and(path("/login"))
-            .respond_with(ResponseTemplate::new(500))
+        Mock::given(method("POST")).and(path("/auth/refresh")).respond_with(ResponseTemplate::new(403)).mount(&server).await;
+        Mock::given(method("GET")).and(path("/api/me")).respond_with(ResponseTemplate::new(502)).mount(&server).await;
+        let client = Client::new(&server.uri());
+        assert!(matches!(client.refresh("r").await.unwrap_err(), LoginError::Blocked(403)));
+        assert!(matches!(client.whoami().await.unwrap_err(), LoginError::HttpStatus(502)));
+    }
+
+    #[tokio::test]
+    async fn whoami_names_the_user_a_token_belongs_to() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api/me"))
+            .and(header("authorization", "Bearer an-api-key"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "id": "user-9", "username": "jane", "type": "user", "mediaProgress": []
+            })))
             .mount(&server)
             .await;
+        Mock::given(method("GET")).and(path("/api/me")).respond_with(ResponseTemplate::new(401)).mount(&server).await;
 
-        let client = Client::new(&server.uri());
-        let err = client.login("jane", "hunter2").await.unwrap_err();
-        assert!(matches!(err, LoginError::UnexpectedResponse(_)));
+        let accepted = Client::with_bearer_token(&server.uri(), "an-api-key").unwrap();
+        assert_eq!(accepted.whoami().await.unwrap(), Whoami { user_id: "user-9".into(), username: "jane".into() });
+        let rejected = Client::with_bearer_token(&server.uri(), "revoked").unwrap();
+        assert!(matches!(rejected.whoami().await.unwrap_err(), LoginError::InvalidCredentials));
+    }
+
+    #[tokio::test]
+    async fn whoami_on_something_that_is_not_a_user_is_an_unexpected_response() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET")).and(path("/api/me")).respond_with(ResponseTemplate::new(200).set_body_string("<html>hello</html>")).mount(&server).await;
+        let err = Client::new(&server.uri()).whoami().await.unwrap_err();
+        assert!(matches!(err, LoginError::UnexpectedResponse(_)), "{err:?}");
+    }
+
+    /// The peer's alerts about the client certificate are told apart from trouble with the
+    /// server's own certificate, which uses different words.
+    #[test]
+    fn client_certificate_alerts_are_not_server_certificate_failures() {
+        for text in [
+            "error sending request → SSL error: tlsv13 alert certificate required",
+            "tlsv1 alert unknown ca",
+            "sslv3 alert bad certificate",
+            "TLSV1 ALERT ACCESS DENIED",
+        ] {
+            assert!(is_client_certificate_text(text), "{text}");
+        }
+        for text in [
+            "certificate verify failed: self-signed certificate",
+            "certificate verify failed: certificate has expired",
+            "certificate verify failed: unable to get local issuer certificate",
+            "hostname mismatch",
+            "connection reset by peer",
+        ] {
+            assert!(!is_client_certificate_text(text), "{text}");
+        }
     }
 
     #[tokio::test]

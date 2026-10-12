@@ -117,9 +117,66 @@ covered by its automated scenarios. The log showed no new warnings.
 Pre-existing, not fixed here:
 - Item Detail's download button shows ↓ for a book that is already downloaded, until a download
   event for it arrives (the chapter rows show the checkmarks).
-- After a direct shell-to-shell rebuild (switching servers, adding one, a Settings action on a
-  server that isn't active), MPRIS fails to register ("An object is already exported"): the new
-  shell is built before the old one is released.
+
+### Switching servers while a book plays — fixes
+
+After a direct shell-to-shell rebuild (switching servers, adding one, a Settings action on a
+server that isn't active), MPRIS failed to register ("An object is already exported"): the new
+shell was built before the old one was released, and the old one then released the name, leaving
+no MPRIS service until a restart (every second rebuild failed). **Fixed**, with the related
+problems found in the same review:
+- the old shell is retired (position saved, MPRIS released) before the new one is built; Add Server
+  retires the parked shell as soon as the login succeeds, not when the Welcome screen is finalized;
+- a retired player ignores a Play tap on its still-visible widgets, and no longer keeps the
+  retired shell alive through its callbacks;
+- a retiring player clears the "loaded item" record only if it is still its own;
+- the playback settings are re-read from the database on every rebuild (a stale startup copy was
+  written back by the next settings edit, reverting earlier changes);
+- a failed second MPRIS object registration no longer leaves the first one exported;
+- "Switch to this server" is disabled while the switch runs.
+Covered by `run_a_retired_player_goes_silent_and_stays_that_way`, the `sync_coordinator` loaded-item
+test and the `#[ignore]` bus test `a_second_registration_waits_for_the_first_handle_to_drop` (run
+`dbus-run-session -- cargo test -p abs-player -- --ignored mpris --test-threads=1`). Not yet checked
+by hand on a desktop: repeat MP-17 and confirm `playerctl status` follows the new server's book.
+
+### Connection options pass — 2026-10-12
+
+Custom headers, client certificate, self-signed certificate / "Disable SSL verification", local
+network address, API keys and their combinations, run against real sockets: `fake_abs.py`
+(`crates/abs-core/tests/support/`) plays a server behind a self-signed certificate, mutual TLS
+and/or a shared-secret header gate. Rerun with
+`cargo test -p abs-core --test connection_options -- --ignored --test-threads=4` (API calls,
+login, API-key sign-in, token refresh, track download) and
+`cargo test -p abs-player --test streaming_options -- --ignored --test-threads=1` (GStreamer
+playback). They need `python3` and `openssl`. Only the app's logic and HTTP/TLS layers were
+exercised, not the GTK screens.
+
+**Works:**
+- Each option alone, on login, API calls, token refresh and track downloads: header gate (header
+  on every request, user agent included), self-signed server with verification off, mutual TLS
+  with the right PKCS#12 bundle, and all three together.
+- A local network address: used when something listens there, the public URL otherwise, and the
+  server's other options apply to it too (self-signed + client certificate + header over the
+  local address). Login always goes to the public URL.
+- Without the right options the failures are clean and nothing is stored: no request gets past
+  a refused handshake, and a failed login adds no server row.
+- A client certificate file that disappears: the running session keeps its cached client; a new
+  session says "couldn't load the client certificate".
+- A stored token with no refresh token (an API key pasted in as the token) works as-is, with no
+  refresh attempts.
+- Streaming playback: plain HTTP, self-signed with verification off, header gate, and both.
+
+**Found:**
+1. **Custom headers never reached streaming playback** (fixed): `connect_source_setup` set a
+   `http-headers` property that `souphttpsrc` doesn't have (it is `extra-headers`) and its
+   `has_property` guard turned that into a silent no-op. A header-protected server answered 403 to
+   every stream. A unit test now pins the property names.
+
+Afterwards, from these findings (all fixed): the login screen got an Advanced section (allow an
+untrusted certificate, custom headers, client certificate) that applies to the sign-in and is
+saved on the new server; failures are told apart (untrusted server certificate, client certificate
+wanted or refused, a proxy's 403/407, 404, 5xx, a client certificate bundle that can't be opened)
+and say what to do; and the "API Key" toggle signs in with an API key.
 
 ## Manual pass results — 2026-09-25
 
@@ -191,8 +248,8 @@ injection beyond what's noted inline. These are gaps in *pass coverage*, not kno
 - [x] **WT-1 — First launch shows the login screen.** Fresh app data (or after signing out of
       every server, once Settings exists). Launch the app.
       *Expected:* "Connect to your Audiobookshelf server" screen with icon, description, a
-      Password / API Token toggle, Server URL + Username + Password fields, and a **Connect**
-      button. No back button anywhere.
+      Password / API Key toggle, Server URL + Username + Password fields, a collapsed
+      **Advanced** row, and a **Connect** button. No back button anywhere.
       *Note (2026-09-25):* caught a real window-shape bug here — see this doc's dated results
       note after §0. Fixed; re-verified at exactly 390×760 on a brand-new `$HOME`.
 
@@ -208,8 +265,8 @@ injection beyond what's noted inline. These are gaps in *pass coverage*, not kno
 - [x] **WT-4 — Password show/hide.** Tap the eye icon in the Password field.
       *Expected:* password text toggles between dots and plain text.
 
-- [x] **WT-5 — Mode switch swaps fields.** Tap "API Token".
-      *Expected:* Username and Password disappear entirely; a single "API Token" field appears.
+- [x] **WT-5 — Mode switch swaps fields.** Tap "API Key".
+      *Expected:* Username and Password disappear entirely; a single "API Key" field appears.
       Tapping "Password" brings them back.
 
 - [x] **WT-6 — Successful login.** Fill in valid credentials and tap Connect.
@@ -236,10 +293,22 @@ injection beyond what's noted inline. These are gaps in *pass coverage*, not kno
       *Expected:* everything you typed is still there, the form is re-enabled, and Connect works
       again without retyping.
 
-- [x] **WT-11 — API token mode is explicitly unsupported.** Switch to API Token, fill URL +
-      token, tap Connect.
-      *Expected:* a banner explaining that signing in with an API token isn't supported yet —
-      use username and password. No crash, no fake login.
+- [ ] **WT-11 — API key sign-in.** Create an API key in the server's settings (Settings → API
+      Keys), switch to API Key, fill URL + key, tap Connect.
+      *Expected:* signed in as the key's user (Settings shows that username); nothing asks for a
+      password. A revoked or mistyped key shows "API key not accepted" and tints the key field.
+      *Automated:* `welcome_api_key_and_advanced`, and abs-core's `connection_options` tests (keys
+      on plain, header-gated, self-signed and mutual-TLS servers). Not yet tried against a real
+      Audiobookshelf server: a key must be accepted as a bearer token by `/api/me` and in a
+      stream URL's `?token=`.
+
+- [ ] **WT-11b — Advanced options on the login screen.** Against a server behind a self-signed
+      certificate, a header-gating proxy or mutual TLS, try to connect without touching Advanced.
+      *Expected:* the banner names the problem ("Can't verify this server's certificate", "The
+      server refused the request", "This server wants a client certificate"), Advanced opens by
+      itself, and what you set there (Allow Untrusted Certificate, Custom Headers, Client
+      Certificate) makes the next attempt work and is kept on the server (Connection page).
+      *Automated:* `welcome_api_key_and_advanced`, `every_failure_says_what_to_do_about_it`.
 
 - [ ] **WT-12 — Login screen during no network.** With airplane mode on, connect with any
       credentials.
@@ -262,7 +331,7 @@ injection beyond what's noted inline. These are gaps in *pass coverage*, not kno
 - [ ] **WT-15 — Remember password is on by default and goes to the keyring.** Look at the form,
       then sign in without touching the switch.
       *Expected:* "Remember password" sits under the Password field, switched on, and is hidden in
-      API Token mode. After signing in, the keyring (Seahorse, or `secret-tool search xdg:schema
+      API Key mode. After signing in, the keyring (Seahorse, or `secret-tool search xdg:schema
       io.github.gdr_aislop.audiobooklet.Password`) holds one item for the account. If the keyring is
       locked, the system unlock prompt may appear. Signing in again with the switch off, or
       signing out, removes the item.
@@ -690,7 +759,10 @@ was and wasn't verified.
 - [ ] **MP-17 — Switching accounts retires the old player.** Play a book, then sign in as another
       account (or sign out). Press a media key or use the lock-screen card.
       *Expected:* the old book stops (its position saved, log: `retired the previous player`);
-      the media controls no longer start or move it, and the new shell has nothing playing.
+      the media controls no longer start or move it, and the new shell has nothing playing. After
+      a server switch the media controls (`playerctl`, media keys, lock-screen card) work again for
+      the new shell's next book, with no "already exported" warning in the log, however many
+      times you switch.
 
 - [ ] **MP-18 — Opening the player while a book loads.** On a slow connection, tap Play on a book
       detail screen.

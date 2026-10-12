@@ -228,14 +228,18 @@ pub fn build(
                 let window = window.clone();
                 let account_id = account.id.clone();
                 let toast_overlay = toast_overlay.clone();
-                move |_| {
+                move |button| {
                     let pool = pool.clone();
                     let paths = paths.clone();
                     let window = window.clone();
                     let account_id = account_id.clone();
                     let toast_overlay = toast_overlay.clone();
+                    // A second click while the shell is rebuilding would build another one.
+                    button.set_sensitive(false);
+                    let button = button.clone();
                     glib::spawn_future_local(async move {
                         if let Err(err) = abs_core::accounts::switch_active_account(&pool, &account_id).await {
+                            button.set_sensitive(true);
                             crate::error_reporting::report_background_error(&toast_overlay, &tr("Switching accounts"), err);
                             return;
                         }

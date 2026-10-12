@@ -240,9 +240,15 @@ impl GstBackend {
 /// Wires `playbin`'s `source-setup` signal: whatever HTTP source GStreamer creates for the next
 /// `load()` gets the connection's transport properties applied — but only the properties that
 /// source actually has, so a local `file://` source (no `user-agent`, no `ssl-strict`) is never
-/// touched. Client certificates are a documented limitation: souphttpsrc's mTLS support is a
-/// separate mechanism from these properties, and a server requiring it fails the request
-/// visibly rather than silently.
+/// touched.
+///
+/// Streaming can't present a client certificate: `souphttpsrc` takes one only through its
+/// `tls-interaction` property, a `GTlsInteraction` whose `request_certificate` supplies it, and
+/// gio-rs can't subclass `GTlsInteraction` yet (not in 0.22.10, the latest at the time of
+/// writing). Once it can, build the interaction from the server's PKCS#12 bundle
+/// (`gio::TlsCertificate::from_pkcs12`), carry the bundle in [`ConnectionProperties`] and set
+/// `tls-interaction` here; the mutual-TLS case in `tests/streaming_options.rs` then becomes a
+/// passing one. Until then a server that requires a certificate fails the request visibly.
 fn connect_source_setup(pipeline: &gst::Element, properties: std::sync::Arc<std::sync::Mutex<ConnectionProperties>>) {
     pipeline.connect("source-setup", false, move |values| {
         let source = values[1].get::<gst::Element>().expect("source-setup signal carries the source element");
@@ -256,12 +262,16 @@ fn connect_source_setup(pipeline: &gst::Element, properties: std::sync::Arc<std:
                 source.set_property("user-agent", user_agent.as_str());
             }
         }
-        if !properties.extra_headers.is_empty() && source.has_property("http-headers", Some(gst::Structure::static_type())) {
+        // `extra-headers` is souphttpsrc's property for this; an earlier version asked for a
+        // non-existent `http-headers`, which the `has_property` guard turned into a silent no-op,
+        // so a header-protected server never saw its header on a stream (found by
+        // `abs-player/tests/streaming_options.rs`).
+        if !properties.extra_headers.is_empty() && source.has_property("extra-headers", Some(gst::Structure::static_type())) {
             let mut headers = gst::Structure::new_empty("extra-headers");
             for (name, value) in &properties.extra_headers {
                 headers.set(name.as_str(), value.as_str());
             }
-            source.set_property("http-headers", headers);
+            source.set_property("extra-headers", headers);
         }
         None
     });
@@ -487,6 +497,22 @@ mod tests {
         }
         writer.finalize().unwrap();
         format!("file://{}", path.display())
+    }
+
+    /// `connect_source_setup` guards each property with `has_property`, so a misspelt name is a
+    /// silent no-op (custom headers never reached a stream that way once). Pins the names against
+    /// the real element. Skipped where the HTTP source plugin isn't installed.
+    #[test]
+    fn souphttpsrc_has_every_property_the_source_setup_sets() {
+        init().expect("gstreamer should initialize in this environment");
+        let Ok(source) = gst::ElementFactory::make("souphttpsrc").build() else { return };
+        for (name, ty) in [
+            ("ssl-strict", glib::Type::BOOL),
+            ("user-agent", glib::Type::STRING),
+            ("extra-headers", gst::Structure::static_type()),
+        ] {
+            assert!(source.has_property(name, Some(ty)), "souphttpsrc has no `{name}` property of the expected type");
+        }
     }
 
     fn backend() -> GstBackend {

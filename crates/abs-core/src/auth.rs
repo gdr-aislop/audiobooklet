@@ -598,7 +598,7 @@ impl Session {
 
         let client = target
             .api_client(&access_token)
-            .map_err(|err| crate::error::CoreError::UnexpectedResponse(err.to_string()))?;
+            .map_err(|err| crate::error::CoreError::ConnectionSetup(err.to_string()))?;
         *cache = Some(CachedClient { target, access_token, client: client.clone() });
         Ok(client)
     }

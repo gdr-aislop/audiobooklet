@@ -187,6 +187,15 @@ pub(crate) fn set_loaded_item(loaded: Option<(&str, &str, &str)>) {
     *LOADED_ITEM.lock().unwrap_or_else(|poisoned| poisoned.into_inner()) = loaded;
 }
 
+/// Clears the loaded item, but only if it is still `(server_id, account_id, item_id)` — a
+/// retiring player must not wipe what its successor has since published.
+pub(crate) fn clear_loaded_item_if(server_id: &str, account_id: &str, item_id: &str) {
+    let mut loaded = LOADED_ITEM.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    if loaded.as_ref().is_some_and(|(server, account, item)| server == server_id && account == account_id && item == item_id) {
+        *loaded = None;
+    }
+}
+
 /// The player's loaded item for this server and account, if any.
 pub(crate) fn loaded_item(server_id: &str, account_id: &str) -> Option<String> {
     let loaded = LOADED_ITEM.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
@@ -270,6 +279,11 @@ mod tests {
         set_loaded_item(Some(("server-9", "account-9", "item-9")));
         assert_eq!(loaded_item("server-9", "account-9").as_deref(), Some("item-9"));
         assert_eq!(loaded_item("server-9", "account-other"), None);
+        // A retiring player clears only its own book, never a successor's.
+        clear_loaded_item_if("server-9", "account-9", "item-other");
+        assert_eq!(loaded_item("server-9", "account-9").as_deref(), Some("item-9"));
+        clear_loaded_item_if("server-9", "account-9", "item-9");
+        assert_eq!(loaded_item("server-9", "account-9"), None);
         set_loaded_item(None);
         assert_eq!(loaded_item("server-9", "account-9"), None);
     }

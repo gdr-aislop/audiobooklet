@@ -177,7 +177,7 @@ pub fn register(bus_name: &str, identity: &str, commands: Rc<dyn MprisCommands>)
         .build()
         .map_err(MprisError::RegistrationFailed)?;
 
-    let player_registration = connection
+    let player_registration = match connection
         .register_object(OBJECT_PATH, &player_info)
         .method_call({
             let commands = commands.clone();
@@ -201,7 +201,17 @@ pub fn register(bus_name: &str, identity: &str, commands: Rc<dyn MprisCommands>)
             move |_conn, _sender, _path, _iface, property| player_property(property, &state.borrow())
         })
         .build()
-        .map_err(MprisError::RegistrationFailed)?;
+    {
+        Ok(registration) => registration,
+        Err(err) => {
+            // `RegistrationId` has no drop guard: leaving the first object exported would make
+            // every later `register` fail on it.
+            if let Err(unregister_err) = connection.unregister_object(media_player2_registration) {
+                tracing::warn!(err = %unregister_err, "couldn't roll back the first MPRIS object after the second failed");
+            }
+            return Err(MprisError::RegistrationFailed(err));
+        }
+    };
 
     // Owning the well-known name is best-effort: a failure here (e.g. the name is already taken
     // by another instance of this app) shouldn't tear down the object registrations above —
@@ -684,6 +694,21 @@ mod tests {
             position_micros: 0,
             rate: 1.0,
         });
+    }
+
+    /// A shell rebuild (switching servers) registers the new player while the old handle is
+    /// still alive: that must fail cleanly, leave nothing half-registered behind, and succeed
+    /// again once the old handle is dropped. Needs a real session bus — run like the test above, with
+    /// `--test-threads=1` (the tests share the process's one bus connection and object path).
+    #[test]
+    #[ignore]
+    fn a_second_registration_waits_for_the_first_handle_to_drop() {
+        let first = register("AbsPlayerHandoffTest", "AbsPlayerHandoffTest", Rc::new(FakeCommands::default())).expect("a session bus is reachable");
+        let second = register("AbsPlayerHandoffTest", "AbsPlayerHandoffTest", Rc::new(FakeCommands::default()));
+        assert!(matches!(second, Err(MprisError::RegistrationFailed(_))), "the object path is taken while the first handle lives");
+        drop(first);
+        let third = register("AbsPlayerHandoffTest", "AbsPlayerHandoffTest", Rc::new(FakeCommands::default()));
+        assert!(third.is_ok(), "the path is free again after the first handle drops: {:?}", third.err());
     }
 
     /// Does what a phone's media widget (Phosh, GNOME Shell) does: a `GDBusProxy` on the Player

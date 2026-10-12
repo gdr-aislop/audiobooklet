@@ -223,10 +223,11 @@ pub(crate) fn show_add_server(
     // (call-pause, reconnect sync, headphone-unplug pause) are exactly as continuous across the
     // detour as the widget itself. A successful connect, by contrast, rebuilds: the new account
     // is the active one and the old shell's session is stale, so `show_main` retains a fresh one.
-    let previous_main_window = std::cell::RefCell::new(take_main_window());
+    let previous_main_window = std::rc::Rc::new(std::cell::RefCell::new(take_main_window()));
     let on_cancel: std::rc::Rc<dyn Fn()> = match window.content() {
         Some(previous_root) => {
             let window = window.clone();
+            let previous_main_window = previous_main_window.clone();
             std::rc::Rc::new(move || {
                 if let Some(main_window) = previous_main_window.borrow_mut().take() {
                     retain_main_window(main_window);
@@ -248,7 +249,13 @@ pub(crate) fn show_add_server(
         pool,
         paths,
         None,
-        move |_added| show_main(&on_success_window, on_success_pool.clone(), on_success_paths.clone(), playback_settings),
+        move |_added| {
+            // The parked shell's session is stale now: retire it (saving its position, releasing
+            // its MPRIS registration) before the new shell is built, not whenever the Welcome
+            // screen happens to be finalized.
+            drop(previous_main_window.borrow_mut().take());
+            show_main(&on_success_window, on_success_pool.clone(), on_success_paths.clone(), playback_settings)
+        },
         Some(on_cancel),
     );
     crate::widgets::swap_content(window, &screen.root);
@@ -286,6 +293,9 @@ pub(crate) fn show_main_or_welcome_on(
             .expect("checking for an active account must not fail");
         match active {
             Some(_) => {
+                // Before the new shell exists, not after: its MPRIS registration would collide
+                // with the old shell's, which keeps the object path until it is retired.
+                release_main_window();
                 let main_window =
                     build_main_window(pool, paths, playback_settings, window_for_callback.clone())
                         .await;
@@ -312,6 +322,8 @@ pub(crate) fn show_main(
 ) {
     let window_for_content = window.clone();
     glib::spawn_future_local(async move {
+        // See `show_main_or_welcome_on`: the old shell must be retired before the new one registers MPRIS.
+        release_main_window();
         let main_window = build_main_window(pool, paths, playback_settings, window_for_content.clone()).await;
         crate::widgets::swap_content(&window_for_content, &main_window.root);
         retain_main_window(main_window);
@@ -337,6 +349,9 @@ async fn build_main_window(
         .await
         .expect("an active account's server must exist");
     let theme = abs_core::settings::load_theme(&pool).await.expect("load theme");
+    // The copy threaded through the callbacks dates from startup; settings saved since then live
+    // only in the database, and a stale copy would be written back by the next edit.
+    let playback_settings = abs_core::settings::load_playback_settings(&pool).await.unwrap_or(playback_settings);
     let session = abs_core::auth::Session::new(pool.clone(), &server, &account);
     session.set_keep_awake(std::sync::Arc::new(crate::keep_awake::GtkKeepAwake));
     session.set_password_store(crate::password_keyring::store());
