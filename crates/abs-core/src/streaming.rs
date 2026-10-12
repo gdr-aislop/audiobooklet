@@ -52,7 +52,7 @@ pub async fn resolve_stream_target(connection: &crate::connection::ConnectionTar
     })?;
 
     if info.audio_files.is_empty() {
-        return Err(CoreError::UnexpectedResponse(format!("item {item_id} has no audio files")));
+        return Err(CoreError::NoPlayableAudio(item_id.to_string()));
     }
 
     let mut tracks = Vec::with_capacity(info.audio_files.len());
@@ -160,6 +160,7 @@ pub async fn sync_progress_to_server_with_client(
         .await
         .map_err(|e| match e {
             abs_api::LibraryItemsError::Unauthorized(_) => CoreError::Auth,
+            abs_api::LibraryItemsError::NotFound(what) => CoreError::NotOnServer(what),
             other => CoreError::UnexpectedResponse(other.details()),
         })
 }
@@ -280,7 +281,11 @@ mod tests {
             .await;
 
         let result = resolve_stream_target(&ConnectionTarget::direct(&mock_server.uri()), "test-token", "item-1").await;
-        assert!(result.is_err(), "an item with no audio files at all can't be played");
+        assert!(
+            matches!(&result, Err(CoreError::NoPlayableAudio(id)) if id == "item-1"),
+            "an item with no audio files at all can't be played, and says so: {:?}",
+            result.err()
+        );
     }
 
     #[tokio::test]

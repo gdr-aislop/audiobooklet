@@ -150,7 +150,9 @@ pub fn build(
         scroller: scroller.clone(),
         clear_all_button: clear_all_button.clone(),
         download_manager: download_manager.clone(),
-        downloading: Rc::new(RefCell::new(HashSet::new())),
+        // Downloads already running when this screen is built (started before a switch to another
+        // server and back) show as in progress, not only once their next state change arrives.
+        downloading: Rc::new(RefCell::new(download_manager.in_flight_items(&server.id).into_iter().collect())),
         track_bytes: Rc::new(RefCell::new(HashMap::new())),
         speeds: Rc::new(RefCell::new(HashMap::new())),
         live_rows: Rc::new(RefCell::new(HashMap::new())),

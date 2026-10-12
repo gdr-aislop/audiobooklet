@@ -214,6 +214,25 @@ impl AppPaths {
         self.covers_dir().join(server_id).join(format!("{item_id}.no-cover"))
     }
 
+    /// Delete every cached cover file of one item — the resized cover, the full-size original and
+    /// the "server has no cover" marker, whatever their extensions. Used when sync drops a book
+    /// the server no longer has. Best-effort: a missing directory or file is fine, other errors
+    /// are logged.
+    pub async fn purge_item_covers(&self, server_id: &str, item_id: &str) {
+        let dir = self.covers_dir().join(server_id);
+        let Ok(mut entries) = tokio::fs::read_dir(&dir).await else { return };
+        let prefix = format!("{item_id}.");
+        while let Ok(Some(entry)) = entries.next_entry().await {
+            if entry.file_name().to_string_lossy().starts_with(&prefix) {
+                if let Err(err) = tokio::fs::remove_file(entry.path()).await {
+                    if err.kind() != std::io::ErrorKind::NotFound {
+                        tracing::warn!(%err, item_id, "couldn't delete a cached cover");
+                    }
+                }
+            }
+        }
+    }
+
     /// Every directory this `AppPaths` might write into — the single list `ensure_dirs` (async,
     /// called once `setup()` has a Tokio runtime) and `main.rs`'s early synchronous creation of
     /// just the logging/crash-dump dirs (needed before a runtime exists) both draw from, so the

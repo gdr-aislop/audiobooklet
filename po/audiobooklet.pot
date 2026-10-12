@@ -111,6 +111,10 @@ msgid "couldn't load the server's connection settings: {error}"
 msgstr ""
 
 #: app/src/downloads.rs
+msgid "this item has no audio to download"
+msgstr ""
+
+#: app/src/downloads.rs
 msgid "the server reported no audio files for this item"
 msgstr ""
 
@@ -425,6 +429,14 @@ msgstr ""
 msgid "This server doesn't have any libraries yet."
 msgstr ""
 
+#: app/src/screens/home.rs
+msgid "Offline mode is on"
+msgstr ""
+
+#: app/src/screens/home.rs
+msgid "Turn it off to load this server's libraries."
+msgstr ""
+
 #: app/src/screens/home.rs app/src/screens/main_window.rs
 msgid "Home"
 msgstr ""
@@ -479,10 +491,9 @@ msgstr ""
 msgid "Unknown author"
 msgstr ""
 
-#. TRANSLATORS: A book's subtitle on a shelf card. {author} is the author's name; {hours} is the total length in hours with one decimal (e.g. "11.5"), followed by an "h" for hours.
-#. TRANSLATORS: Subtitle of a book: {author} and then its length in hours with one decimal, e.g. "Andy Weir · 16.1h".
+#. TRANSLATORS: A book's subtitle on a card or in a list. {author} is the author's name; {duration} its length, e.g. "11.5h" or "45m".
 #: app/src/screens/home.rs app/src/screens/library.rs
-msgid "{author} · {hours}h"
+msgid "{author} · {duration}"
 msgstr ""
 
 #. TRANSLATORS: kind of an Audiobookshelf library, shown under its name on Home. Lowercase in English.
@@ -491,10 +502,9 @@ msgctxt "library kind"
 msgid "book"
 msgstr ""
 
-#. TRANSLATORS: kind of an Audiobookshelf library, shown under its name on Home. Lowercase in English.
+#. TRANSLATORS: shown under a podcast library's name on Home; the app can't play podcasts, so their shows aren't listed anywhere.
 #: app/src/screens/home.rs
-msgctxt "library kind"
-msgid "podcast"
+msgid "Podcasts aren't supported yet"
 msgstr ""
 
 #: app/src/screens/item_detail.rs
@@ -697,7 +707,19 @@ msgid "List view"
 msgstr ""
 
 #: app/src/screens/library.rs
+msgid "Download books to listen to them offline."
+msgstr ""
+
+#: app/src/screens/library.rs
 msgid "No downloaded items"
+msgstr ""
+
+#: app/src/screens/library.rs
+msgid "No matches"
+msgstr ""
+
+#: app/src/screens/library.rs
+msgid "Try a different search or filter."
 msgstr ""
 
 #: app/src/screens/library.rs
@@ -871,6 +893,15 @@ msgid "Turn off offline mode to stream it."
 msgstr ""
 
 #: app/src/screens/player.rs
+msgid "Nothing to play here"
+msgstr ""
+
+#: app/src/screens/player.rs
+msgid ""
+"This item has no audio the app can play, such as a podcast or an e-book."
+msgstr ""
+
+#: app/src/screens/player.rs
 msgid "No audio engine could be started on this device."
 msgstr ""
 
@@ -908,6 +939,10 @@ msgstr ""
 
 #: app/src/screens/player.rs
 msgid "Not downloaded"
+msgstr ""
+
+#: app/src/screens/player.rs
+msgid "No audio"
 msgstr ""
 
 #: app/src/screens/player.rs
@@ -963,6 +998,11 @@ msgstr ""
 
 #: app/src/screens/settings.rs
 msgid "Signing out"
+msgstr ""
+
+#. TRANSLATORS: Dialog heading. {server} is the address of the server being removed, {username} the account signed in on it (one server can be listed once per account).
+#: app/src/screens/settings.rs
+msgid "Remove {server} ({username})?"
 msgstr ""
 
 #. TRANSLATORS: Dialog heading. {server} is the address of the server being removed.
@@ -1182,6 +1222,10 @@ msgstr ""
 msgid "Saving playback settings"
 msgstr ""
 
+#: app/src/screens/settings.rs app/src/screens/welcome.rs
+msgid "Connect"
+msgstr ""
+
 #: app/src/screens/welcome.rs
 msgid "Connect to your Audiobookshelf server"
 msgstr ""
@@ -1213,10 +1257,6 @@ msgstr ""
 #: app/src/screens/welcome.rs
 msgid ""
 "Signs you in again if the server ends the session. Kept in your keyring."
-msgstr ""
-
-#: app/src/screens/welcome.rs
-msgid "Connect"
 msgstr ""
 
 #: app/src/screens/welcome.rs

@@ -168,6 +168,11 @@ async fn setup(paths: abs_storage::AppPaths) -> AppState {
     tracing::info!(?playback_settings, "loaded playback settings");
     let theme = abs_core::settings::load_theme(&pool).await.expect("load theme");
 
+    // A database left with accounts but none active (signing out of the active account used to
+    // do that) starts on the most recently used one instead of the first-run screen.
+    if let Err(err) = abs_core::accounts::ensure_active(&pool).await {
+        tracing::warn!(%err, "couldn't pick an account to start with");
+    }
     let active_account = abs_storage::repo::accounts::get_active(&pool)
         .await
         .expect("check for an active account");
@@ -266,6 +271,7 @@ mod tests {
         (library_sorts_by_last_listened, crate::screens::library::tests::run_sorts_by_last_listened),
         (library_in_progress_filter_is_manually_toggleable, crate::screens::library::tests::run_in_progress_filter_is_manually_toggleable),
         (library_offline_mode_toggle_filters_to_downloaded_items, crate::screens::library::tests::run_offline_mode_toggle_filters_to_downloaded_items),
+        (library_empty_states_follow_offline_mode_and_search, crate::screens::library::tests::run_empty_states_follow_offline_mode_and_search),
         (library_shows_a_banner_when_sync_fails, crate::screens::library::tests::run_shows_a_banner_when_sync_fails),
         (library_shows_login_again_in_the_banner_when_a_resync_is_rejected, crate::screens::library::tests::run_shows_login_again_in_the_banner_when_a_resync_is_rejected),
         (library_shows_empty_state_when_the_server_has_no_libraries, crate::screens::library::tests::run_shows_empty_state_when_the_server_has_no_libraries),
@@ -350,6 +356,7 @@ mod tests {
         (settings_low_memory_mode_switch_persists_and_hints_at_burst_buffering, crate::screens::settings::tests::run_low_memory_mode_switch_persists_and_hints_at_burst_buffering),
         (settings_account_and_servers_rows_reflect_the_database, crate::screens::settings::tests::run_account_and_servers_rows_reflect_the_database),
         (settings_servers_menu_actions_rebuild_the_shell, crate::screens::settings::tests::run_servers_menu_actions_rebuild_the_shell),
+        (settings_signing_out_of_the_active_account_lands_on_another, crate::screens::settings::tests::run_signing_out_of_the_active_account_lands_on_another),
         (settings_add_server_row_opens_welcome_and_cancels_back, crate::screens::settings::tests::run_add_server_row_opens_welcome_and_cancels_back),
         (settings_failed_setting_saves_toast, crate::screens::settings::tests::run_failed_setting_saves_toast),
         (offline_mode_failed_persist_is_reported, crate::offline_mode::tests::run_failed_persist_is_reported),

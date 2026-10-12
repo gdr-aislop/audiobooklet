@@ -910,6 +910,7 @@ pub(crate) fn friendly_message(kind: abs_player::PlaybackErrorKind) -> FriendlyM
         Unreachable => (tr_noop("Can't reach your server"), tr_noop("This book can't start until it's back. Check your connection and try again."), Some(tr_noop("Retry"))),
         Seek => (tr_noop("Couldn't get to that position"), tr_noop("Try again, or try another position."), Some(tr_noop("Retry"))),
         Offline => (tr_noop("This part isn't downloaded"), tr_noop("Turn off offline mode to stream it."), None),
+        NoAudio => (tr_noop("Nothing to play here"), tr_noop("This item has no audio the app can play, such as a podcast or an e-book."), None),
         Unavailable => (tr_noop("Playback isn't available"), tr_noop("No audio engine could be started on this device."), None),
         Other => (tr_noop("Playback stopped unexpectedly"), tr_noop("Try again."), Some(tr_noop("Retry"))),
     };
@@ -939,6 +940,7 @@ pub(crate) fn short_message(kind: abs_player::PlaybackErrorKind) -> &'static str
         Unreachable => tr_noop("Can't reach server"),
         Seek => tr_noop("Couldn't seek"),
         Offline => tr_noop("Not downloaded"),
+        NoAudio => tr_noop("No audio"),
         Unavailable => tr_noop("Playback unavailable"),
         Other => tr_noop("Playback stopped"),
     }

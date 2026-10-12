@@ -185,6 +185,9 @@ struct RawLibraryItem {
     id: Option<String>,
     #[serde(rename = "addedAt")]
     added_at: Option<i64>,
+    /// `"book"` or `"podcast"`.
+    #[serde(rename = "mediaType")]
+    media_type: Option<String>,
     media: Option<RawMedia>,
 }
 
@@ -192,6 +195,24 @@ struct RawLibraryItem {
 struct RawMedia {
     duration: Option<f64>,
     metadata: Option<RawMetadata>,
+    /// A book's audio file and track counts; both 0 for an e-book-only item. Podcasts have
+    /// neither (their audio is in episodes).
+    #[serde(rename = "numAudioFiles")]
+    num_audio_files: Option<i64>,
+    #[serde(rename = "numTracks")]
+    num_tracks: Option<i64>,
+}
+
+impl RawMedia {
+    /// Whether a book has audio to play. Missing counts (an older server, a trimmed response)
+    /// count as audio: hiding a playable book would be worse than listing one that isn't.
+    fn has_audio(&self) -> bool {
+        match (self.num_audio_files, self.num_tracks) {
+            (Some(files), _) => files > 0,
+            (None, Some(tracks)) => tracks > 0,
+            (None, None) => true,
+        }
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -458,6 +479,9 @@ pub struct LibraryItemSummary {
     pub added_at_ms: i64,
     pub series_name: Option<String>,
     pub genres: Vec<String>,
+    /// Whether the item has audio this app can play: false for podcasts (episodes aren't
+    /// supported) and e-book-only books.
+    pub has_audio: bool,
 }
 
 #[derive(Debug, Deserialize)]
@@ -713,6 +737,7 @@ impl Client {
             .filter_map(|item| {
                 let id = item.id?;
                 let media = item.media?;
+                let has_audio = item.media_type.as_deref() != Some("podcast") && media.has_audio();
                 let metadata = media.metadata?;
                 let title = metadata.title?;
                 Some(LibraryItemSummary {
@@ -725,6 +750,7 @@ impl Client {
                     added_at_ms: item.added_at.unwrap_or(0),
                     series_name: metadata.series_name,
                     genres: metadata.genres,
+                    has_audio,
                 })
             })
             .collect())
@@ -943,6 +969,9 @@ impl Client {
 
         if is_auth_status(response.status()) {
             return Err(LibraryItemsError::Unauthorized(response.status().as_u16()));
+        }
+        if response.status() == reqwest::StatusCode::NOT_FOUND {
+            return Err(LibraryItemsError::NotFound(format!("item {item_id}")));
         }
         if !response.status().is_success() {
             return Err(LibraryItemsError::UnexpectedResponse(format!(
@@ -1988,8 +2017,16 @@ mod tests {
             .mount(&server)
             .await;
 
+        Mock::given(method("PATCH"))
+            .and(path("/api/me/progress/item-2"))
+            .respond_with(ResponseTemplate::new(500))
+            .mount(&server)
+            .await;
+
         let client = Client::new(&server.uri());
         let err = client.update_media_progress("item-1", 42.5, 200.0, false).await.unwrap_err();
+        assert!(matches!(err, LibraryItemsError::NotFound(_)), "a 404 means the item is gone from the server: {err:?}");
+        let err = client.update_media_progress("item-2", 42.5, 200.0, false).await.unwrap_err();
         assert!(matches!(err, LibraryItemsError::UnexpectedResponse(_)));
     }
 

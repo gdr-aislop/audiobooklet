@@ -45,7 +45,7 @@ pub enum ReplacementKind {
 /// pasting) the same address slightly differently should get. Scheme or host spelling differences
 /// are genuinely different addresses and compare unequal.
 fn normalize_url(url: &str) -> &str {
-    url.trim().trim_end_matches('/')
+    servers::normalize_url(url)
 }
 
 /// Classifies a prospective re-login against the seeded session. Pure so the Welcome screen can
@@ -63,12 +63,22 @@ pub fn replacement_kind(seed: &ReloginSeed, url: &str, username: &str) -> Option
     }
 }
 
-/// Register a new server and log into it in one step — the flow behind the Welcome/Server login
-/// screen. On login failure, the newly-created server row is rolled back rather than left behind
-/// as an orphaned, credential-less entry. The new account becomes the active one: this is the
-/// only way to add an account today, so leaving it inactive would mean the app forgets you're
-/// signed in the next time it starts and shows the Welcome screen again. With `remember`, the
-/// password is kept in `passwords` so the session can sign in again on its own later.
+/// Log into a server from the Welcome/Add Server screen and make that account the active one —
+/// the only way to add an account, so leaving it inactive would mean the app forgets you're signed
+/// in the next time it starts. With `remember`, the password is kept in `passwords` so the session
+/// can sign in again on its own later.
+///
+/// A server already in the list is reused rather than added again (found in the 2026-10-12 pass:
+/// the same address could be added any number of times, each copy with its own cache and
+/// downloads):
+/// - an existing account for the same user on that server just gets the new tokens and becomes
+///   active, keeping its progress and downloads;
+/// - a server row left without an account (after signing out of it) gets the new account, and
+///   keeps its cached libraries and downloads (the next sync drops whatever this user can't see);
+/// - a different user on a server that already has an account gets a row of its own, because
+///   users may see different libraries and one cache can't hold both views.
+///
+/// The URL is stored normalized (see [`servers::normalize_url`]). A failed login stores nothing.
 pub async fn add_server_and_login(
     pool: &SqlitePool,
     url: &str,
@@ -77,30 +87,76 @@ pub async fn add_server_and_login(
     passwords: &dyn PasswordStore,
     remember: bool,
 ) -> Result<AddedAccount> {
-    let server_id = servers::add(pool, url).await?;
+    let url = servers::normalize_url(url);
+    let known = servers::find_by_url(pool, url).await?;
 
-    let client = abs_api::Client::with_default_options(url);
-    let login_result = match client.login(username, password).await {
-        Ok(result) => result,
-        Err(err) => {
-            // Don't leave a credential-less server behind after a failed login.
-            let _ = servers::remove(pool, &server_id).await;
-            return Err(err.into());
+    // A known server's saved connection settings (custom headers, TLS) apply to this login too.
+    let options = known
+        .first()
+        .map(|row| crate::connection::ConnectionTarget::resolve(row, None).options)
+        .unwrap_or_default();
+    let client = abs_api::Client::with_options(url, &options).map_err(|e| crate::error::CoreError::UnexpectedResponse(e.to_string()))?;
+    let login_result = client.login(username, password).await?;
+
+    let mut empty_row = None;
+    for server in &known {
+        let accounts_here = accounts::list_for_server(pool, &server.id).await?;
+        if let Some(account) = accounts_here.iter().find(|a| a.username == login_result.username) {
+            accounts::set_tokens(pool, &account.id, &login_result.access_token, login_result.refresh_token.as_deref()).await?;
+            accounts::set_active(pool, &account.id).await?;
+            crate::passwords::remember_after_login(passwords, &account.id, password, remember).await;
+            tracing::info!(account_id = %account.id, "signed in again to an account already on this device");
+            return Ok(AddedAccount { server_id: server.id.clone(), account_id: account.id.clone() });
         }
-    };
+        if accounts_here.is_empty() && empty_row.is_none() {
+            empty_row = Some(server.id.clone());
+        }
+    }
 
-    let account_id = accounts::add(
+    let (server_id, new_row) = match empty_row {
+        Some(server_id) => (server_id, false),
+        None => (servers::add(pool, url).await?, true),
+    };
+    let account_id = match accounts::add(
         pool,
         &server_id,
         &login_result.username,
         &login_result.access_token,
         login_result.refresh_token.as_deref(),
     )
-    .await?;
+    .await
+    {
+        Ok(account_id) => account_id,
+        Err(err) => {
+            // Don't leave a credential-less server behind.
+            if new_row {
+                let _ = servers::remove(pool, &server_id).await;
+            }
+            return Err(err.into());
+        }
+    };
     accounts::set_active(pool, &account_id).await?;
     crate::passwords::remember_after_login(passwords, &account_id, password, remember).await;
+    if !new_row {
+        tracing::info!(%server_id, "signed in to a server already on this device");
+    }
 
     Ok(AddedAccount { server_id, account_id })
+}
+
+/// Makes sure an account is active whenever any is left: when none is (the active one was
+/// signed out or its server removed), the most recently used remaining account becomes active.
+/// Returns the active account's id, or `None` when no account is left. Found in the 2026-10-12
+/// pass: signing out of the active account used to leave the app on the first-run login screen,
+/// with no way back to the other accounts.
+pub async fn ensure_active(pool: &SqlitePool) -> Result<Option<String>> {
+    if let Some(active) = accounts::get_active(pool).await? {
+        return Ok(Some(active.id));
+    }
+    let Some(next) = accounts::most_recent(pool).await? else { return Ok(None) };
+    accounts::set_active(pool, &next.id).await?;
+    tracing::info!(account_id = %next.id, "no account was active; switched to the one used most recently");
+    Ok(Some(next.id))
 }
 
 /// Sign in again after the previous session died (revoked/expired refresh token, removed user) or
@@ -216,22 +272,26 @@ pub async fn switch_active_account(pool: &SqlitePool, account_id: &str) -> Resul
 
 /// Sign out of one account. Its local progress rows cascade-delete with it (see the storage
 /// layer's migration); the server itself and any other accounts on it are untouched. Its
-/// remembered password is forgotten.
+/// remembered password is forgotten. If it was the active account, the most recently used
+/// remaining account becomes active ([`ensure_active`]).
 pub async fn sign_out(pool: &SqlitePool, account_id: &str, passwords: &dyn PasswordStore) -> Result<()> {
     accounts::remove(pool, account_id).await?;
     crate::passwords::forget(passwords, account_id).await;
+    ensure_active(pool).await?;
     Ok(())
 }
 
 /// Remove a server entirely — "Remove Server" from Settings' per-server menu. Cascades to every
 /// account, library, item, and download record for that server, and forgets those accounts'
-/// remembered passwords.
+/// remembered passwords. If it held the active account, the most recently used remaining account
+/// becomes active ([`ensure_active`]).
 pub async fn remove_server(pool: &SqlitePool, server_id: &str, passwords: &dyn PasswordStore) -> Result<()> {
     let removed = accounts::list_for_server(pool, server_id).await?;
     servers::remove(pool, server_id).await?;
     for account in removed {
         crate::passwords::forget(passwords, &account.id).await;
     }
+    ensure_active(pool).await?;
     Ok(())
 }
 
@@ -372,6 +432,101 @@ mod tests {
 
         assert!(servers::get(&pool, &added.server_id).await.is_err());
         assert!(accounts::get(&pool, &added.account_id).await.is_err());
+    }
+
+    /// A login mock that answers with whatever username was sent, like a real server.
+    async fn mount_echo_login(server: &MockServer) {
+        Mock::given(method("POST"))
+            .and(path("/login"))
+            .respond_with(|req: &wiremock::Request| {
+                let body: serde_json::Value = serde_json::from_slice(&req.body).unwrap();
+                let username = body["username"].as_str().unwrap().to_string();
+                ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                    "user": { "id": format!("id-{username}"), "username": username, "accessToken": format!("access-{username}-{}", std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()), "refreshToken": "refresh" }
+                }))
+            })
+            .mount(server)
+            .await;
+    }
+
+    /// Found in the 2026-10-12 pass: logging in again to a server already on the device made a
+    /// second copy of it, with its own (empty) cache and downloads.
+    #[tokio::test]
+    async fn logging_in_again_as_the_same_user_reuses_the_server_and_account() {
+        let server = MockServer::start().await;
+        mount_echo_login(&server).await;
+        let pool = pool().await;
+
+        let first = add_server_and_login(&pool, &server.uri(), "jane", "pw", &NoPasswords, false).await.unwrap();
+        seed_cache(&pool, &first.server_id, &first.account_id).await;
+        let token_before = accounts::get(&pool, &first.account_id).await.unwrap().token;
+        let again = add_server_and_login(&pool, &format!(" {}/ ", server.uri()), "jane", "pw", &NoPasswords, false).await.unwrap();
+
+        assert_eq!(again.server_id, first.server_id);
+        assert_eq!(again.account_id, first.account_id);
+        assert_eq!(servers::list(&pool).await.unwrap().len(), 1);
+        let account = accounts::get(&pool, &first.account_id).await.unwrap();
+        assert_ne!(account.token, token_before, "the new login's tokens are kept");
+        assert!(account.is_active);
+        assert!(progress::get(&pool, &first.account_id, &first.server_id, "item-1").await.unwrap().is_some(), "progress kept");
+        assert_eq!(servers::list(&pool).await.unwrap()[0].url, server.uri(), "stored without the spaces and slash");
+    }
+
+    #[tokio::test]
+    async fn a_server_left_without_an_account_is_reused_and_a_different_user_gets_a_row() {
+        let server = MockServer::start().await;
+        mount_echo_login(&server).await;
+        let pool = pool().await;
+
+        let bob = add_server_and_login(&pool, &server.uri(), "bob", "pw", &NoPasswords, false).await.unwrap();
+        seed_cache(&pool, &bob.server_id, &bob.account_id).await;
+        sign_out(&pool, &bob.account_id, &NoPasswords).await.unwrap();
+        let bob_again = add_server_and_login(&pool, &server.uri(), "bob", "pw", &NoPasswords, false).await.unwrap();
+        assert_eq!(bob_again.server_id, bob.server_id, "the empty row is reused");
+        assert_eq!(libraries::list_for_server(&pool, &bob.server_id).await.unwrap().len(), 1, "with its cache");
+
+        let anna = add_server_and_login(&pool, &server.uri(), "anna", "pw", &NoPasswords, false).await.unwrap();
+        assert_ne!(anna.server_id, bob.server_id, "another user's view of the server gets its own cache");
+        assert_eq!(servers::list(&pool).await.unwrap().len(), 2);
+    }
+
+    /// Found in the 2026-10-12 pass: signing out of the active account (or removing its server)
+    /// left no account active, and the app on the first-run screen with no way back.
+    #[tokio::test]
+    async fn signing_out_of_the_active_account_switches_to_the_one_used_before() {
+        let (a, b, c) = (MockServer::start().await, MockServer::start().await, MockServer::start().await);
+        for server in [&a, &b, &c] {
+            mount_echo_login(server).await;
+        }
+        let pool = pool().await;
+        let on_a = add_server_and_login(&pool, &a.uri(), "root", "pw", &NoPasswords, false).await.unwrap();
+        let on_b = add_server_and_login(&pool, &b.uri(), "bob", "pw", &NoPasswords, false).await.unwrap();
+        tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        let on_c = add_server_and_login(&pool, &c.uri(), "demo", "pw", &NoPasswords, false).await.unwrap();
+        tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        switch_active_account(&pool, &on_a.account_id).await.unwrap();
+
+        sign_out(&pool, &on_a.account_id, &NoPasswords).await.unwrap();
+        assert_eq!(accounts::get_active(&pool).await.unwrap().unwrap().id, on_c.account_id, "the one used most recently");
+
+        remove_server(&pool, &on_c.server_id, &NoPasswords).await.unwrap();
+        assert_eq!(accounts::get_active(&pool).await.unwrap().unwrap().id, on_b.account_id);
+
+        sign_out(&pool, &on_b.account_id, &NoPasswords).await.unwrap();
+        assert!(accounts::get_active(&pool).await.unwrap().is_none(), "nothing left: the first-run screen");
+    }
+
+    #[tokio::test]
+    async fn signing_out_of_an_inactive_account_leaves_the_active_one_alone() {
+        let (a, b) = (MockServer::start().await, MockServer::start().await);
+        mount_echo_login(&a).await;
+        mount_echo_login(&b).await;
+        let pool = pool().await;
+        let on_a = add_server_and_login(&pool, &a.uri(), "root", "pw", &NoPasswords, false).await.unwrap();
+        let on_b = add_server_and_login(&pool, &b.uri(), "bob", "pw", &NoPasswords, false).await.unwrap();
+
+        sign_out(&pool, &on_a.account_id, &NoPasswords).await.unwrap();
+        assert_eq!(accounts::get_active(&pool).await.unwrap().unwrap().id, on_b.account_id);
     }
 
     #[test]

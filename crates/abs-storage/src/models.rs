@@ -75,6 +75,8 @@ pub struct Library {
     pub icon: Option<String>,
     pub display_order: i64,
     pub synced_at: DateTime<Utc>,
+    /// The server no longer lists this library; it's kept only for downloaded books in it.
+    pub removed_on_server: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, FromRow)]

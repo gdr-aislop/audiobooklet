@@ -143,16 +143,18 @@ pub struct MainWindow {
     /// no NetworkManager on it) was reachable — reconnect-triggered progress sync is then simply
     /// unavailable, never a fatal error.
     _connectivity_watcher: Option<abs_player::connectivity_watch::NetworkManagerConnectivityWatcher>,
-    /// Kept alive for the app's whole lifetime, same reasoning as `_call_watcher` — dropping it
-    /// would lose every in-flight track's cancel flag and listener. Every screen that needs it
-    /// (Downloads, Settings, Item Detail, Player) is handed its own clone at build time; this
-    /// field itself is never read back (hence the allow), only retained.
+    /// This shell's handle on the app-wide download manager (`downloads::app_wide`), scoped to
+    /// its server. Every screen that needs it (Downloads, Settings, Item Detail, Player) is handed
+    /// its own clone at build time; this field itself is never read back (hence the allow).
     #[allow(dead_code)]
     pub download_manager: crate::downloads::DownloadManager,
     /// Retired when this shell is dropped (replaced by the next account's, or by the login
     /// screen) — see `PlayerController::retire`. Without it the old player kept playing, and kept
     /// answering the media keys, behind the new shell.
     controller: player::PlayerController,
+    /// Dropped with this shell: the download listeners its screens registered (through
+    /// `download_manager`, scoped to it) go with it, while the downloads themselves carry on.
+    _shell_alive: Rc<()>,
     #[cfg(test)]
     hooks: TestHooks,
 }
@@ -353,14 +355,20 @@ pub fn build(
     // bus (or no NetworkManager on it) must never be fatal — it just means metered-connection
     // detection is unavailable, and `UnknownNetworkMonitor` makes that read as "undeterminable"
     // rather than silently guessing "not metered".
-    let network_monitor: Box<dyn abs_player::network_watch::NetworkMonitor> = match abs_player::network_watch::NetworkManagerMonitor::new() {
-        Ok(monitor) => Box::new(monitor),
-        Err(err) => {
-            tracing::warn!(%err, "couldn't watch NetworkManager for metered-connection detection; Wi-Fi-only downloads will be unavailable");
-            Box::new(abs_player::network_watch::UnknownNetworkMonitor)
-        }
-    };
-    let download_manager = crate::downloads::DownloadManager::new(pool.clone(), paths.clone(), network_monitor, playback_settings.wifi_only_downloads);
+    // Shared by every shell, so a download keeps going across a server switch; this shell's
+    // handle hears only about its own server, and its listeners go with the shell.
+    let shell_alive = Rc::new(());
+    let download_manager = crate::downloads::app_wide(|| {
+        let network_monitor: Box<dyn abs_player::network_watch::NetworkMonitor> = match abs_player::network_watch::NetworkManagerMonitor::new() {
+            Ok(monitor) => Box::new(monitor),
+            Err(err) => {
+                tracing::warn!(%err, "couldn't watch NetworkManager for metered-connection detection; Wi-Fi-only downloads will be unavailable");
+                Box::new(abs_player::network_watch::UnknownNetworkMonitor)
+            }
+        };
+        crate::downloads::DownloadManager::new(pool.clone(), paths.clone(), network_monitor, playback_settings.wifi_only_downloads)
+    })
+    .scoped_to(&server.id, &shell_alive);
     // Shared between Home and Library only (per docs/design/ui-spec.md, "not a per-screen
     // setting") — see `crate::offline_mode::OfflineModeState`'s doc for why this must be a single
     // shared instance rather than each screen loading its own copy.
@@ -744,6 +752,7 @@ pub fn build(
     // Both shelves' badges follow downloads finishing or being cleared in this session.
     home_screen.follow_downloads(&download_manager);
     library_screen.follow_downloads(&download_manager);
+    home_screen.follow_player(&mini_bar.controller);
     home_screen.follow_low_memory_mode(&low_memory_mode);
     library_screen.follow_low_memory_mode(&low_memory_mode);
     stack.add_titled_with_icon(&home_screen.root, Some("home"), &tr("Home"), "go-home-symbolic");
@@ -892,6 +901,7 @@ pub fn build(
         _connectivity_watcher: connectivity_watcher,
         download_manager,
         controller: mini_bar.controller.clone(),
+        _shell_alive: shell_alive,
         #[cfg(test)]
         hooks: TestHooks {
             stack,

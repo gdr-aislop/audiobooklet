@@ -46,6 +46,19 @@ pub async fn list(pool: &SqlitePool) -> Result<Vec<Server>> {
     Ok(servers)
 }
 
+/// Servers whose address is `url` once both are normalized the way logins store them (trimmed,
+/// no trailing slash), oldest first.
+pub async fn find_by_url(pool: &SqlitePool, url: &str) -> Result<Vec<Server>> {
+    let wanted = normalize_url(url);
+    Ok(list(pool).await?.into_iter().filter(|server| normalize_url(&server.url) == wanted).collect())
+}
+
+/// A server address as typed, in the form it's compared and stored in: surrounding spaces and
+/// trailing slashes don't make a different server.
+pub fn normalize_url(url: &str) -> &str {
+    url.trim().trim_end_matches('/')
+}
+
 pub async fn remove(pool: &SqlitePool, id: &str) -> Result<()> {
     // ON DELETE CASCADE takes care of accounts/libraries/items/etc. for this server.
     let result = sqlx::query("DELETE FROM servers WHERE id = ?")
@@ -150,6 +163,17 @@ mod tests {
         let pool = connect_and_migrate(&path).await.unwrap();
         std::mem::forget(tmp);
         pool
+    }
+
+    #[tokio::test]
+    async fn find_by_url_ignores_spaces_and_trailing_slashes() {
+        let tmp = tempfile::tempdir().unwrap();
+        let pool = crate::db::connect_and_migrate(&tmp.path().join("db.sqlite3")).await.unwrap();
+        let a = add(&pool, "http://host:13378").await.unwrap();
+        add(&pool, "http://host:13379/").await.unwrap();
+        let found: Vec<String> = find_by_url(&pool, " http://host:13378/ ").await.unwrap().into_iter().map(|s| s.id).collect();
+        assert_eq!(found, [a]);
+        assert!(find_by_url(&pool, "https://host:13378").await.unwrap().is_empty(), "another scheme is another address");
     }
 
     #[tokio::test]

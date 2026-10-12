@@ -94,13 +94,26 @@ pub async fn set_active(pool: &SqlitePool, id: &str) -> Result<()> {
     sqlx::query("UPDATE accounts SET is_active = 0 WHERE is_active = 1")
         .execute(&mut *tx)
         .await?;
-    sqlx::query("UPDATE accounts SET is_active = 1 WHERE id = ?")
+    sqlx::query("UPDATE accounts SET is_active = 1, last_active_at = ? WHERE id = ?")
+        .bind(Utc::now().to_rfc3339())
         .bind(id)
         .execute(&mut *tx)
         .await?;
 
     tx.commit().await?;
     Ok(())
+}
+
+/// The account used most recently: the one last made active, or, among accounts never switched
+/// to since that was recorded, the newest. What to fall back to when the active account goes.
+pub async fn most_recent(pool: &SqlitePool) -> Result<Option<Account>> {
+    let account = sqlx::query_as(
+        "SELECT id, server_id, username, token, refresh_token, is_active, created_at
+         FROM accounts ORDER BY last_active_at IS NULL, last_active_at DESC, created_at DESC LIMIT 1",
+    )
+    .fetch_optional(pool)
+    .await?;
+    Ok(account)
 }
 
 /// Sign out: remove the account entirely (its progress rows cascade-delete with it — progress
@@ -223,6 +236,22 @@ mod tests {
         // The previously-active account must still be active — a failed switch shouldn't
         // silently deactivate everything.
         assert!(get(&pool, &a).await.unwrap().is_active);
+    }
+
+    #[tokio::test]
+    async fn most_recent_is_the_account_last_made_active() {
+        let (pool, server_id) = pool_with_server().await;
+        assert!(most_recent(&pool).await.unwrap().is_none());
+        let a = add(&pool, &server_id, "a", "tok-a", None).await.unwrap();
+        let b = add(&pool, &server_id, "b", "tok-b", None).await.unwrap();
+        assert_eq!(most_recent(&pool).await.unwrap().unwrap().id, b, "never activated: the newest");
+
+        set_active(&pool, &b).await.unwrap();
+        tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        set_active(&pool, &a).await.unwrap();
+        assert_eq!(most_recent(&pool).await.unwrap().unwrap().id, a);
+        remove(&pool, &a).await.unwrap();
+        assert_eq!(most_recent(&pool).await.unwrap().unwrap().id, b, "then the one used before it");
     }
 
     #[tokio::test]

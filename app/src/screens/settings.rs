@@ -156,7 +156,9 @@ pub fn build(
     let mut server_rows_hooks = Vec::new();
     for (server, accounts) in &servers_with_accounts {
         let is_active_server = accounts.iter().any(|account| account.is_active);
-        let subtitle = match accounts.first() {
+        // The account the row speaks for: the active one if it's here, else the first.
+        let shown_account = accounts.iter().find(|account| account.is_active).or(accounts.first());
+        let subtitle = match shown_account {
             // TRANSLATORS: Subtitle of a server's row. {username} is the account signed in on that server; "active" marks the server in use.
             Some(account) if is_active_server => tr_args("{username} · active", &[("username", account.username.as_str())]),
             Some(account) => account.username.clone(),
@@ -185,9 +187,13 @@ pub fn build(
         sign_out_item.set_sensitive(!accounts.is_empty());
         menu_box.append(&sign_out_item);
 
+        // Not `flat`: with `destructive-action` that draws the label in the popover's own
+        // background colour (white on white with libadwaita 1.5, found in the 2026-10-12 pass) —
+        // the same reason `widgets/item_options_menu.rs` gives.
         let remove_item = gtk4::Button::builder()
             .label(tr("Remove Server"))
-            .css_classes(["flat", "destructive-action"])
+            .css_classes(["destructive-action"])
+            .margin_top(6)
             .height_request(44)
             .build();
         menu_box.append(&remove_item);
@@ -208,14 +214,14 @@ pub fn build(
             let pool = pool.clone();
             let window = window.clone();
             let server = server.clone();
-            let account = accounts.first().cloned();
+            let account = shown_account.cloned();
             let on_session_changed = on_session_changed.clone();
             move |_| push_connection(&pool, &server, account.clone(), &window, &on_session_changed)
         });
 
         servers_group.add(&row);
 
-        if let Some(account) = accounts.first() {
+        if let Some(account) = shown_account {
             switch_item.connect_clicked({
                 let pool = pool.clone();
                 let paths = paths.clone();
@@ -247,6 +253,7 @@ pub fn build(
                 let window = window.clone();
                 let account_id = account.id.clone();
                 let username = account.username.clone();
+                let was_active = account.is_active;
                 let toast_overlay = toast_overlay.clone();
                 move |_| {
                     let dialog_window = window.clone();
@@ -280,7 +287,9 @@ pub fn build(
                                         crate::error_reporting::report_background_error(&toast_overlay, &tr("Signing out"), err);
                                         return;
                                     }
-                                    crate::application::show_main_or_welcome(&window, pool, paths, playback_settings);
+                                    // A server that isn't the active one: the rebuilt shell opens on Settings, where the
+                                    // user was, instead of Home.
+                                    crate::application::show_main_or_welcome_on(&window, pool, paths, playback_settings, (!was_active).then_some("settings"));
                                 });
                             }),
                         );
@@ -295,24 +304,34 @@ pub fn build(
         remove_item.connect_clicked({
             let pool = pool.clone();
             let paths = paths.clone();
+            let download_manager = download_manager.clone();
             let window = window.clone();
             let server_id = server.id.clone();
             let server_host = host_of(&server.url).to_string();
+            let username = shown_account.map(|account| account.username.clone());
+            let was_active = is_active_server;
             let toast_overlay = toast_overlay.clone();
             move |_| {
                 let dialog_window = window.clone();
                 let pool = pool.clone();
                 let paths = paths.clone();
+                let download_manager = download_manager.clone();
                 let window = window.clone();
                 let server_id = server_id.clone();
                 let toast_overlay = toast_overlay.clone();
                 let server_host = server_host.clone();
+                let username = username.clone();
                 glib::spawn_future_local(async move {
                     let unpushed = abs_storage::repo::progress::count_needing_push(&pool, None, Some(&server_id)).await.unwrap_or(0);
+                    let heading = match &username {
+                        // TRANSLATORS: Dialog heading. {server} is the address of the server being removed, {username} the account signed in on it (one server can be listed once per account).
+                        Some(username) => tr_args("Remove {server} ({username})?", &[("server", server_host.as_str()), ("username", username.as_str())]),
+                        // TRANSLATORS: Dialog heading. {server} is the address of the server being removed.
+                        None => tr_args("Remove {server}?", &[("server", server_host.as_str())]),
+                    };
                     confirm(
                         &dialog_window,
-                        // TRANSLATORS: Dialog heading. {server} is the address of the server being removed.
-                        &tr_args("Remove {server}?", &[("server", server_host.as_str())]),
+                        &heading,
                         &format!(
                             "{}{}",
                             tr("Every account, cached library, item and downloaded file for this server will be removed from this device. Everything on the server itself stays untouched."),
@@ -325,6 +344,9 @@ pub fn build(
                             let window = window.clone();
                             let server_id = server_id.clone();
                             let toast_overlay = toast_overlay.clone();
+                            // Its downloads still running would keep writing into the files
+                            // removed below.
+                            download_manager.cancel_server(&server_id);
                             glib::spawn_future_local(async move {
                                 if let Err(err) = abs_core::accounts::remove_server(&pool, &server_id, crate::password_keyring::store().as_ref()).await {
                                     crate::error_reporting::report_background_error(&toast_overlay, &tr("Removing the server"), err);
@@ -333,7 +355,9 @@ pub fn build(
                                 if let Err(err) = paths.purge_server_data(&server_id).await {
                                     tracing::warn!(%err, server_id = %server_id, "couldn't purge the removed server's on-disk files; they are orphaned but harmless");
                                 }
-                                crate::application::show_main_or_welcome(&window, pool, paths, playback_settings);
+                                // A server that isn't the active one: the rebuilt shell opens on Settings, where the
+                                // user was, instead of Home.
+                                crate::application::show_main_or_welcome_on(&window, pool, paths, playback_settings, (!was_active).then_some("settings"));
                             });
                         }),
                     );
@@ -845,12 +869,14 @@ pub(crate) fn push_about(window: &adw::ApplicationWindow) {
 
 const WEBSITE_URL: &str = "https://github.com/gdr-aislop/audiobooklet";
 
-/// The `host[:port]` part of a server URL — what Account/Servers rows show instead of the full
-/// scheme-and-path form (the URL in full stays on the server's Connection page).
+/// A server URL without its scheme (`host[:port][/path]`) — what Account/Servers rows show instead
+/// of the full URL (which stays on the server's Connection page).
 pub(crate) fn host_of(url: &str) -> &str {
     let rest = url.split_once("://").map_or(url, |(_, rest)| rest);
-    rest.split('/').next().unwrap_or(rest)
+    // A path is kept (`audiobooks.dev/audiobookshelf`): two servers on one host differ only there.
+    rest.trim_end_matches('/')
 }
+
 
 /// The extra sentence a sign-out/remove confirmation carries when some listening progress on this
 /// device hasn't reached the server yet — removing the rows would lose it for good.
@@ -1529,6 +1555,63 @@ pub(crate) mod tests {
             assert!(runtime.block_on(abs_storage::repo::servers::list(&pool)).unwrap().is_empty(), "the server row must be gone");
             assert!(!cover.exists(), "the server's on-disk cover cache must be purged, not orphaned");
         }
+    }
+
+    /// Found in the 2026-10-12 pass: signing out of the active account left no account active,
+    /// and the app on the first-run login screen although another server still had an account.
+    /// It now lands on that account; and the menu's Remove item is drawn so it can be read.
+    pub(crate) fn run_signing_out_of_the_active_account_lands_on_another(runtime: &tokio::runtime::Runtime) {
+        let pool = runtime.block_on(crate::test_support::pool());
+        let servers = vec![
+            seed_active_session(runtime, &pool, "http://127.0.0.1:1", "jane"),
+            seed_active_session_but_inactive(runtime, &pool, "http://127.0.0.1:2", "bob"),
+        ];
+        let bob_id = servers[1].1[0].id.clone();
+        let controller = crate::player::PlayerController::new(pool.clone(), crate::test_support::test_paths(), test_backend(), |_| {});
+        let app_window = adw::ApplicationWindow::builder().build();
+        let screen = build(
+            pool.clone(),
+            controller,
+            test_download_manager(pool.clone()),
+            abs_core::settings::PlaybackSettings::default(),
+            crate::low_memory_mode::LowMemoryModeState::new(pool.clone()),
+            abs_core::settings::Theme::default(),
+            crate::test_support::test_paths(),
+            servers,
+            app_window.clone(),
+        );
+        assert!(
+            !screen.hooks.server_rows[0].remove_item.has_css_class("flat"),
+            "flat + destructive-action draws the label invisibly in the popover"
+        );
+        let old_root = screen.root.clone();
+        app_window.set_content(Some(&old_root));
+
+        screen.hooks.server_rows[0].sign_out_item.emit_clicked();
+        pump_until(|| find_message_dialog().is_some(), Duration::from_secs(5));
+        find_message_dialog().unwrap().response(gtk4::ResponseType::Ok);
+        pump_until(
+            {
+                let old_root = old_root.clone();
+                let app_window = app_window.clone();
+                move || app_window.content().as_ref() != Some(&old_root)
+            },
+            Duration::from_secs(10),
+        );
+        // Asked from the main loop: the new shell's own startup work holds database connections
+        // that only make progress while the loop runs, so blocking on the query here would stall.
+        let active: std::rc::Rc<std::cell::RefCell<Option<Option<String>>>> = std::rc::Rc::default();
+        gtk4::glib::spawn_future_local({
+            let (pool, active) = (pool.clone(), active.clone());
+            async move {
+                let account = abs_storage::repo::accounts::get_active(&pool).await.unwrap();
+                *active.borrow_mut() = Some(account.map(|a| a.id));
+            }
+        });
+        pump_until(|| active.borrow().is_some(), Duration::from_secs(10));
+        assert_eq!(active.borrow().clone().flatten(), Some(bob_id), "the remaining account takes over");
+        let content = app_window.content().unwrap();
+        assert!(find_button_with_label(&content, &crate::i18n::tr("Connect")).is_none(), "the main screen, not the login screen");
     }
 
     /// "Add Server" reuses the Welcome flow over the signed-in shell — and, unlike the first

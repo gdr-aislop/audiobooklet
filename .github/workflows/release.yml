@@ -140,7 +140,7 @@ jobs:
             libssl-dev libpulse-dev \
             libgdk-pixbuf-2.0-dev \
             glib-networking dconf-gsettings-backend gsettings-desktop-schemas \
-            librsvg2-common adwaita-icon-theme \
+            librsvg2-common librsvg2-bin adwaita-icon-theme \
             gstreamer1.0-plugins-base gstreamer1.0-plugins-good \
             gstreamer1.0-libav gstreamer1.0-pulseaudio \
             libsoup-3.0-0

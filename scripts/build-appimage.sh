@@ -103,7 +103,7 @@ VERSION="${VERSION//\//-}" # keep it filename-safe (branch names can contain /)
 # --- tool and source availability checks ---
 # zsyncmake generates the .zsync file alongside the AppImage (see the update-information note
 # above) — the appimage output plugin shells out to it once LDAI_UPDATE_INFORMATION is set.
-for tool in cargo pkg-config glib-compile-schemas curl zsyncmake; do
+for tool in cargo pkg-config glib-compile-schemas curl zsyncmake rsvg-convert; do
     command -v "$tool" >/dev/null 2>&1 || die "required tool not found: $tool"
 done
 
@@ -183,6 +183,14 @@ L10N_DIR="$OUTPUT_DIR/l10n"
 ./scripts/build-l10n.sh "$L10N_DIR"
 install -Dm644 "$L10N_DIR/$APP_ID.desktop" "$APPDIR/usr/share/applications/$APP_ID.desktop"
 install -Dm644 "app/assets/$APP_ID.svg" "$APPDIR/usr/share/icons/hicolor/scalable/apps/$APP_ID.svg"
+# A PNG rendering too: the AppImage's .DirIcon (its thumbnail in file managers and AppImage
+# catalogs) should be a PNG, which not every thumbnailer can make from an SVG.
+ICON_PNG="$APPDIR/usr/share/icons/hicolor/256x256/apps/$APP_ID.png"
+mkdir -p "$(dirname "$ICON_PNG")"
+rsvg-convert -w 256 -h 256 -o "$ICON_PNG" "app/assets/$APP_ID.svg"
+# appimagetool makes .DirIcon from the root-level icon named after the desktop file's Icon=,
+# preferring a PNG; linuxdeploy only puts the SVG there, so add the PNG next to it.
+ln -s "usr/share/icons/hicolor/256x256/apps/$APP_ID.png" "$APPDIR/$APP_ID.png"
 install -Dm644 "$L10N_DIR/$APP_ID.metainfo.xml" "$APPDIR/usr/share/metainfo/$APP_ID.metainfo.xml"
 mkdir -p "$APPDIR/usr/share/locale"
 cp -a "$L10N_DIR/locale/." "$APPDIR/usr/share/locale/"
@@ -225,6 +233,10 @@ done
 # GTK4 modules (immodules, print backends); found via GTK_PATH at runtime.
 if [ -d "$GTK4_MODULES_SRC" ]; then
     cp -a "$GTK4_MODULES_SRC" "$APPDIR/usr/lib/gtk-4.0"
+    # The app never prints, and the CUPS backend is the only thing pulling in libcups (and its
+    # avahi tail) — whose bookworm build is also the only library needing glibc 2.36, newer
+    # than the 2.35 everything else needs (Ubuntu 22.04).
+    find "$APPDIR/usr/lib/gtk-4.0" -name 'libprintbackend-cups.so' -delete
 else
     warn "GTK4 module dir not found at $GTK4_MODULES_SRC; skipping"
 fi
@@ -249,7 +261,9 @@ fi
 mkdir -p "$APPDIR/apprun-hooks"
 cat > "$APPDIR/apprun-hooks/$APP_NAME.sh" <<'EOF'
 #!/usr/bin/env bash
-APPDIR="${APPDIR:-"$(readlink -f "$(dirname "${BASH_SOURCE[0]}")/../..")"}"
+# The AppImage runtime sets APPDIR; an extracted AppImage (squashfs-root/AppRun, the usual
+# workaround without FUSE) doesn't, and this file sits one level below the AppDir root.
+APPDIR="${APPDIR:-"$(readlink -f "$(dirname "${BASH_SOURCE[0]}")/..")"}"
 export APPDIR
 
 export LD_LIBRARY_PATH="$APPDIR/usr/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
@@ -298,6 +312,19 @@ else
     die "libsoup-3 not found in the build environment; https:// playback would be broken"
 fi
 
+# HarfBuzz is on the AppImage excludelist that linuxdeploy follows, so by default the bundled
+# pango (from the build distro) runs against the host's HarfBuzz — and bookworm's pango 1.50
+# needs HarfBuzz >= 4.0, so on Ubuntu 22.04 (2.7.4) and the like the app died at startup with
+# "undefined symbol: hb_ot_layout_get_horizontal_baseline_tag_for_script". --library deploys it
+# regardless of the excludelist. (Its own dependencies — glib, graphite2 — are bundled already;
+# freetype stays the host's, and 22.04's is new enough.)
+HARFBUZZ_LIB=""
+for candidate in /usr/lib/*/libharfbuzz.so.0 /usr/lib/libharfbuzz.so.0; do
+    if [ -e "$candidate" ]; then HARFBUZZ_LIB="$candidate"; break; fi
+done
+[ -n "$HARFBUZZ_LIB" ] || die "libharfbuzz.so.0 not found in the build environment"
+DEPLOY_ARGS+=(--library "$HARFBUZZ_LIB")
+
 OUTPUT_PATH="$OUTPUT_DIR/$APP_NAME-$VERSION-$ARCH.AppImage"
 
 # The glob must match the *final* (post-rename, below) filename this script publishes, since
@@ -311,6 +338,7 @@ export LDAI_UPDATE_INFORMATION="gh-releases-zsync|$GH_OWNER|$GH_REPO|latest|$APP
         --executable="$APPDIR/usr/bin/$APP_NAME" \
         --desktop-file="$APPDIR/usr/share/applications/$APP_ID.desktop" \
         --icon-file="$APPDIR/usr/share/icons/hicolor/scalable/apps/$APP_ID.svg" \
+        --icon-file="$ICON_PNG" \
         "${DEPLOY_ARGS[@]}" \
         --output=appimage
 )
@@ -338,6 +366,9 @@ produced_zsync="$produced.zsync"
 # absence is invisible to every other check. Verify it landed.
 [ -e "$APPDIR/usr/lib/libsoup-3.0.so.0" ] \
     || die "libsoup-3.0.so.0 did not land in the AppDir; https:// playback would be broken"
+# Same for HarfBuzz: without it the app doesn't start on hosts with an older one.
+[ -e "$APPDIR/usr/lib/libharfbuzz.so.0" ] \
+    || die "libharfbuzz.so.0 did not land in the AppDir; the app wouldn't start on Ubuntu 22.04"
 
 if [ "$produced" != "$OUTPUT_PATH" ]; then
     mv "$produced" "$OUTPUT_PATH"

@@ -112,19 +112,26 @@ struct Inner {
     network_monitor: Box<dyn NetworkMonitor>,
     wifi_only: bool,
     semaphore: Rc<tokio::sync::Semaphore>,
-    listeners: RefCell<Vec<EventListener>>,
+    /// Each with the server whose events it wants (`None`: every server's) — see
+    /// [`DownloadManager::scoped_to`].
+    listeners: RefCell<Vec<(Option<String>, EventListener)>>,
     /// Listeners registered from inside a publish; added once it is over.
-    listeners_added_meanwhile: RefCell<Vec<EventListener>>,
+    listeners_added_meanwhile: RefCell<Vec<(Option<String>, EventListener)>>,
     /// Keyed by `(server_id, item_id)` rather than just `item_id` — the same item id is only ever
     /// meaningful within one server, but nothing stops two different servers from happening to
-    /// reuse the same id, and this manager is shared for the app's whole lifetime, potentially
-    /// across an account switch.
+    /// reuse the same id, and this manager is shared for the app's whole lifetime, across account
+    /// switches (see [`app_wide`]).
     batches: HashMap<(String, String), ItemBatch>,
 }
 
 impl Inner {
-    fn publish(&self, event: DownloadEvent) {
-        self.listeners.borrow_mut().retain(|listener| listener(&event));
+    /// Delivers `event`, about a download for `server_id`, to the listeners that want that
+    /// server's events. `None` (tests only) reaches every listener.
+    fn publish(&self, server_id: Option<&str>, event: DownloadEvent) {
+        self.listeners.borrow_mut().retain(|(scope, listener)| match (scope, server_id) {
+            (Some(scope), Some(server_id)) if scope != server_id => true,
+            _ => listener(&event),
+        });
         let mut added = self.listeners_added_meanwhile.borrow_mut();
         self.listeners.borrow_mut().append(&mut added);
     }
@@ -133,6 +140,22 @@ impl Inner {
 #[derive(Clone)]
 pub struct DownloadManager {
     inner: Rc<RefCell<Inner>>,
+    /// The server this handle's listeners hear about (`None`: all) — see [`Self::scoped_to`].
+    scope: Option<String>,
+    /// While set, this handle's listeners are dropped once it can't be upgraded — the shell
+    /// that registered them is gone (see [`Self::scoped_to`]).
+    alive: Option<std::rc::Weak<()>>,
+}
+
+thread_local! {
+    static APP_WIDE: RefCell<Option<DownloadManager>> = const { RefCell::new(None) };
+}
+
+/// The one manager every shell shares, created by `create` the first time. Downloads keep running
+/// across a server switch (switching back shows them in progress again), so the manager can't be
+/// rebuilt with the shell. Each shell takes a handle [`DownloadManager::scoped_to`] its server.
+pub fn app_wide(create: impl FnOnce() -> DownloadManager) -> DownloadManager {
+    APP_WIDE.with(|cell| cell.borrow_mut().get_or_insert_with(create).clone())
 }
 
 impl DownloadManager {
@@ -148,7 +171,16 @@ impl DownloadManager {
                 listeners_added_meanwhile: RefCell::new(Vec::new()),
                 batches: HashMap::new(),
             })),
+            scope: None,
+            alive: None,
         }
+    }
+
+    /// A handle on the same manager whose listeners only hear about `server_id`'s downloads, and
+    /// whose [`Self::any_in_flight`] only counts them, and that live only as long as `alive` does
+    /// — what a shell, showing one server for as long as it exists, uses.
+    pub fn scoped_to(&self, server_id: &str, alive: &Rc<()>) -> Self {
+        Self { inner: self.inner.clone(), scope: Some(server_id.to_string()), alive: Some(Rc::downgrade(alive)) }
     }
 
     /// Registers a permanent event listener, notified for the manager's whole lifetime — same
@@ -158,7 +190,7 @@ impl DownloadManager {
     /// need a state change without running a download.
     #[cfg(test)]
     pub(crate) fn publish_for_test(&self, event: DownloadEvent) {
-        self.inner.borrow().publish(event);
+        self.inner.borrow().publish(None, event);
     }
 
     pub fn add_listener(&self, listener: impl Fn(&DownloadEvent) + 'static) {
@@ -174,7 +206,9 @@ impl DownloadManager {
     /// the manager's whole lifetime.
     pub fn add_scoped_listener(&self, listener: impl Fn(&DownloadEvent) -> bool + 'static) {
         let inner = self.inner.borrow();
-        let listener = Box::new(listener);
+        let alive = self.alive.clone();
+        let listener: EventListener = Box::new(move |event| alive.as_ref().is_none_or(|alive| alive.upgrade().is_some()) && listener(event));
+        let listener = (self.scope.clone(), listener);
         let added_now = match inner.listeners.try_borrow_mut() {
             Ok(mut listeners) => {
                 listeners.push(listener);
@@ -203,11 +237,22 @@ impl DownloadManager {
         self.inner.borrow().batches.contains_key(&(server_id.to_string(), item_id.to_string()))
     }
 
+    /// The items of `server_id` with a download in flight — for a Downloads screen built while
+    /// they were already running (after switching back to their server), which never saw them
+    /// start.
+    pub fn in_flight_items(&self, server_id: &str) -> Vec<String> {
+        self.inner.borrow().batches.keys().filter(|(server, _)| server == server_id).map(|(_, item)| item.clone()).collect()
+    }
+
     /// Whether *anything* is downloading right now, across every item — the Downloads tab's own
     /// attention-dot uses this so "something is running in the background" stays visible from
     /// Home/Library too, not just from whichever screen happened to start it.
     pub fn any_in_flight(&self) -> bool {
-        !self.inner.borrow().batches.is_empty()
+        let inner = self.inner.borrow();
+        match &self.scope {
+            Some(server_id) => inner.batches.keys().any(|(server, _)| server == server_id),
+            None => !inner.batches.is_empty(),
+        }
     }
 
     /// Whether this device can currently tell a metered connection from an unmetered one. When
@@ -246,7 +291,7 @@ impl DownloadManager {
         // is the backstop for any other caller.
         if session.is_offline() {
             tracing::info!(item_id, "offline mode is on; not starting a download");
-            self.inner.borrow().publish(DownloadEvent::ItemStateChanged { item_id, state: ItemDownloadState::Failed(tr("offline mode is on")) });
+            self.inner.borrow().publish(Some(session.server_id()), DownloadEvent::ItemStateChanged { item_id, state: ItemDownloadState::Failed(tr("offline mode is on")) });
             return;
         }
         let inner_rc = self.inner.clone();
@@ -269,7 +314,7 @@ impl DownloadManager {
                         let err = err.to_string();
                         // TRANSLATORS: {error} is the error message from the underlying library (not translated). This is the reason shown after "Download failed — ".
                         let reason = tr_args("couldn't load the server's connection settings: {error}", &[("error", &err)]);
-                        inner_rc.borrow().publish(DownloadEvent::ItemStateChanged { item_id, state: ItemDownloadState::Failed(reason) });
+                        inner_rc.borrow().publish(Some(&server_id), DownloadEvent::ItemStateChanged { item_id, state: ItemDownloadState::Failed(reason) });
                         return;
                     }
                 };
@@ -286,7 +331,11 @@ impl DownloadManager {
                     }
                     Err(err) => {
                         tracing::warn!(%err, item_id, "couldn't resolve tracks for download");
-                        inner_rc.borrow().publish(DownloadEvent::ItemStateChanged { item_id, state: ItemDownloadState::Failed(err.to_string()) });
+                        let reason = match err {
+                            abs_core::CoreError::NoPlayableAudio(_) => tr("this item has no audio to download"),
+                            other => other.to_string(),
+                        };
+                        inner_rc.borrow().publish(Some(&server_id), DownloadEvent::ItemStateChanged { item_id, state: ItemDownloadState::Failed(reason) });
                         return;
                     }
                 }
@@ -294,7 +343,7 @@ impl DownloadManager {
 
             if tracks.is_empty() {
                 let reason = tr("the server reported no audio files for this item");
-                inner_rc.borrow().publish(DownloadEvent::ItemStateChanged { item_id, state: ItemDownloadState::Failed(reason) });
+                inner_rc.borrow().publish(Some(&server_id), DownloadEvent::ItemStateChanged { item_id, state: ItemDownloadState::Failed(reason) });
                 return;
             }
 
@@ -317,7 +366,7 @@ impl DownloadManager {
             let pending_inos = abs_core::download_tracks::tracks_to_fetch(&pool, &server_id, &item_id, needed).await;
 
             if pending_inos.is_empty() {
-                inner_rc.borrow().publish(DownloadEvent::ItemStateChanged { item_id, state: ItemDownloadState::Complete });
+                inner_rc.borrow().publish(Some(&server_id), DownloadEvent::ItemStateChanged { item_id, state: ItemDownloadState::Complete });
                 return;
             }
 
@@ -328,7 +377,7 @@ impl DownloadManager {
                     (server_id.clone(), item_id.clone()),
                     ItemBatch { total: pending_inos.len(), completed: 0, failed: 0, canceled: 0, cancel_flags: cancel_flags.clone(), first_failure_reason: None },
                 );
-                inner.publish(DownloadEvent::ItemStateChanged { item_id: item_id.clone(), state: ItemDownloadState::Downloading });
+                inner.publish(Some(&server_id), DownloadEvent::ItemStateChanged { item_id: item_id.clone(), state: ItemDownloadState::Downloading });
             }
 
             for (ino, cancel_flag) in pending_inos.into_iter().zip(cancel_flags) {
@@ -381,13 +430,14 @@ impl DownloadManager {
             // track through regardless of timing, so a fast/small track's completion is never
             // dropped by the throttle window.
             let mut last_published = std::time::Instant::now() - PROGRESS_EVENT_MIN_INTERVAL;
+            let progress_server_id = server_id.clone();
             let on_progress = move |downloaded: u64, total: Option<u64>| {
                 let is_last_chunk = total.is_some_and(|total| downloaded >= total);
                 if !is_last_chunk && last_published.elapsed() < PROGRESS_EVENT_MIN_INTERVAL {
                     return;
                 }
                 last_published = std::time::Instant::now();
-                progress_inner.borrow().publish(DownloadEvent::TrackProgress {
+                progress_inner.borrow().publish(Some(&progress_server_id), DownloadEvent::TrackProgress {
                     item_id: progress_item_id.clone(),
                     ino: progress_ino.clone(),
                     bytes_downloaded: downloaded,
@@ -462,7 +512,7 @@ impl DownloadManager {
         } else {
             ItemDownloadState::Complete
         };
-        inner.publish(DownloadEvent::ItemStateChanged { item_id: item_id.to_string(), state });
+        inner.publish(Some(server_id), DownloadEvent::ItemStateChanged { item_id: item_id.to_string(), state });
     }
 
     /// Flips the cancel flag for every track currently in flight for this item. Cooperative, not a
@@ -500,9 +550,22 @@ impl DownloadManager {
                 on_done(Err(err));
                 return;
             }
-            inner_rc.borrow().publish(DownloadEvent::ItemStateChanged { item_id, state: ItemDownloadState::Idle });
+            inner_rc.borrow().publish(Some(&server_id), DownloadEvent::ItemStateChanged { item_id, state: ItemDownloadState::Idle });
             on_done(Ok(()));
         });
+    }
+
+    /// Cancels every download in flight for `server_id` — for Remove Server, which deletes the
+    /// server's files itself and mustn't race a download still writing into them.
+    pub fn cancel_server(&self, server_id: &str) {
+        let inner = self.inner.borrow();
+        for (key, batch) in inner.batches.iter() {
+            if key.0 == server_id {
+                for flag in &batch.cancel_flags {
+                    flag.set(true);
+                }
+            }
+        }
     }
 
     /// Cancels anything in flight for this server, then deletes every downloaded track file and
@@ -528,7 +591,7 @@ impl DownloadManager {
                     {
                         let inner = inner_rc.borrow();
                         for item_id in item_ids {
-                            inner.publish(DownloadEvent::ItemStateChanged { item_id, state: ItemDownloadState::Idle });
+                            inner.publish(Some(&server_id), DownloadEvent::ItemStateChanged { item_id, state: ItemDownloadState::Idle });
                         }
                     }
                     on_done(Ok(()));

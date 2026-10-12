@@ -971,6 +971,33 @@ pub fn build(
     };
     spawn_sync_cycle(ctx.clone(), widgets.clone(), None);
 
+    // Offline mode turned off: catch up with the server. Both screens ask; the startup-sync claim
+    // lets only one of them hit the network, and the other follows (see `sync_coordinator`). A
+    // server added while offline mode was on used to stay empty until "Try again".
+    widgets.offline_mode.add_listener({
+        let (ctx, widgets) = (ctx.clone(), widgets.clone());
+        let was_offline = std::cell::Cell::new(ctx.session.is_offline());
+        move |offline| {
+            let came_online = was_offline.replace(offline) && !offline;
+            if came_online && widgets.scroller.root().is_some() {
+                spawn_sync_cycle(ctx.clone(), widgets.clone(), None);
+            }
+        }
+    });
+
+    // Home's own syncs ("Sync now" there) land here too. Dropped once this screen is no longer
+    // in a window (the shell was rebuilt).
+    crate::sync_coordinator::on_synced(&server.id, &account.id, crate::sync_coordinator::Screen::Library, {
+        let (pool, server_id, account_id, widgets) = (pool.clone(), server.id.clone(), account.id.clone(), widgets.clone());
+        move |outcome| {
+            if widgets.scroller.root().is_none() {
+                return false;
+            }
+            glib::spawn_future_local(follow_home_sync(pool.clone(), server_id.clone(), account_id.clone(), widgets.clone(), Some(outcome)));
+            true
+        }
+    });
+
     // The two manual triggers — the ⋯ menu's "Sync now" and a pull past the scroller's top —
     // share one `ManualSync` (indicator + toast + in-flight guard) between them, mirroring
     // home.rs.
@@ -1104,23 +1131,7 @@ fn spawn_sync_cycle(ctx: SyncCtx, widgets: LibraryWidgets, manual: Option<crate:
         let (pool, server_id, account_id) = (ctx.pool.clone(), ctx.server_id.clone(), ctx.account_id.clone());
         glib::spawn_future_local(render_from_cache(pool.clone(), server_id.clone(), account_id.clone(), widgets.clone()));
         crate::sync_coordinator::on_completed(&ctx.server_id, &ctx.account_id, move |outcome| {
-            glib::spawn_future_local(async move {
-                let mut steps = crate::perf::Steps::new("library load", "after Home's sync");
-                steps.step("read");
-                let loaded = load(&pool, &server_id, &account_id).await;
-                let local_read_error = loaded.as_ref().err().map(|err| err.to_string());
-                let items = loaded.as_ref().ok().map(|data| data.items.len());
-                steps.step("render");
-                if let Ok(data) = loaded {
-                    apply(data, &widgets);
-                }
-                steps.finish(if local_read_error.is_none() { "ok" } else { "failed" }, items);
-                // How Home's sync went — told here too, so a failure never goes unmentioned
-                // on this tab just because the other one ran the sync.
-                if let Some(outcome) = outcome {
-                    show_sync_result(&widgets, outcome.error(), local_read_error.as_deref());
-                }
-            });
+            glib::spawn_future_local(follow_home_sync(pool, server_id, account_id, widgets, outcome));
         });
         return;
     }
@@ -1142,6 +1153,7 @@ fn spawn_sync_cycle(ctx: SyncCtx, widgets: LibraryWidgets, manual: Option<crate:
         let spawned_sync = tokio::spawn({
             let pool = pool.clone();
             let session = session.clone();
+            let sync_paths = paths.clone();
             let server_id = server_id.clone();
             let account_id = account_id.clone();
             async move {
@@ -1157,7 +1169,7 @@ fn spawn_sync_cycle(ctx: SyncCtx, widgets: LibraryWidgets, manual: Option<crate:
                     }
                 };
                 let started = std::time::Instant::now();
-                let sync_result = abs_core::sync::sync_all(&pool, &connection, &server_id, &access_token).await;
+                let sync_result = abs_core::sync::sync_all(&pool, &connection, &sync_paths, &server_id, &access_token).await;
                 let sync_took = started.elapsed();
 
                 let started = std::time::Instant::now();
@@ -1237,6 +1249,8 @@ fn spawn_sync_cycle(ctx: SyncCtx, widgets: LibraryWidgets, manual: Option<crate:
         // landed.
         if is_automatic {
             crate::sync_coordinator::mark_completed(&server_id, &account_id, crate::sync_coordinator::SyncOutcome::from_result(&sync_result));
+        } else {
+            crate::sync_coordinator::notify_synced(&server_id, &account_id, crate::sync_coordinator::Screen::Library, crate::sync_coordinator::SyncOutcome::from_result(&sync_result));
         }
     });
 }
@@ -1382,6 +1396,25 @@ fn rebuild_genre_chips(widgets: &LibraryWidgets) {
     }
 }
 
+/// Re-reads local storage after Home ran a sync (the startup one Library didn't claim, or a
+/// manual one) and shows how it went — so a failure never goes unmentioned on this tab just
+/// because the other one ran the sync.
+async fn follow_home_sync(pool: SqlitePool, server_id: String, account_id: String, widgets: LibraryWidgets, outcome: Option<crate::sync_coordinator::SyncOutcome>) {
+    let mut steps = crate::perf::Steps::new("library load", "after Home's sync");
+    steps.step("read");
+    let loaded = load(&pool, &server_id, &account_id).await;
+    let local_read_error = loaded.as_ref().err().map(|err| err.to_string());
+    let items = loaded.as_ref().ok().map(|data| data.items.len());
+    steps.step("render");
+    if let Ok(data) = loaded {
+        apply(data, &widgets);
+    }
+    steps.finish(if local_read_error.is_none() { "ok" } else { "failed" }, items);
+    if let Some(outcome) = outcome {
+        show_sync_result(&widgets, outcome.error(), local_read_error.as_deref());
+    }
+}
+
 /// Reads whatever's currently cached locally across every synced library — never talks to the
 /// network. Unlike Home's `load()`, nothing is truncated or pre-sorted here: filtering/sorting for
 /// display happens in `render_visible` against the search text, the filter and the chosen
@@ -1399,10 +1432,7 @@ async fn load(pool: &SqlitePool, server_id: &str, account_id: &str) -> CoreResul
 }
 
 fn apply(data: LibraryData, widgets: &LibraryWidgets) {
-    let has_any_item = !data.items.is_empty();
     *widgets.data.borrow_mut() = data;
-    widgets.status_page.set_visible(!has_any_item);
-    widgets.scroller.set_visible(has_any_item);
     rebuild_genre_chips(widgets);
     render_from_current_data(widgets);
 }
@@ -1624,16 +1654,23 @@ fn render_from_current_data(widgets: &LibraryWidgets) {
         move || decode_covers_in_viewport(&widgets)
     });
 
-    // Offline mode overrides the empty state with "No downloaded items" (ui-spec LB-7) rather than
-    // whatever `apply()` last set from the unfiltered sync result — search/sort's own empty case
-    // is left as-is (a pre-existing gap outside this pass's scope), only offline mode's filter
-    // gets this treatment since it's the one new way this screen can legitimately show nothing.
-    if offline_mode {
-        widgets.status_page.set_title(&if has_visible { tr("No items yet") } else { tr("No downloaded items") });
-        widgets.status_page.set_visible(!has_visible);
-        widgets.scroller.set_visible(has_visible);
-    } else if !data.items.is_empty() {
-        widgets.status_page.set_title(&tr("No items yet"));
+    // This render owns which of the list and the empty state shows, and what the empty state
+    // says — every time, not only in offline mode. Found in the 2026-10-12 pass: with offline mode
+    // turned off again after an empty offline view, nothing put the list back, and Library said
+    // "No items yet" over 24 stored books until the next sync.
+    widgets.status_page.set_visible(!has_visible);
+    widgets.scroller.set_visible(has_visible);
+    if !has_visible {
+        let any_downloaded = data.items.iter().any(|item| data.downloaded.contains(&item.id));
+        let (title, description) = if data.items.is_empty() {
+            (tr("No items yet"), tr("Check your connection and try again."))
+        } else if offline_mode && !any_downloaded {
+            (tr("No downloaded items"), tr("Download books to listen to them offline."))
+        } else {
+            (tr("No matches"), tr("Try a different search or filter."))
+        };
+        widgets.status_page.set_title(&title);
+        widgets.status_page.set_description(Some(&description));
     }
 }
 
@@ -1797,10 +1834,10 @@ fn decode_covers_in_viewport(widgets: &LibraryWidgets) {
 }
 
 fn item_subtitle(item: &Item) -> String {
-    let hours = item.duration_seconds / 3600.0;
     let author = item.author.clone().unwrap_or_else(|| tr("Unknown author"));
-    // TRANSLATORS: Subtitle of a book: {author} and then its length in hours with one decimal, e.g. "Andy Weir · 16.1h".
-    tr_args("{author} · {hours}h", &[("author", &author), ("hours", &format!("{hours:.1}"))])
+    let duration = crate::screens::item_detail::format_duration(item.duration_seconds);
+    // TRANSLATORS: A book's subtitle on a card or in a list. {author} is the author's name; {duration} its length, e.g. "11.5h" or "45m".
+    tr_args("{author} · {duration}", &[("author", &author), ("duration", &duration)])
 }
 
 /// The section an item falls into under a given `Grouping`. `Named` carries a real author/series
@@ -2158,7 +2195,7 @@ pub(crate) mod tests {
                 .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
                     "libraries": [
                         { "id": "e4bb1afb-4a4f-4dd6-8be0-e615d233185b", "name": "Audiobooks", "mediaType": "book" },
-                        { "id": "b1a2c3d4-5e6f-4789-a0b1-c2d3e4f56789", "name": "Podcasts", "mediaType": "podcast" }
+                        { "id": "b1a2c3d4-5e6f-4789-a0b1-c2d3e4f56789", "name": "Kids", "mediaType": "book" }
                     ]
                 })))
                 .mount(&mock_server),
@@ -2178,7 +2215,7 @@ pub(crate) mod tests {
             Mock::given(method("GET"))
                 .and(path("/api/libraries/b1a2c3d4-5e6f-4789-a0b1-c2d3e4f56789/items"))
                 .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
-                    "results": [item_json("item-3", "Radiolab Ep 1", "WNYC", 1_650_000_000_000, 1800.0)]
+                    "results": [item_json("item-3", "The Little Red Tractor", "Gus Tanaka", 1_650_000_000_000, 1800.0)]
                 })))
                 .mount(&mock_server),
         );
@@ -2354,6 +2391,56 @@ pub(crate) mod tests {
         hooks.offline_toggle.set_active(true);
         crate::test_support::run_pending_main_loop_work();
         assert_eq!(flow_box_titles(&hooks.flow_box), vec!["Project Hail Mary".to_string()], "toggling offline mode on filters on the next idle from the in-memory downloaded set");
+    }
+
+    /// Found in the 2026-10-12 pass: offline mode on with nothing to show, then off again, left
+    /// the empty state up over a full list until the next sync. And a search with no matches
+    /// says so instead of showing a blank page.
+    pub(crate) fn run_empty_states_follow_offline_mode_and_search(runtime: &tokio::runtime::Runtime) {
+        let mock_server = runtime.block_on(MockServer::start());
+        runtime.block_on(
+            Mock::given(method("GET"))
+                .and(path("/api/libraries"))
+                .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                    "libraries": [{ "id": "e4bb1afb-4a4f-4dd6-8be0-e615d233185b", "name": "Audiobooks", "mediaType": "book" }]
+                })))
+                .mount(&mock_server),
+        );
+        runtime.block_on(
+            Mock::given(method("GET"))
+                .and(path("/api/libraries/e4bb1afb-4a4f-4dd6-8be0-e615d233185b/items"))
+                .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                    "results": [
+                        item_json("item-1", "Project Hail Mary", "Andy Weir", 1_700_000_000_000, 3600.0),
+                        item_json("item-2", "Dune", "Frank Herbert", 1_600_000_000_000, 7200.0)
+                    ]
+                })))
+                .mount(&mock_server),
+        );
+
+        let pool = runtime.block_on(pool());
+        let (server, account) = runtime.block_on(account_and_server(&pool, &mock_server.uri()));
+        let session = abs_core::auth::Session::new(pool.clone(), &server, &account);
+        let offline_mode = crate::offline_mode::OfflineModeState::new(pool.clone());
+        let screen = build(pool.clone(), crate::test_support::test_paths(), server.clone(), account, session, offline_mode.clone(), |_| {}, || {}, || {});
+        let hooks = screen.test_hooks();
+        pump_until(|| hooks.list_box.row_at_index(1).is_some(), Duration::from_secs(10));
+
+        // A search that matches nothing.
+        hooks.search_entry.set_text("Meditations");
+        pump_until(|| hooks.status_page.is_visible(), Duration::from_secs(5));
+        assert_eq!(hooks.status_page.title(), "No matches");
+        assert!(!hooks.scroller.is_visible());
+
+        // Offline with nothing downloaded, then back online: the list comes back.
+        hooks.offline_toggle.set_active(true);
+        pump_until(|| hooks.status_page.title() == "No downloaded items", Duration::from_secs(5));
+        hooks.offline_toggle.set_active(false);
+        crate::test_support::run_pending_main_loop_work();
+        hooks.search_entry.set_text("");
+        pump_until(|| hooks.scroller.is_visible(), Duration::from_secs(5));
+        assert!(!hooks.status_page.is_visible(), "the list is back, not the empty state");
+        pump_until(|| hooks.list_box.row_at_index(1).is_some(), Duration::from_secs(5));
     }
 
     pub(crate) fn run_sort_changes_order(runtime: &tokio::runtime::Runtime) {
@@ -3117,7 +3204,17 @@ pub(crate) mod tests {
         runtime.block_on(
             Mock::given(method("GET"))
                 .and(path("/api/libraries"))
-                .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({ "libraries": [] })))
+                // Lists the library seeded below, and fails its items: sync must leave the seeded
+                // books alone (a library the server didn't list would be removed, with them).
+                .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                    "libraries": [{ "id": "e4bb1afb-4a4f-4dd6-8be0-e615d233185b", "name": "Audiobooks", "mediaType": "book" }]
+                })))
+                .mount(&mock_server),
+        );
+        runtime.block_on(
+            Mock::given(method("GET"))
+                .and(path("/api/libraries/e4bb1afb-4a4f-4dd6-8be0-e615d233185b/items"))
+                .respond_with(ResponseTemplate::new(503))
                 .mount(&mock_server),
         );
 

@@ -64,6 +64,9 @@ pub enum PlaybackErrorKind {
     /// The app's offline mode is on and this part of the book isn't downloaded, so it can't be
     /// streamed. Raised by the app, not by GStreamer.
     Offline,
+    /// The item has no audio this app can play (a podcast, or an e-book-only book). Raised by
+    /// the app, not by GStreamer; retrying can't help.
+    NoAudio,
     /// No working audio engine at all — GStreamer itself failed to initialize or build a
     /// pipeline. Distinct from every case above: those mean *this file* won't play; this means
     /// *nothing* will, until the device itself is fixed.

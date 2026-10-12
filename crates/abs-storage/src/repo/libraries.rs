@@ -26,7 +26,8 @@ pub async fn upsert(pool: &SqlitePool, lib: UpsertLibrary<'_>) -> Result<()> {
             media_type = excluded.media_type,
             icon = excluded.icon,
             display_order = excluded.display_order,
-            synced_at = excluded.synced_at",
+            synced_at = excluded.synced_at,
+            removed_on_server = 0",
     )
     .bind(lib.id)
     .bind(lib.server_id)
@@ -42,7 +43,7 @@ pub async fn upsert(pool: &SqlitePool, lib: UpsertLibrary<'_>) -> Result<()> {
 
 pub async fn get(pool: &SqlitePool, server_id: &str, id: &str) -> Result<Library> {
     sqlx::query_as(
-        "SELECT id, server_id, name, media_type, icon, display_order, synced_at
+        "SELECT id, server_id, name, media_type, icon, display_order, synced_at, removed_on_server
          FROM libraries WHERE server_id = ? AND id = ?",
     )
     .bind(server_id)
@@ -54,13 +55,24 @@ pub async fn get(pool: &SqlitePool, server_id: &str, id: &str) -> Result<Library
 
 pub async fn list_for_server(pool: &SqlitePool, server_id: &str) -> Result<Vec<Library>> {
     let libraries = sqlx::query_as(
-        "SELECT id, server_id, name, media_type, icon, display_order, synced_at
+        "SELECT id, server_id, name, media_type, icon, display_order, synced_at, removed_on_server
          FROM libraries WHERE server_id = ? ORDER BY display_order ASC",
     )
     .bind(server_id)
     .fetch_all(pool)
     .await?;
     Ok(libraries)
+}
+
+/// Marks a library the server no longer lists but that still holds downloaded books (see the
+/// `removed_on_server` column).
+pub async fn set_removed_on_server(pool: &SqlitePool, server_id: &str, id: &str) -> Result<()> {
+    sqlx::query("UPDATE libraries SET removed_on_server = 1 WHERE server_id = ? AND id = ?")
+        .bind(server_id)
+        .bind(id)
+        .execute(pool)
+        .await?;
+    Ok(())
 }
 
 pub async fn remove(pool: &SqlitePool, server_id: &str, id: &str) -> Result<()> {
