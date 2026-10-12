@@ -120,6 +120,60 @@ pub(crate) fn mark_completed(server_id: &str, account_id: &str, outcome: SyncOut
     }
 }
 
+/// Which screen ran a sync, so a screen isn't told about its own.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) enum Screen {
+    Home,
+    Library,
+}
+
+/// A screen's interest in the other screen's syncs: the callback re-reads local storage and
+/// returns whether the screen is still alive (`false` drops the listener, e.g. after the shell
+/// was rebuilt for another account).
+struct SyncedListener {
+    key: (String, String),
+    screen: Screen,
+    callback: Box<dyn Fn(SyncOutcome) -> bool>,
+}
+
+thread_local! {
+    static SYNCED_LISTENERS: RefCell<Vec<SyncedListener>> = const { RefCell::new(Vec::new()) };
+}
+
+/// Registers `screen`'s interest in syncs the *other* screen runs for `(server_id, account_id)`
+/// outside the startup claim — "Sync now", pull-to-refresh, the catch-up after offline mode is
+/// turned off. Found in the 2026-10-12 pass: a library added on the server showed up on Home
+/// after its "Sync now", but never on the Library tab, which had loaded once and never again.
+pub(crate) fn on_synced(server_id: &str, account_id: &str, screen: Screen, callback: impl Fn(SyncOutcome) -> bool + 'static) {
+    SYNCED_LISTENERS.with(|listeners| {
+        listeners.borrow_mut().push(SyncedListener {
+            key: (server_id.to_string(), account_id.to_string()),
+            screen,
+            callback: Box::new(callback),
+        });
+    });
+}
+
+/// Called by a screen when a sync it ran outside the startup claim has finished: every other
+/// screen showing that account re-reads what landed.
+pub(crate) fn notify_synced(server_id: &str, account_id: &str, from: Screen, outcome: SyncOutcome) {
+    let key = (server_id.to_string(), account_id.to_string());
+    // Taken out while the callbacks run, so one can register or notify without a double borrow.
+    let listeners = SYNCED_LISTENERS.with(|listeners| std::mem::take(&mut *listeners.borrow_mut()));
+    let mut kept = Vec::with_capacity(listeners.len());
+    for listener in listeners {
+        let alive = if listener.key == key && listener.screen != from { (listener.callback)(outcome.clone()) } else { true };
+        if alive {
+            kept.push(listener);
+        }
+    }
+    SYNCED_LISTENERS.with(|listeners| {
+        let mut listeners = listeners.borrow_mut();
+        kept.append(&mut listeners);
+        *listeners = kept;
+    });
+}
+
 /// The item the player has loaded (or is starting) — `(server_id, account_id, item_id)`. Home's
 /// and Library's progress reconcile leave that item's row to the player (see
 /// `abs_core::progress_sync::reconcile_all_progress`'s `skip_item`). A real `Mutex`, not a
@@ -218,5 +272,44 @@ mod tests {
         assert_eq!(loaded_item("server-9", "account-other"), None);
         set_loaded_item(None);
         assert_eq!(loaded_item("server-9", "account-9"), None);
+    }
+
+    #[test]
+    fn a_sync_is_told_to_the_other_screens_of_the_same_account_only() {
+        let library_told = Rc::new(Cell::new(0));
+        let other_account_told = Rc::new(Cell::new(0));
+        on_synced("s-notify", "a-1", Screen::Library, {
+            let told = library_told.clone();
+            move |_| {
+                told.set(told.get() + 1);
+                true
+            }
+        });
+        on_synced("s-notify", "a-2", Screen::Library, {
+            let told = other_account_told.clone();
+            move |_| {
+                told.set(told.get() + 1);
+                true
+            }
+        });
+        notify_synced("s-notify", "a-1", Screen::Home, SyncOutcome::Ok);
+        notify_synced("s-notify", "a-1", Screen::Library, SyncOutcome::Ok);
+        assert_eq!(library_told.get(), 1, "told about Home's sync, not its own");
+        assert_eq!(other_account_told.get(), 0);
+    }
+
+    #[test]
+    fn a_listener_whose_screen_is_gone_is_dropped() {
+        let calls = Rc::new(Cell::new(0));
+        on_synced("s-drop", "a-1", Screen::Home, {
+            let calls = calls.clone();
+            move |_| {
+                calls.set(calls.get() + 1);
+                false
+            }
+        });
+        notify_synced("s-drop", "a-1", Screen::Library, SyncOutcome::Ok);
+        notify_synced("s-drop", "a-1", Screen::Library, SyncOutcome::Ok);
+        assert_eq!(calls.get(), 1);
     }
 }

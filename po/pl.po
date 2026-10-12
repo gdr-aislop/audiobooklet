@@ -109,6 +109,10 @@ msgid "couldn't load the server's connection settings: {error}"
 msgstr "nie udało się wczytać ustawień połączenia z serwerem: {error}"
 
 #: app/src/downloads.rs
+msgid "this item has no audio to download"
+msgstr "ta pozycja nie ma dźwięku do pobrania"
+
+#: app/src/downloads.rs
 msgid "the server reported no audio files for this item"
 msgstr "serwer zgłosił brak plików audio dla tej pozycji"
 
@@ -440,6 +444,14 @@ msgstr "Nie zsynchronizowano jeszcze żadnej biblioteki"
 msgid "This server doesn't have any libraries yet."
 msgstr "Ten serwer nie ma jeszcze żadnych bibliotek."
 
+#: app/src/screens/home.rs
+msgid "Offline mode is on"
+msgstr "Tryb offline jest włączony"
+
+#: app/src/screens/home.rs
+msgid "Turn it off to load this server's libraries."
+msgstr "Wyłącz go, aby wczytać biblioteki tego serwera."
+
 #: app/src/screens/home.rs app/src/screens/main_window.rs
 msgid "Home"
 msgstr "Start"
@@ -494,11 +506,10 @@ msgstr "Odświeżanie pobranych pozycji"
 msgid "Unknown author"
 msgstr "Nieznany autor"
 
-#. TRANSLATORS: A book's subtitle on a shelf card. {author} is the author's name; {hours} is the total length in hours with one decimal (e.g. "11.5"), followed by an "h" for hours.
-#. TRANSLATORS: Subtitle of a book: {author} and then its length in hours with one decimal, e.g. "Andy Weir · 16.1h".
+#. TRANSLATORS: A book's subtitle on a card or in a list. {author} is the author's name; {duration} its length, e.g. "11.5h" or "45m".
 #: app/src/screens/home.rs app/src/screens/library.rs
-msgid "{author} · {hours}h"
-msgstr "{author} · {hours} h"
+msgid "{author} · {duration}"
+msgstr "{author} · {duration}"
 
 #. TRANSLATORS: kind of an Audiobookshelf library, shown under its name on Home. Lowercase in English.
 #: app/src/screens/home.rs
@@ -506,11 +517,10 @@ msgctxt "library kind"
 msgid "book"
 msgstr "książki"
 
-#. TRANSLATORS: kind of an Audiobookshelf library, shown under its name on Home. Lowercase in English.
+#. TRANSLATORS: shown under a podcast library's name on Home; the app can't play podcasts, so their shows aren't listed anywhere.
 #: app/src/screens/home.rs
-msgctxt "library kind"
-msgid "podcast"
-msgstr "podcasty"
+msgid "Podcasts aren't supported yet"
+msgstr "Podcasty nie są jeszcze obsługiwane"
 
 #: app/src/screens/item_detail.rs
 msgid "Play"
@@ -714,8 +724,20 @@ msgid "List view"
 msgstr "Widok listy"
 
 #: app/src/screens/library.rs
+msgid "Download books to listen to them offline."
+msgstr "Pobierz książki, aby słuchać ich offline."
+
+#: app/src/screens/library.rs
 msgid "No downloaded items"
 msgstr "Brak pobranych pozycji"
+
+#: app/src/screens/library.rs
+msgid "No matches"
+msgstr "Brak wyników"
+
+#: app/src/screens/library.rs
+msgid "Try a different search or filter."
+msgstr "Spróbuj innego wyszukiwania lub filtra."
 
 #: app/src/screens/library.rs
 msgctxt "Group header for books without a series"
@@ -883,6 +905,17 @@ msgid "Turn off offline mode to stream it."
 msgstr "Wyłącz tryb offline, aby ją streamować."
 
 #: app/src/screens/player.rs
+msgid "Nothing to play here"
+msgstr "Nie ma tu czego odtworzyć"
+
+#: app/src/screens/player.rs
+msgid ""
+"This item has no audio the app can play, such as a podcast or an e-book."
+msgstr ""
+"Ta pozycja nie ma dźwięku, który aplikacja może odtworzyć — to np. podcast "
+"albo e-book."
+
+#: app/src/screens/player.rs
 msgid "No audio engine could be started on this device."
 msgstr "Na tym urządzeniu nie udało się uruchomić żadnego silnika audio."
 
@@ -921,6 +954,10 @@ msgstr "Błąd przewijania"
 #: app/src/screens/player.rs
 msgid "Not downloaded"
 msgstr "Nie pobrano"
+
+#: app/src/screens/player.rs
+msgid "No audio"
+msgstr "Brak dźwięku"
 
 #: app/src/screens/player.rs
 msgid "Playback unavailable"
@@ -976,6 +1013,11 @@ msgstr "Wylogować użytkownika {username}?"
 #: app/src/screens/settings.rs
 msgid "Signing out"
 msgstr "Wylogowywanie"
+
+#. TRANSLATORS: Dialog heading. {server} is the address of the server being removed, {username} the account signed in on it (one server can be listed once per account).
+#: app/src/screens/settings.rs
+msgid "Remove {server} ({username})?"
+msgstr "Usunąć {server} ({username})?"
 
 #. TRANSLATORS: Dialog heading. {server} is the address of the server being removed.
 #: app/src/screens/settings.rs
@@ -1215,6 +1257,10 @@ msgstr "Zużywa do 64 MB pamięci; rozważ wyłączenie w trybie niskiej pamięc
 msgid "Saving playback settings"
 msgstr "Zapisywanie ustawień odtwarzania"
 
+#: app/src/screens/settings.rs app/src/screens/welcome.rs
+msgid "Connect"
+msgstr "Połącz"
+
 #: app/src/screens/welcome.rs
 msgid "Connect to your Audiobookshelf server"
 msgstr "Połącz się z serwerem Audiobookshelf"
@@ -1248,10 +1294,6 @@ msgid ""
 "Signs you in again if the server ends the session. Kept in your keyring."
 msgstr ""
 "Loguje ponownie, gdy serwer zakończy sesję. Przechowywane w bazie kluczy."
-
-#: app/src/screens/welcome.rs
-msgid "Connect"
-msgstr "Połącz"
 
 #: app/src/screens/welcome.rs
 msgid "Connecting…"
@@ -1519,3 +1561,7 @@ msgstr ""
 "oraz utrzymuj synchronizację postępu słuchania z serwerem. Integruje się z "
 "pulpitem przez MPRIS2 i wstrzymuje odtwarzanie podczas połączeń "
 "telefonicznych."
+
+#~ msgctxt "library kind"
+#~ msgid "podcast"
+#~ msgstr "podcasty"

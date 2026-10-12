@@ -271,6 +271,7 @@ mod tests {
         (library_sorts_by_last_listened, crate::screens::library::tests::run_sorts_by_last_listened),
         (library_in_progress_filter_is_manually_toggleable, crate::screens::library::tests::run_in_progress_filter_is_manually_toggleable),
         (library_offline_mode_toggle_filters_to_downloaded_items, crate::screens::library::tests::run_offline_mode_toggle_filters_to_downloaded_items),
+        (library_empty_states_follow_offline_mode_and_search, crate::screens::library::tests::run_empty_states_follow_offline_mode_and_search),
         (library_shows_a_banner_when_sync_fails, crate::screens::library::tests::run_shows_a_banner_when_sync_fails),
         (library_shows_login_again_in_the_banner_when_a_resync_is_rejected, crate::screens::library::tests::run_shows_login_again_in_the_banner_when_a_resync_is_rejected),
         (library_shows_empty_state_when_the_server_has_no_libraries, crate::screens::library::tests::run_shows_empty_state_when_the_server_has_no_libraries),

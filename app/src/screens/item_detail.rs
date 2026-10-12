@@ -748,7 +748,7 @@ fn refresh_chapter_rows(
 /// longer (chapters, whole books), "12m" below that (a very short chapter). Deliberately coarser
 /// than the Player screen's `format_hms` (which needs second-level precision for a live scrubber);
 /// this is metadata text, not a transport readout.
-fn format_duration(total_seconds: f64) -> String {
+pub(crate) fn format_duration(total_seconds: f64) -> String {
     let total_seconds = total_seconds.max(0.0);
     if total_seconds >= 3600.0 {
         // TRANSLATORS: {hours} is a number of hours with one decimal, e.g. "1.5h" (a duration; "h" = hours).

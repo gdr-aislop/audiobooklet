@@ -305,6 +305,7 @@ pub fn build(
         remove_item.connect_clicked({
             let pool = pool.clone();
             let paths = paths.clone();
+            let download_manager = download_manager.clone();
             let window = window.clone();
             let server_id = server.id.clone();
             let server_host = host_of(&server.url).to_string();
@@ -315,6 +316,7 @@ pub fn build(
                 let dialog_window = window.clone();
                 let pool = pool.clone();
                 let paths = paths.clone();
+                let download_manager = download_manager.clone();
                 let window = window.clone();
                 let server_id = server_id.clone();
                 let toast_overlay = toast_overlay.clone();
@@ -343,6 +345,9 @@ pub fn build(
                             let window = window.clone();
                             let server_id = server_id.clone();
                             let toast_overlay = toast_overlay.clone();
+                            // Its downloads still running would keep writing into the files
+                            // removed below.
+                            download_manager.cancel_server(&server_id);
                             glib::spawn_future_local(async move {
                                 if let Err(err) = abs_core::accounts::remove_server(&pool, &server_id, crate::password_keyring::store().as_ref()).await {
                                     crate::error_reporting::report_background_error(&toast_overlay, &tr("Removing the server"), err);

@@ -35,6 +35,7 @@ pub struct HomeScreen {
     widgets: HomeWidgets,
     pool: SqlitePool,
     server_id: String,
+    account_id: String,
     #[cfg(test)]
     hooks: TestHooks,
 }
@@ -51,6 +52,38 @@ impl HomeScreen {
                 if let Some(data) = cached {
                     apply(&data, &widgets);
                 }
+            });
+        });
+    }
+
+    /// Re-reads the shelves a moment after playback pauses or stops, so "Continue Listening" shows
+    /// the book just listened to without waiting for the next sync (found in the 2026-10-12
+    /// pass). Local storage only; the delay lets the player's queued progress write land first.
+    pub(crate) fn follow_player(&self, controller: &crate::player::PlayerController) {
+        let (pool, server_id, account_id, widgets) = (self.pool.clone(), self.server_id.clone(), self.account_id.clone(), self.widgets.clone());
+        let root = self.root.downgrade();
+        let was_playing = std::cell::Cell::new(false);
+        let pending = std::rc::Rc::new(std::cell::Cell::new(false));
+        controller.add_listener(move |snapshot| {
+            let stopped = was_playing.replace(snapshot.is_playing) && !snapshot.is_playing;
+            if !stopped || pending.get() || root.upgrade().is_none() {
+                return;
+            }
+            pending.set(true);
+            let (pool, server_id, account_id, widgets, root, pending) =
+                (pool.clone(), server_id.clone(), account_id.clone(), widgets.clone(), root.clone(), pending.clone());
+            glib::timeout_add_local_once(std::time::Duration::from_secs(2), move || {
+                pending.set(false);
+                if root.upgrade().is_none() {
+                    return;
+                }
+                glib::spawn_future_local(async move {
+                    if let Ok(data) = load(&pool, &server_id, &account_id).await {
+                        if !data.libraries.is_empty() {
+                            apply(&data, &widgets);
+                        }
+                    }
+                });
             });
         });
     }
@@ -289,6 +322,21 @@ impl EmptyState {
         self.root.set_visible(true);
     }
 
+    /// Offline mode on and nothing stored for this server yet (it was added while offline): the
+    /// server may well have libraries — this device just hasn't asked. Found in the 2026-10-12
+    /// pass, where this said "This server doesn't have any libraries yet."
+    fn show_offline_empty(&self) {
+        self.spinner.set_visible(false);
+        self.spinner.stop();
+        self.icon.set_visible(true);
+        self.icon.set_icon_name(Some("airplane-mode-symbolic"));
+        self.title.set_label(&tr("Offline mode is on"));
+        self.description.set_label(&tr("Turn it off to load this server's libraries."));
+        self.set_details("");
+        self.buttons.set_visible(false);
+        self.root.set_visible(true);
+    }
+
     fn hide(&self) {
         self.root.set_visible(false);
         self.spinner.stop();
@@ -518,6 +566,33 @@ pub fn build(
     };
     spawn_sync_cycle(ctx.clone(), widgets.clone(), None);
 
+    // Offline mode turned off: catch up with the server. Both screens ask; the startup-sync claim
+    // lets only one of them hit the network, and the other follows (see `sync_coordinator`). A
+    // server added while offline mode was on used to stay empty until "Try again".
+    widgets.offline_mode.add_listener({
+        let (ctx, widgets) = (ctx.clone(), widgets.clone());
+        let was_offline = std::cell::Cell::new(ctx.session.is_offline());
+        move |offline| {
+            let came_online = was_offline.replace(offline) && !offline;
+            if came_online && widgets.scroller.root().is_some() {
+                spawn_sync_cycle(ctx.clone(), widgets.clone(), None);
+            }
+        }
+    });
+
+    // Library's own syncs ("Sync now" there, the catch-up after offline mode) land here too.
+    // Dropped once this screen is no longer in a window (the shell was rebuilt).
+    crate::sync_coordinator::on_synced(&server.id, &account.id, crate::sync_coordinator::Screen::Home, {
+        let (pool, server_id, account_id, widgets) = (pool.clone(), server.id.clone(), account.id.clone(), widgets.clone());
+        move |outcome| {
+            if widgets.scroller.root().is_none() {
+                return false;
+            }
+            glib::spawn_future_local(follow_library_sync(pool.clone(), server_id.clone(), account_id.clone(), widgets.clone(), Some(outcome)));
+            true
+        }
+    });
+
     // The two manual triggers — the ⋯ menu's "Sync now" and a pull past the scroller's top —
     // share one `ManualSync` (indicator + toast + in-flight guard) between them; see
     // `spawn_sync_cycle`.
@@ -656,6 +731,7 @@ pub fn build(
         widgets: widgets.clone(),
         pool: pool.clone(),
         server_id: server.id.clone(),
+        account_id: account.id.clone(),
         #[cfg(test)]
         hooks: TestHooks {
             empty_state,
@@ -715,7 +791,7 @@ fn spawn_sync_cycle(ctx: SyncCtx, widgets: HomeWidgets, manual: Option<crate::wi
         glib::spawn_future_local(async move {
             match load(&pool, &server_id, &account_id).await {
                 Ok(data) if !data.libraries.is_empty() => apply(&data, &widgets),
-                _ => widgets.empty_state.show_empty(),
+                _ => widgets.empty_state.show_offline_empty(),
             }
         });
         if let Some(manual) = manual {
@@ -740,23 +816,7 @@ fn spawn_sync_cycle(ctx: SyncCtx, widgets: HomeWidgets, manual: Option<crate::wi
             // `move` closure's own capture of them, evaluated as part of the same call.
             let (claim_server_id, claim_account_id) = (server_id.clone(), account_id.clone());
             crate::sync_coordinator::on_completed(&claim_server_id, &claim_account_id, move |outcome| {
-                glib::spawn_future_local(async move {
-                    let mut steps = crate::perf::Steps::new("home load", "after Library's sync");
-                    steps.step("read");
-                    let loaded = load(&pool, &server_id, &account_id).await;
-                    let has_data = loaded.as_ref().is_ok_and(|data| !data.libraries.is_empty());
-                    steps.step("render");
-                    if let (Ok(data), true) = (&loaded, has_data) {
-                        apply(data, &widgets);
-                    }
-                    steps.finish(if loaded.is_ok() { "ok" } else { "failed" }, None);
-                    // How the other screen's sync went — told here too, so this screen never
-                    // just redraws silently (or keeps its first-sync spinner) after a failure.
-                    if let Some(outcome) = outcome {
-                        let local_read_error = loaded.as_ref().err().map(|err| err.to_string());
-                        show_sync_result(&widgets, has_data, outcome.error(), local_read_error.as_deref());
-                    }
-                });
+                glib::spawn_future_local(follow_library_sync(pool, server_id, account_id, widgets, outcome));
             });
             return;
         }
@@ -915,6 +975,8 @@ fn spawn_sync_cycle(ctx: SyncCtx, widgets: HomeWidgets, manual: Option<crate::wi
         // landed.
         if is_automatic {
             crate::sync_coordinator::mark_completed(&server_id, &account_id, crate::sync_coordinator::SyncOutcome::from_result(&sync_result));
+        } else {
+            crate::sync_coordinator::notify_synced(&server_id, &account_id, crate::sync_coordinator::Screen::Home, crate::sync_coordinator::SyncOutcome::from_result(&sync_result));
         }
     });
 }
@@ -954,6 +1016,25 @@ async fn render_from_cache(pool: SqlitePool, server_id: String, account_id: Stri
         if !data.libraries.is_empty() {
             apply(&data, &widgets);
         }
+    }
+}
+
+/// Re-reads local storage after Library ran a sync (the startup one Home didn't claim, or a
+/// manual one) and shows how it went — so this screen never just redraws silently (or keeps its
+/// first-sync spinner) after a failure.
+async fn follow_library_sync(pool: SqlitePool, server_id: String, account_id: String, widgets: HomeWidgets, outcome: Option<crate::sync_coordinator::SyncOutcome>) {
+    let mut steps = crate::perf::Steps::new("home load", "after Library's sync");
+    steps.step("read");
+    let loaded = load(&pool, &server_id, &account_id).await;
+    let has_data = loaded.as_ref().is_ok_and(|data| !data.libraries.is_empty());
+    steps.step("render");
+    if let (Ok(data), true) = (&loaded, has_data) {
+        apply(data, &widgets);
+    }
+    steps.finish(if loaded.is_ok() { "ok" } else { "failed" }, None);
+    if let Some(outcome) = outcome {
+        let local_read_error = loaded.as_ref().err().map(|err| err.to_string());
+        show_sync_result(&widgets, has_data, outcome.error(), local_read_error.as_deref());
     }
 }
 
@@ -1037,11 +1118,11 @@ fn apply(data: &HomeData, widgets: &HomeWidgets) {
 }
 
 fn item_subtitle(item: &Item) -> String {
-    let hours = item.duration_seconds / 3600.0;
     let unknown_author = tr("Unknown author");
     let author = item.author.as_deref().unwrap_or(&unknown_author);
-    // TRANSLATORS: A book's subtitle on a shelf card. {author} is the author's name; {hours} is the total length in hours with one decimal (e.g. "11.5"), followed by an "h" for hours.
-    tr_args("{author} · {hours}h", &[("author", author), ("hours", &format!("{hours:.1}"))])
+    let duration = crate::screens::item_detail::format_duration(item.duration_seconds);
+    // TRANSLATORS: A book's subtitle on a card or in a list. {author} is the author's name; {duration} its length, e.g. "11.5h" or "45m".
+    tr_args("{author} · {duration}", &[("author", author), ("duration", &duration)])
 }
 
 fn section_heading(text: &str) -> gtk4::Label {
