@@ -38,6 +38,53 @@ Conventions: **playback position** always means position in the *book*, not in t
 file. "Mini bar" is the bottom player strip; "full player" is the Now Playing screen;
 "view options sheet" is Library browse's bottom sheet.
 
+## Manual pass results — 2026-10-12 (multi-library, multi-account)
+
+The real 0.9.7 release binary (9e36993), driven under Xvfb with `xdotool`, against two local
+Audiobookshelf 2.37.1 servers (Docker, `ghcr.io/advplyr/audiobookshelf`) and the public demo:
+- **Server A**: "Audiobooks", "Kids" and "Podcasts"; users `root` and `anna` (Kids only).
+- **Server B**: "Fiction"; user `bob`.
+- **Demo**: `https://audiobooks.dev/audiobookshelf`.
+
+Each result was checked against the app log and its SQLite database.
+
+**Works:**
+- Libraries:
+  - Every library on a server is merged into one Library list and one Recently Added shelf.
+  - Search spans libraries.
+  - A restricted user sees only their libraries.
+- Server management:
+  - Add Server (with Cancel, playback uninterrupted).
+  - Switching servers (about 0.3 s on a local server, player retired with its position saved).
+  - Removing a server that isn't active purges its rows, covers and downloads.
+- Data kept apart and preserved:
+  - Downloads stay per server, including one that finishes in the background after a switch.
+  - Progress stays per account.
+  - "Log in again" on one server keeps the same account and leaves the others alone.
+  - A relaunch with four servers restores the active account without a login.
+  - Remembered passwords are removed with their accounts.
+
+**Found:**
+1. **Serious:** a library deleted on the server makes every later sync of that server fail with
+   HTTP 404 for its items. `sync_libraries` never drops libraries the server no longer lists, and
+   `sync_all` fetches items for all stored ones.
+2. **Serious:** signing out of, or removing, the *active* account lands on the first-run login
+   screen with no Cancel, even with other accounts left. It survives a relaunch. Logging in again
+   adds a duplicate server row, and the old row keeps the downloads.
+3. Adding a server URL that is already in the list creates another row, even for the same user.
+4. Podcasts and e-books are listed like books. Play shows "Connection lost" (real error: no audio
+   files).
+5. "Remove Server" in the server menu is invisible with libadwaita 1.5 (`flat` +
+   `destructive-action` gives white on white), though clickable.
+6. The Library tab doesn't refresh after Home's Sync now or after leaving offline mode. Once,
+   after offline mode was turned on and off with a search active, it stayed on "No items yet" with
+   24 items stored.
+7. Smaller issues:
+   - A server added in offline mode says it has no libraries, and leaving offline mode doesn't
+     sync it.
+   - Continue Listening waits for the next sync.
+   - An empty search says "Check your connection".
+
 ## Manual pass results — 2026-09-25
 
 A full manual pass was run against a locally-seeded Audiobookshelf server (Docker,
