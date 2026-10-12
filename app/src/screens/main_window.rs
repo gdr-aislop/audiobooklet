@@ -179,7 +179,6 @@ pub struct TestHooks {
     /// accel-to-action mapping itself is GTK-level and needs real key events to exercise.
     pub switch_tab: gtk4::gio::SimpleAction,
     pub play_pause: gtk4::gio::SimpleAction,
-    pub bookmark: gtk4::gio::SimpleAction,
     pub open_library_search: gtk4::gio::SimpleAction,
     /// The Library tab's search entry, the focus target of `open-library-search`.
     pub library_search: gtk4::SearchEntry,
@@ -812,36 +811,17 @@ pub fn build(
 
     // Keyboard actions for the whole shell (ui-spec §6's global table; the accelerators
     // themselves are set app-wide in `application.rs`). Transport keys no-op when nothing is
-    // loaded — every `PlayerController` method already does. Single-key bindings (`space`, `b`)
+    // loaded — every `PlayerController` method already does. Single-key bindings (`space` here)
     // are installed by `application::add_single_key_shortcuts` as a bubble-phase controller, so
     // a focused text entry types the key first and the action never fires: no per-widget guards
     // are wanted here. (They must not be plain app accelerators — GTK4 runs those in the capture
-    // phase, ahead of the focused widget, which swallowed `b` in the Library search.)
+    // phase, ahead of the focused widget, which once swallowed a bare key in the Library search.)
     let play_pause_action = gtk4::gio::SimpleAction::new("play-pause", None);
     play_pause_action.connect_activate({
         let controller = mini_bar.controller.clone();
         move |_, _| controller.toggle_play_pause()
     });
     window.add_action(&play_pause_action);
-
-    let bookmark_action = gtk4::gio::SimpleAction::new("bookmark", None);
-    bookmark_action.connect_activate({
-        let controller = mini_bar.controller.clone();
-        // `root`, not a per-screen overlay: this keyboard shortcut works from any tab, exactly
-        // like the playback-error toast above already does.
-        let toast_overlay = root.clone();
-        move |_, _| {
-            let Some(write) = controller.add_bookmark() else { return };
-            let toast_overlay = toast_overlay.clone();
-            glib::spawn_future_local(async move {
-                match write.await {
-                    Ok(()) => toast_overlay.add_toast(adw::Toast::new(&tr("Bookmark added"))),
-                    Err(err) => crate::error_reporting::report_background_error(&toast_overlay, &tr("Adding bookmark"), err),
-                }
-            });
-        }
-    });
-    window.add_action(&bookmark_action);
 
     let switch_tab_action = gtk4::gio::SimpleAction::new("switch-tab", Some(gtk4::glib::VariantTy::STRING));
     switch_tab_action.connect_activate({
@@ -910,7 +890,6 @@ pub fn build(
             open_player: open_player.clone(),
             switch_tab: switch_tab_action,
             play_pause: play_pause_action,
-            bookmark: bookmark_action,
             open_library_search: open_library_search_action,
             library_search: library_screen.search_entry,
             pause_on_unplug_switch: settings_screen.hooks.pause_on_unplug_switch,
@@ -1033,10 +1012,9 @@ pub(crate) mod tests {
             std::time::Duration::from_secs(5),
         );
 
-        // Transport/bookmark keys with nothing loaded are no-ops by contract (every
-        // `PlayerController` method early-returns) — activating them must simply not panic.
+        // Transport keys with nothing loaded are no-ops by contract (every `PlayerController`
+        // method early-returns) — activating them must simply not panic.
         hooks.play_pause.activate(None::<&gtk4::glib::Variant>);
-        hooks.bookmark.activate(None::<&gtk4::glib::Variant>);
     }
 
     /// `handle_call_event`'s full behavior matrix — all the semantics the one-line closure

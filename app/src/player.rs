@@ -950,7 +950,7 @@ impl Inner {
     }
 
     /// The book-level playback position: the current track's offset within the book plus the
-    /// backend's position inside that track. Progress, chapters and bookmarks are all defined
+    /// backend's position inside that track. Progress and chapters are both defined
     /// book-level (they're shared with the server and its other clients), while the pipeline only
     /// ever knows where it is inside the single file it holds — so every read of "where are we"
     /// funnels through here rather than through `backend.position()` directly.
@@ -1807,25 +1807,6 @@ impl PlayerController {
         let inner = self.inner.borrow();
         let now_playing = inner.now_playing.as_ref()?;
         chapter_index_at(&now_playing.chapters, inner.book_position())
-    }
-
-    /// Records a bookmark at the current position. Local-only, bypassing `abs-core` entirely —
-    /// same precedent as `write_progress`'s local half: a plain repo write, no server sync, since
-    /// none is specified for bookmarks. `None` if nothing is playing; otherwise the write itself,
-    /// handed back rather than spawned in here, so the caller (whose own toast is the only honest
-    /// place to report "Bookmark added" — this was a bare, unconditional toast before, showing
-    /// success whether or not the write actually landed) can await the real outcome instead.
-    pub fn add_bookmark(&self) -> Option<impl std::future::Future<Output = Result<(), abs_storage::StorageError>> + 'static> {
-        let inner = self.inner.borrow();
-        let now_playing = inner.now_playing.as_ref()?;
-        let pool = inner.pool.clone();
-        let account_id = now_playing.account_id.clone();
-        let server_id = now_playing.server_id.clone();
-        let item_id = now_playing.item_id.clone();
-        let position = inner.book_position();
-        drop(inner);
-
-        Some(async move { abs_storage::repo::bookmarks::add(&pool, &account_id, &server_id, &item_id, position).await.map(|_id| ()) })
     }
 
     /// Pauses (if playing) and marks the current item finished at its full duration — the same
@@ -4530,38 +4511,6 @@ pub(crate) mod tests {
         let controller = PlayerController::new(pool, crate::test_support::test_paths(), test_backend(), |_| {});
         controller.sync_pending_progress();
         pump_until(|| false, Duration::from_millis(100));
-        controller.stop();
-    }
-
-    /// `add_bookmark` is a plain local repo write with no server sync and no readback anywhere in
-    /// the app yet — the only thing worth asserting is that the write actually lands.
-    pub(crate) fn run_add_bookmark_persists_a_row(runtime: &tokio::runtime::Runtime) {
-        let mock_server = runtime.block_on(MockServer::start());
-        runtime.block_on(mock_playable_item(&mock_server, "item-1", 10));
-
-        let pool = runtime.block_on(pool());
-        let (server, account) = runtime.block_on(account_and_server(&pool, &mock_server.uri()));
-        runtime.block_on(insert_synced_item(&pool, &server.id, "item-1", "Test Item"));
-
-        let controller = PlayerController::new(pool.clone(), crate::test_support::test_paths(), test_backend(), |_| {});
-        controller.start(
-            abs_core::auth::Session::new(pool.clone(), &server, &account),
-            PlayRequest { item_id: "item-1".to_string(), title: "Test Book".to_string(), author: None },
-            1.0,
-        );
-        pump_until(|| controller.snapshot().is_some_and(|s| !s.is_loading), Duration::from_secs(10));
-
-        // `add_bookmark` hands back the write rather than spawning it itself (see its own doc
-        // comment) — the caller (here, and every real call site) is what actually runs it.
-        let write = controller.add_bookmark().expect("something is playing, so a bookmark can be added");
-        glib::spawn_future_local(async move {
-            write.await.expect("the bookmark write should succeed");
-        });
-        pump_until(|| false, Duration::from_millis(300));
-
-        let count: i64 =
-            runtime.block_on(sqlx::query_scalar("SELECT COUNT(*) FROM bookmarks").fetch_one(&pool)).unwrap();
-        assert_eq!(count, 1, "add_bookmark should persist a row");
         controller.stop();
     }
 

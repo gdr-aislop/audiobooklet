@@ -397,7 +397,6 @@ mod tests {
         (playback_start_replaces_the_cover_once_a_valid_new_one_is_downloaded, crate::player::tests::run_start_replaces_the_cover_once_a_valid_new_one_is_downloaded),
         (playback_mini_bar_reflects_playback_state, crate::player::tests::run_mini_bar_reflects_playback_state),
         (playback_mini_bar_shows_a_warning_glyph_on_playback_error, crate::player::tests::run_mini_bar_shows_a_warning_glyph_on_playback_error),
-        (playback_add_bookmark_persists_a_row, crate::player::tests::run_add_bookmark_persists_a_row),
         (playback_starting_a_new_item_flushes_the_previous_items_progress, crate::player::tests::run_starting_a_new_item_flushes_the_previous_items_progress),
         (playback_sync_pending_progress_pushes_the_current_position_while_paused, crate::player::tests::run_sync_pending_progress_pushes_the_current_position_while_paused),
         (playback_sync_pending_progress_does_not_clobber_a_newer_server_value, crate::player::tests::run_sync_pending_progress_does_not_clobber_a_newer_server_value),
@@ -457,10 +456,8 @@ mod tests {
         (download_scope_menu_a_failed_download_toasts_the_reason, crate::widgets::download_scope_menu::tests::run_a_failed_download_toasts_the_reason),
 
         (item_options_menu_buttons_invoke_their_callback_and_popdown, crate::widgets::item_options_menu::tests::run_buttons_invoke_their_callback_and_popdown),
-        (item_options_menu_leading_widget_is_inserted_when_given, crate::widgets::item_options_menu::tests::run_leading_widget_is_inserted_when_given),
         (player_screen_speed_popover_changes_playback_speed, crate::screens::player::tests::run_speed_popover_changes_playback_speed),
         (player_screen_sleep_timer_end_of_chapter_pauses_at_the_boundary, crate::screens::player::tests::run_sleep_timer_end_of_chapter_pauses_at_the_boundary),
-        (player_screen_add_bookmark_button_persists_a_row, crate::screens::player::tests::run_add_bookmark_button_persists_a_row),
         (player_screen_mark_as_finished_button_updates_progress, crate::screens::player::tests::run_mark_as_finished_button_updates_progress),
         (player_screen_reset_progress_button_resets_position_and_seeks, crate::screens::player::tests::run_reset_progress_button_resets_position_and_seeks),
         (cover_image_rendering, crate::widgets::cover_image::tests::run),

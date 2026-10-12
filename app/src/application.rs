@@ -376,7 +376,7 @@ pub(crate) async fn fetch_servers_with_accounts(pool: &SqlitePool) -> Vec<(abs_s
 
 /// Accelerators registered app-wide through `set_accels_for_action`. Every one of them **must**
 /// carry a modifier: GTK4 runs application accelerators in the *capture* phase at the window,
-/// ahead of the focused widget, so a bare key here (`b`, `space`, ...) would be consumed before a
+/// ahead of the focused widget, so a bare key here (`space`, `c`, ...) would be consumed before a
 /// focused text entry could type it. Modifier-less bindings live in `SINGLE_KEY_SHORTCUTS`.
 const APP_ACCELS: &[(&str, &[&str])] = &[
     ("app.quit", &["<Control>q"]),
@@ -398,7 +398,6 @@ const APP_ACCELS: &[(&str, &[&str])] = &[
 /// Modifier-less `(trigger, action)` bindings, installed by `add_single_key_shortcuts`.
 const SINGLE_KEY_SHORTCUTS: &[(&str, &str)] = &[
     ("space", "win.play-pause"),
-    ("b", "win.bookmark"),
     ("Left", "player.skip-back"),
     ("Right", "player.skip-forward"),
     ("plus", "player.speed-up"),
@@ -524,10 +523,7 @@ fn build_shortcuts_overlay() -> gtk4::ShortcutsWindow {
         ),
         playback = shortcuts_group(
             &tr("Playback"),
-            &[
-                (&tr("Play / pause"), "space"),
-                (&tr("Add bookmark"), "b"),
-            ],
+            &[(&tr("Play / pause"), "space")],
         ),
         full_player = shortcuts_group(
             &tr("Full player"),
@@ -572,7 +568,8 @@ pub(crate) mod tests {
     }
 
     /// The capture-phase accelerator table must never carry a bare key: GTK4 runs those ahead of
-    /// the focused widget, which is exactly how `b` stopped typing in the Library search box.
+    /// the focused widget, which is exactly how a bare shortcut key once stopped typing in the Library
+    /// search box.
     #[test]
     fn app_accels_all_carry_a_modifier() {
         for (action, accels) in APP_ACCELS {

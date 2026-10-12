@@ -3,10 +3,7 @@
 //! of `GMenu`/`GAction` (see `widgets::download_scope_menu`'s own doc for the precedent).
 //!
 //! Extracted out of `screens::player` (see its git history) once `screens::item_detail` needed
-//! the same two actions — one definition, not two copies that could quietly drift apart. Player
-//! additionally wants an "Add bookmark" row above the separator, which only makes sense while
-//! something is actively loaded for playback, so that stays out of this shared widget and is
-//! passed in as `leading_widget` instead of being duplicated here.
+//! the same two actions — one definition, not two copies that could quietly drift apart.
 //!
 //! "Reset progress" is styled `destructive-action` (it throws away the current listening
 //! position) but, matching the ui-spec's own precedent for "Clear downloaded chapters", isn't
@@ -24,21 +21,15 @@ use crate::i18n::tr;
 /// Player's header, Item Detail's header.
 pub struct ItemOptionsMenu {
     pub widget: gtk4::MenuButton,
-    /// Not test-only, unlike the sibling fields below: a caller with its own `leading_widget`
-    /// (Player's "Add bookmark") needs to pop this down itself after handling its own click, the
-    /// same way this widget already does for its own two buttons.
-    pub popover: gtk4::Popover,
     #[cfg(test)]
-    pub popover_box: gtk4::Box,
+    pub popover: gtk4::Popover,
     #[cfg(test)]
     pub mark_as_finished_button: gtk4::Button,
     #[cfg(test)]
     pub reset_progress_button: gtk4::Button,
 }
 
-/// `leading_widget`, if given, is inserted above the separator, ahead of "Mark as finished" —
-/// Player uses this for its "Add bookmark" button; Item Detail passes `None`. `on_mark_as_finished`
-/// and `on_reset_progress` do the actual work; this widget only wires the click and closes the
+/// `on_mark_as_finished` and `on_reset_progress` do the actual work; this widget only wires the click and closes the
 /// popover. Deliberately no toast here any more (see this crate's git history for the "Marked as
 /// finished"/"Progress reset" toasts this widget used to fire unconditionally, the instant the
 /// button was clicked, before either callback's write had actually landed): both callbacks can
@@ -46,7 +37,6 @@ pub struct ItemOptionsMenu {
 /// so only the caller — which awaits that — knows whether to report success or a real failure via
 /// `error_reporting::report_background_error`.
 pub fn build(
-    leading_widget: Option<gtk4::Widget>,
     on_mark_as_finished: impl Fn() + 'static,
     on_reset_progress: impl Fn() + 'static,
 ) -> ItemOptionsMenu {
@@ -54,10 +44,6 @@ pub fn build(
     let reset_progress_button = gtk4::Button::builder().label(&tr("Reset progress")).css_classes(["destructive-action"]).margin_top(6).build();
 
     let popover_box = gtk4::Box::builder().orientation(gtk4::Orientation::Vertical).build();
-    if let Some(leading_widget) = &leading_widget {
-        popover_box.append(leading_widget);
-    }
-    popover_box.append(&gtk4::Separator::new(gtk4::Orientation::Horizontal));
     popover_box.append(&mark_as_finished_button);
     popover_box.append(&reset_progress_button);
 
@@ -81,9 +67,8 @@ pub fn build(
 
     ItemOptionsMenu {
         widget,
-        popover,
         #[cfg(test)]
-        popover_box,
+        popover,
         #[cfg(test)]
         mark_as_finished_button,
         #[cfg(test)]
@@ -105,7 +90,6 @@ pub(crate) mod tests {
         let marked_finished = Rc::new(Cell::new(false));
         let reset = Rc::new(Cell::new(false));
         let menu = build(
-            None,
             {
                 let marked_finished = marked_finished.clone();
                 move || marked_finished.set(true)
@@ -135,17 +119,5 @@ pub(crate) mod tests {
         assert!(!menu.popover.is_visible(), "the popover should close after the action");
 
         window.destroy();
-    }
-
-    /// A `leading_widget` shows up in the popover above the separator; omitting it leaves just
-    /// the two rows this widget always builds.
-    pub(crate) fn run_leading_widget_is_inserted_when_given(_runtime: &tokio::runtime::Runtime) {
-        let with_leading = build(Some(gtk4::Button::with_label("Add bookmark").upcast()), || {}, || {});
-        let first_child = with_leading.popover_box.first_child().unwrap();
-        assert!(first_child.downcast_ref::<gtk4::Button>().is_some(), "the leading widget should be the first child when given");
-
-        let without_leading = build(None, || {}, || {});
-        let first_child = without_leading.popover_box.first_child().unwrap();
-        assert!(first_child.downcast_ref::<gtk4::Separator>().is_some(), "with no leading widget, the separator should be first");
     }
 }

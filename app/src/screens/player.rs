@@ -1,6 +1,6 @@
 //! The full player screen — `docs/design/ui-spec.md`'s "Player — full" section: core transport,
-//! a secondary row of speed/sleep-timer/chapters controls, and a header `⋯` menu for "Add
-//! bookmark", "Mark as finished", and "Reset progress". Opened by `main_window` swapping window
+//! a secondary row of speed/sleep-timer/chapters controls, and a header `⋯` menu for "Mark
+//! as finished" and "Reset progress". Opened by `main_window` swapping window
 //! content in (there's no `AdwNavigationView`/`AdwDialog` available at this crate's libadwaita
 //! ceiling, both v1.4+); the down-chevron header button, the `Esc` key, and a downward swipe
 //! anywhere on the screen (mirroring the mini bar's own swipe-up gesture, minus the tap
@@ -57,11 +57,8 @@ pub struct TestHooks {
     pub sleep_timer_button: gtk4::MenuButton,
     pub sleep_timer_popover: gtk4::Popover,
     pub sleep_timer_popover_box: gtk4::Box,
-    pub menu_button: gtk4::MenuButton,
-    pub add_bookmark_button: gtk4::Button,
     pub mark_as_finished_button: gtk4::Button,
     pub reset_progress_button: gtk4::Button,
-    pub toast_overlay: adw::ToastOverlay,
     pub download_button: gtk4::MenuButton,
     pub download_popover: gtk4::Popover,
     pub download_popover_box: gtk4::Box,
@@ -120,13 +117,6 @@ pub fn build(
         let controller = controller.clone();
         move |_| controller.play()
     });
-
-    // The spec's `⋯` menu is dropped down to "Add bookmark" plus two testing/recovery actions —
-    // speed and sleep timer live as secondary-row buttons instead (see the scope decision in this
-    // plan). "Mark as finished"/"Reset progress" themselves are the shared `item_options_menu`
-    // widget (also used by Item Detail); only "Add bookmark" is built here, since bookmarking only
-    // makes sense while something is actively loaded for playback.
-    let add_bookmark_button = gtk4::Button::builder().label(tr("Add bookmark")).css_classes(["flat"]).halign(gtk4::Align::Start).build();
 
     let cover = crate::widgets::cover_image::CoverImage::new(264);
     cover.widget().set_halign(gtk4::Align::Center);
@@ -408,8 +398,10 @@ pub fn build(
     secondary_row.append(&download_menu.widget);
     content.append(&progress_strip_widget);
 
+    // The spec's `⋯` menu is down to two testing/recovery actions — speed and sleep timer live
+    // as secondary-row buttons instead. Both are the shared `item_options_menu` widget (also used
+    // by Item Detail).
     let options_menu = crate::widgets::item_options_menu::build(
-        Some(add_bookmark_button.clone().upcast()),
         {
             let controller = controller.clone();
             let toast_overlay = toast_overlay.clone();
@@ -434,22 +426,6 @@ pub fn build(
     );
     header.pack_end(&options_menu.widget);
 
-    add_bookmark_button.connect_clicked({
-        let controller = controller.clone();
-        let options_popover = options_menu.popover.clone();
-        let toast_overlay = toast_overlay.clone();
-        move |_| {
-            options_popover.popdown();
-            let Some(write) = controller.add_bookmark() else { return };
-            let toast_overlay = toast_overlay.clone();
-            glib::spawn_future_local(async move {
-                match write.await {
-                    Ok(()) => toast_overlay.add_toast(adw::Toast::new(&tr("Bookmark added"))),
-                    Err(err) => crate::error_reporting::report_background_error(&toast_overlay, &tr("Adding bookmark"), err),
-                }
-            });
-        }
-    });
     // The skip intervals are read at click time from the controller (Settings → Playback's live
     // config) rather than captured from `playback_settings` at build — a Settings edit applies to
     // the very next skip, here and in the keyboard actions below.
@@ -781,10 +757,6 @@ pub fn build(
             sleep_timer_button,
             sleep_timer_popover,
             sleep_timer_popover_box,
-            add_bookmark_button,
-            toast_overlay,
-            #[cfg(test)]
-            menu_button: options_menu.widget,
             #[cfg(test)]
             mark_as_finished_button: options_menu.mark_as_finished_button,
             #[cfg(test)]
@@ -1521,39 +1493,6 @@ pub(crate) mod tests {
         );
         assert!(!controller.snapshot().unwrap().sleep_timer_active, "firing should also disarm the timer");
 
-        controller.stop();
-    }
-
-    /// Not a `#[test]` itself — see `main.rs`'s `mod tests`. `AdwToastOverlay` has no public way
-    /// to inspect a queued toast headless, so this checks the load-bearing effect instead: the
-    /// menu button opens a popover, and clicking "Add bookmark" in it writes a row to storage.
-    pub(crate) fn run_add_bookmark_button_persists_a_row(runtime: &tokio::runtime::Runtime) {
-        let mock_server = runtime.block_on(wiremock::MockServer::start());
-        runtime.block_on(mock_playable_item(&mock_server, "item-1", 5));
-
-        let pool = runtime.block_on(crate::test_support::pool());
-        let (server, account) = runtime.block_on(account_and_server(&pool, &mock_server.uri()));
-        runtime.block_on(insert_synced_item(&pool, &server.id, "item-1", "Test Item"));
-
-        let controller = crate::player::PlayerController::new(pool.clone(), crate::test_support::test_paths(), test_backend(), |_| {});
-        controller.start(
-            abs_core::auth::Session::new(pool.clone(), &server, &account),
-            PlayRequest { item_id: "item-1".to_string(), title: "Test Book".to_string(), author: None },
-            1.0,
-        );
-        pump_until(|| controller.snapshot().is_some_and(|s| !s.is_loading), Duration::from_secs(10));
-
-        let screen = build(pool.clone(), controller.clone(), test_download_manager(pool.clone()), || {}, || {});
-        let hooks = screen.test_hooks();
-        assert!(hooks.menu_button.popover().is_some(), "the ... menu button should open a popover");
-
-        hooks.add_bookmark_button.emit_clicked();
-        pump_until(|| false, Duration::from_millis(300));
-
-        let count: i64 =
-            runtime.block_on(sqlx::query_scalar("SELECT COUNT(*) FROM bookmarks").fetch_one(&pool)).unwrap();
-        assert_eq!(count, 1, "clicking Add bookmark should persist a row");
-        assert!(hooks.toast_overlay.child().is_some(), "the toast overlay should still be hosting the screen content");
         controller.stop();
     }
 

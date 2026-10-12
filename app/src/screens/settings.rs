@@ -244,7 +244,7 @@ pub fn build(
                 }
             });
 
-            // Sign-out removes the account row — its local progress and bookmarks cascade away
+            // Sign-out removes the account row — its local progress cascades away
             // with it (per-account data, keyed by FK). The server and its cached
             // libraries/items/downloads survive. Destructive enough to confirm first.
             sign_out_item.connect_clicked({
@@ -272,7 +272,7 @@ pub fn build(
                             &format!(
                                 "{}{}",
                                 // TRANSLATORS: Dialog body. {username} is the account being signed out.
-                                tr_args("{username}'s listening progress and bookmarks stored on this device will be removed — everything on the server stays where it is.", &[("username", username.as_str())]),
+                                tr_args("{username}'s listening progress stored on this device will be removed — everything on the server stays where it is.", &[("username", username.as_str())]),
                                 unpushed_progress_warning(unpushed)
                             ),
                             &tr("Sign Out"),
