@@ -23,8 +23,12 @@ use sqlx::SqlitePool;
 
 use abs_storage::models::{Account, Server};
 
-use crate::i18n::{ntr, tr, tr_args};
+use crate::i18n::{tr, tr_args};
 use crate::screens::settings::{confirm, host_of};
+use crate::widgets::connection_editors::{
+    add_dialog_content, cert_subtitle, headers_subtitle, headers_text, save_cancel_dialog, show_certificate_editor, show_error, show_headers_editor,
+    ApplyCertificate, ApplyHeaders, CertificateChoice,
+};
 use crate::widgets::find_descendant;
 
 pub struct ConnectionScreen {
@@ -114,12 +118,40 @@ pub fn build(
         .activatable(true)
         .build();
     headers_row.add_suffix(&chevron());
+    let headers_json = Rc::new(std::cell::RefCell::new(server.custom_headers_json.clone()));
     headers_row.connect_activated({
         let window = window.clone();
         let pool = pool.clone();
         let server_id = server_id.clone();
         let row = headers_row.clone();
-        move |_| show_headers_dialog(&window, &pool, &server_id, &row)
+        let headers_json = headers_json.clone();
+        move |_| {
+            let on_apply: ApplyHeaders = Rc::new({
+                let pool = pool.clone();
+                let server_id = server_id.clone();
+                let row = row.clone();
+                let headers_json = headers_json.clone();
+                move |json, dialog, error_label| {
+                    let pool = pool.clone();
+                    let server_id = server_id.clone();
+                    let row = row.clone();
+                    let headers_json = headers_json.clone();
+                    let dialog = dialog.clone();
+                    let error_label = error_label.clone();
+                    glib::spawn_future_local(async move {
+                        if let Err(err) = abs_storage::repo::servers::set_custom_headers_json(&pool, &server_id, &json).await {
+                            tracing::warn!(%err, server_id, "couldn't persist the custom headers");
+                            show_error(&error_label, &err.to_string());
+                            return;
+                        }
+                        row.set_subtitle(&headers_subtitle(&json));
+                        *headers_json.borrow_mut() = json;
+                        dialog.close();
+                    });
+                }
+            });
+            show_headers_editor(&window, &headers_text(&headers_json.borrow()), on_apply);
+        }
     });
     advanced_group.add(&headers_row);
 
@@ -262,13 +294,49 @@ pub fn build(
         .activatable(true)
         .build();
     cert_row.add_suffix(&chevron());
+    let cert_path = Rc::new(std::cell::RefCell::new(server.client_cert_path.clone()));
     cert_row.connect_activated({
         let window = window.clone();
         let pool = pool.clone();
         let server_id = server_id.clone();
         let row = cert_row.clone();
-        let current_path = server.client_cert_path.clone();
-        move |_| show_cert_dialog(&window, &pool, &server_id, &row, current_path.as_deref())
+        let cert_path = cert_path.clone();
+        move |_| {
+            let on_apply: ApplyCertificate = Rc::new({
+                let pool = pool.clone();
+                let server_id = server_id.clone();
+                let row = row.clone();
+                let cert_path = cert_path.clone();
+                move |choice, dialog, error_label| {
+                    let pool = pool.clone();
+                    let server_id = server_id.clone();
+                    let row = row.clone();
+                    let cert_path = cert_path.clone();
+                    let dialog = dialog.clone();
+                    let error_label = error_label.clone();
+                    glib::spawn_future_local(async move {
+                        let (path, password) = match choice {
+                            CertificateChoice::Set { path, password } => (Some(path.to_string_lossy().to_string()), password),
+                            CertificateChoice::Remove => (None, None),
+                        };
+                        if let Err(err) = abs_storage::repo::servers::set_client_cert_path(&pool, &server_id, path.as_deref()).await {
+                            tracing::warn!(%err, server_id, "couldn't persist the client certificate");
+                            show_error(&error_label, &err.to_string());
+                            return;
+                        }
+                        if let Err(err) = abs_storage::repo::servers::set_client_cert_password(&pool, &server_id, password.as_deref()).await {
+                            tracing::warn!(%err, server_id, "couldn't persist the client certificate's password");
+                            show_error(&error_label, &err.to_string());
+                            return;
+                        }
+                        row.set_subtitle(&cert_subtitle(path.as_deref()));
+                        *cert_path.borrow_mut() = path;
+                        dialog.close();
+                    });
+                }
+            });
+            show_certificate_editor(&window, cert_path.borrow().as_deref(), on_apply);
+        }
     });
     advanced_group.add(&cert_row);
 
@@ -374,82 +442,8 @@ fn text_subtitle(value: Option<&str>) -> String {
     value.map(str::to_string).unwrap_or_else(|| tr("None"))
 }
 
-/// How many headers a server's `custom_headers_json` resolves to — the Custom Headers row's
-/// subtitle (the headers themselves were validated at save time; a corrupt row just reads as
-/// fewer).
-fn headers_subtitle(custom_headers_json: &str) -> String {
-    match abs_core::connection::parse_custom_headers(custom_headers_json).len() {
-        0 => tr("None"),
-        count => ntr("{count} header", "{count} headers", count as u32),
-    }
-}
-
-/// The Client Certificate row's subtitle: the bundle's file name (or "None"), then a line saying
-/// the setting is incomplete.
-fn cert_subtitle(path: Option<&str>) -> String {
-    let value = match path {
-        Some(path) => std::path::Path::new(path)
-            .file_name()
-            .map(|name| name.to_string_lossy().to_string())
-            .unwrap_or_else(|| path.to_string()),
-        None => tr("None"),
-    };
-    format!("{value}\n{}", tr("Incomplete: not used when streaming playback"))
-}
-
-fn show_error(error_label: &gtk4::Label, message: &str) {
-    error_label.set_text(message);
-    error_label.set_visible(true);
-}
-
-/// The Advanced editors' save handlers — invoked with the dialog and the inline error label.
-type SaveHandler = Rc<dyn Fn(&gtk4::Dialog, &gtk4::Label)>;
 /// The single-line editors' save handlers, which also receive the field's text.
 type EntrySaveHandler = Rc<dyn Fn(&str, &gtk4::Dialog, &gtk4::Label)>;
-
-// The editors reach their fields with `crate::widgets::find_descendant` (imported below): the
-// layout is the builder functions' business; the handlers stay independent of it.
-
-/// The save/cancel dialog shell the Advanced rows' editors share: modal, transient, Cancel +
-/// Save, and `on_save` invoked on Save with the dialog and the inline error label (also
-/// returned, so the editor's builder can place it in the content) — an editor that validates
-/// inline shows the error; a successful save closes the dialog.
-fn save_cancel_dialog(
-    window: &adw::ApplicationWindow,
-    title: &str,
-    on_save: SaveHandler,
-) -> (gtk4::Dialog, gtk4::Label) {
-    let dialog = gtk4::Dialog::builder().title(title).modal(true).transient_for(window).build();
-    dialog.add_button(&tr("Cancel"), gtk4::ResponseType::Cancel);
-    dialog.add_button(&tr("Save"), gtk4::ResponseType::Ok);
-    // `max_width_chars(1)` caps this label's natural width regardless of `wrap`, so a long
-    // validation error can't force this dialog window wider than the screen (see
-    // `widgets::banner`'s identical fix for the same reasoning).
-    let error_label = gtk4::Label::builder().css_classes(["error"]).wrap(true).max_width_chars(1).visible(false).halign(gtk4::Align::Start).build();
-    let response_label = error_label.clone();
-    dialog.connect_response(move |dialog, response| {
-        if response == gtk4::ResponseType::Ok {
-            on_save(dialog, &response_label);
-        } else {
-            // A GtkDialog doesn't close itself on a response, so without this Cancel was a
-            // dead button and the editor could only be dismissed with Escape.
-            dialog.close();
-        }
-    });
-    (dialog, error_label)
-}
-
-fn add_dialog_content(dialog: &gtk4::Dialog, description: &str) -> gtk4::Box {
-    let content = dialog.content_area();
-    content.set_margin_start(12);
-    content.set_margin_end(12);
-    content.set_margin_top(12);
-    content.set_margin_bottom(12);
-    content.set_spacing(12);
-    let description_label = gtk4::Label::builder().label(description).wrap(true).max_width_chars(36).halign(gtk4::Align::Start).build();
-    content.append(&description_label);
-    content
-}
 
 /// The single-line editor shared by the Local Network Server Address and Change User Agent
 /// rows — the differences (keyboard type, validation, persistence, subtitle text) all live in
@@ -476,175 +470,6 @@ fn show_entry_dialog(
     content
         .append(&gtk4::Entry::builder().text(initial).input_purpose(input_purpose).hexpand(true).build());
     content.append(&error_label);
-    dialog.present();
-}
-
-/// The Custom Headers editor: one `Name: Value` pair per line (see
-/// `abs_core::connection::validate_custom_headers_text`, the single writer of the column).
-fn show_headers_dialog(window: &adw::ApplicationWindow, pool: &SqlitePool, server_id: &str, row: &adw::ActionRow) {
-    let (dialog, error_label) = save_cancel_dialog(window, &tr("Custom Headers"), {
-        let pool = pool.clone();
-        let server_id = server_id.to_string();
-        let row = row.clone();
-        Rc::new(move |dialog, error_label| {
-            let text = find_descendant::<gtk4::TextView>(dialog.content_area().upcast_ref())
-                .map(|view| view.buffer().text(&view.buffer().start_iter(), &view.buffer().end_iter(), false).to_string())
-                .unwrap_or_default();
-            let json = match abs_core::connection::validate_custom_headers_text(&text) {
-                Ok(json) => json,
-                Err(err) => return show_error(error_label, &err.to_string()),
-            };
-            let pool = pool.clone();
-            let server_id = server_id.clone();
-            let row = row.clone();
-            let dialog = dialog.clone();
-            let error_label = error_label.clone();
-            glib::spawn_future_local(async move {
-                if let Err(err) = abs_storage::repo::servers::set_custom_headers_json(&pool, &server_id, &json).await {
-                    tracing::warn!(%err, server_id, "couldn't persist the custom headers");
-                    show_error(&error_label, &err.to_string());
-                    return;
-                }
-                row.set_subtitle(&headers_subtitle(&json));
-                dialog.close();
-            });
-        })
-    });
-    let content = add_dialog_content(&dialog, &tr("Specify headers for server connections — one \"Name: Value\" pair per line. They're attached to every request to this server."));
-    let text_view = gtk4::TextView::builder().wrap_mode(gtk4::WrapMode::WordChar).height_request(120).monospace(true).build();
-    content.append(&gtk4::ScrolledWindow::builder().child(&text_view).hexpand(true).vexpand(true).build());
-    content.append(&error_label);
-    dialog.present();
-}
-
-/// The Client Certificate editor: a PKCS#12 bundle (`.p12`/`.pfx`) picked from disk plus its
-/// export password — validated at save time with the exact same read+parse a mint performs
-/// (`abs_core::connection::validate_client_cert`), so a bundle the dialog accepts cannot then
-/// fail the connection. "Remove" clears both the path and the password.
-fn show_cert_dialog(window: &adw::ApplicationWindow, pool: &SqlitePool, server_id: &str, row: &adw::ActionRow, current_path: Option<&str>) {
-    let chosen: Rc<std::cell::RefCell<Option<std::path::PathBuf>>> = Rc::new(std::cell::RefCell::new(current_path.map(std::path::PathBuf::from)));
-
-    let (dialog, save_error_label) = save_cancel_dialog(window, &tr("Client Certificate (Experimental)"), {
-        let pool = pool.clone();
-        let server_id = server_id.to_string();
-        let row = row.clone();
-        let chosen = chosen.clone();
-        Rc::new(move |dialog, error_label| {
-            let Some(path) = chosen.borrow().clone() else {
-                return show_error(error_label, &tr("Choose a certificate file first."));
-            };
-            let password = find_descendant::<gtk4::PasswordEntry>(dialog.content_area().upcast_ref())
-                .map(|entry| entry.text().to_string())
-                .filter(|password| !password.is_empty());
-            if let Err(message) = abs_core::connection::validate_client_cert(&path, password.as_deref()) {
-                return show_error(error_label, &message);
-            }
-            let pool = pool.clone();
-            let server_id = server_id.clone();
-            let row = row.clone();
-            let dialog = dialog.clone();
-            let error_label = error_label.clone();
-            let filename = cert_subtitle(Some(&path.to_string_lossy()));
-            glib::spawn_future_local(async move {
-                if let Err(err) = abs_storage::repo::servers::set_client_cert_path(&pool, &server_id, Some(&path.to_string_lossy())).await {
-                    tracing::warn!(%err, server_id, "couldn't persist the client certificate");
-                    show_error(&error_label, &err.to_string());
-                    return;
-                }
-                if let Err(err) = abs_storage::repo::servers::set_client_cert_password(&pool, &server_id, password.as_deref()).await {
-                    tracing::warn!(%err, server_id, "couldn't persist the client certificate's password");
-                    show_error(&error_label, &err.to_string());
-                    return;
-                }
-                row.set_subtitle(&filename);
-                dialog.close();
-            });
-        })
-    });
-
-    let content = add_dialog_content(
-        &dialog,
-        &tr("Used for signing in, syncing and downloads, but not for streaming playback: books on this server only play once downloaded. A .p12/.pfx bundle and its export password."),
-    );
-    let experimental_label = gtk4::Label::builder()
-        .label(tr("Experimental and incomplete"))
-        .css_classes(["warning", "heading"])
-        .halign(gtk4::Align::Start)
-        .build();
-    content.insert_child_after(&experimental_label, None::<&gtk4::Widget>);
-    let file_label = gtk4::Label::new(Some(&current_path.map(|path| path.to_string()).unwrap_or_else(|| tr("No file chosen"))));
-    file_label.set_ellipsize(gtk4::pango::EllipsizeMode::End);
-    let choose_button = gtk4::Button::builder().label(tr("Choose File…")).halign(gtk4::Align::Start).build();
-    choose_button.connect_clicked({
-        let window = window.clone();
-        let file_label = file_label.clone();
-        let chosen = chosen.clone();
-        move |_| {
-            let chooser = gtk4::FileChooserNative::builder()
-                .title(tr("Choose a certificate"))
-                .modal(true)
-                .transient_for(&window)
-                .build();
-            let file_filter = gtk4::FileFilter::new();
-            file_filter.set_name(Some(&tr("PKCS#12 certificate")));
-            file_filter.add_pattern("*.p12");
-            file_filter.add_pattern("*.pfx");
-            chooser.add_filter(&file_filter);
-            chooser.connect_response({
-                let file_label = file_label.clone();
-                let chosen = chosen.clone();
-                move |chooser, response| {
-                    if response == gtk4::ResponseType::Ok {
-                        if let Some(file) = chooser.file().and_then(|file| file.path()) {
-                            file_label.set_text(&file.to_string_lossy());
-                            *chosen.borrow_mut() = Some(file);
-                        }
-                    }
-                }
-            });
-            chooser.show();
-        }
-    });
-    content.append(&file_label);
-    content.append(&choose_button);
-    content.append(&gtk4::PasswordEntry::builder().show_peek_icon(true).placeholder_text(tr("Export password")).build());
-    // Reuses `save_cancel_dialog`'s own error label rather than appending a second, disconnected
-    // one here (there used to be two — this dialog's on-save failures reached the first, and
-    // nothing ever reached the second) — Remove's own failures below now show here too.
-    content.append(&save_error_label);
-
-    if current_path.is_some() {
-        let remove_button = gtk4::Button::builder().label(tr("Remove Certificate")).css_classes(["destructive-action"]).halign(gtk4::Align::Start).build();
-        remove_button.connect_clicked({
-            let pool = pool.clone();
-            let server_id = server_id.to_string();
-            let row = row.clone();
-            let dialog = dialog.clone();
-            let error_label = save_error_label.clone();
-            move |_| {
-                let pool = pool.clone();
-                let server_id = server_id.clone();
-                let row = row.clone();
-                let dialog = dialog.clone();
-                let error_label = error_label.clone();
-                glib::spawn_future_local(async move {
-                    if let Err(err) = abs_storage::repo::servers::set_client_cert_path(&pool, &server_id, None).await {
-                        tracing::warn!(%err, server_id, "couldn't clear the client certificate");
-                        show_error(&error_label, &err.to_string());
-                        return;
-                    }
-                    if let Err(err) = abs_storage::repo::servers::set_client_cert_password(&pool, &server_id, None).await {
-                        tracing::warn!(%err, server_id, "couldn't clear the client certificate's password");
-                        show_error(&error_label, &err.to_string());
-                        return;
-                    }
-                    row.set_subtitle(&cert_subtitle(None));
-                    dialog.close();
-                });
-            }
-        });
-        content.append(&remove_button);
-    }
     dialog.present();
 }
 

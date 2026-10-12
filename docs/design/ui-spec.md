@@ -12,7 +12,7 @@ Fractal) rather than copying Lissen's Material Design look.
 
 | Screen | Purpose |
 |---|---|
-| **Welcome / Server login** | Enter Audiobookshelf server URL, authenticate (username+password or API token). |
+| **Welcome / Server login** | Enter Audiobookshelf server URL, authenticate (username+password or API key). |
 | **Library picker** | Choose which library (books / podcasts) to browse, if the server has more than one. |
 | **Home** | "Continue listening" shelf, "Recently added", quick access to libraries. |
 | **Library browse** | Grid/list of items in a library; filter by author, series, genre; sort; search. |
@@ -57,8 +57,14 @@ Fractal) rather than copying Lissen's Material Design look.
     desktop keyring (never the app's database). When the server rejects the refresh token for
     good, the app signs in again with it silently, so one sign-in lasts however long the app goes
     unused. Signing in with the switch off, signing out, or removing the server forgets it.
-  - **API Token** — Server URL and a single Token field; username/password are hidden entirely
-    rather than just disabled, since they're not applicable to this mode.
+  - **API Key** — Server URL and a single API Key field; username/password are hidden entirely
+    rather than just disabled, since they're not applicable to this mode. A key is a bearer token
+    made in the server's settings; the server names its user (`GET /api/me`), and the account has
+    no refresh token.
+  - **Advanced** (both modes, collapsed by default) — what a server behind a private certificate, a
+    proxy or a firewall needs before a sign-in can get through: Allow Untrusted Certificate,
+    Custom Headers, Client Certificate (experimental). They apply to the attempt and are saved on
+    the server once it succeeds; a failure Advanced can fix opens it.
 - Primary `AdwButton` (suggested-action style, full width) "Connect", **disabled until the
   required fields for the current mode are filled in** — on first launch, with an empty form,
   this is the state the user actually sees.
@@ -69,10 +75,15 @@ Fractal) rather than copying Lissen's Material Design look.
   token) stay plain-text/purpose-managed.
 - **Error state**: on a failed connection attempt, an inline `AdwBanner`-style strip appears above
   the form, with copy that distinguishes *why* it failed rather than one generic message:
-  - **Authentication failure** (bad credentials/token): "Unable to sign in" / "Check your
-    username and password and try again.", and the offending field's (username/password/token) label
-    switches to an error/red tint.
-  - **Connectivity failure** (unreachable host, DNS failure, TLS/certificate error, timeout):
+  - **Authentication failure** (bad credentials/key): "Unable to sign in" / "Check your
+    username and password and try again." (a rejected API key: "API key not accepted"), and the
+    offending field's (username/password/key) label switches to an error/red tint.
+  - **Things Advanced can fix**, each with its own words and no field tint: the server's
+    certificate isn't trusted, the server wants (or refuses) a client certificate, a proxy answers
+    403/407, or a connection setting can't be used (a certificate bundle that won't open).
+    Other HTTP answers say so too (404: no Audiobookshelf server at that address; 5xx: a server
+    problem).
+  - **Connectivity failure** (unreachable host, DNS failure, timeout):
     "Can't reach this server" / "Check the address and your connection.", with no field-level red tint,
     since this isn't a credentials problem and tinting the password field would misdirect the
     user. Self-hosted Audiobookshelf setups hit this case at least as often as bad passwords

@@ -6,6 +6,7 @@
 //! and `pull_to_refresh` is another: GTK4/libadwaita simply don't ship the gesture at all.
 
 pub mod banner;
+pub mod connection_editors;
 pub mod cover_image;
 pub mod cover_viewer;
 pub mod download_progress;

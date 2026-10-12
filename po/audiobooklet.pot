@@ -158,11 +158,12 @@ msgid ""
 "the app makes to the server goes through it."
 msgstr ""
 
-#: app/src/screens/connection.rs
+#: app/src/screens/connection.rs app/src/screens/welcome.rs
 msgid "Advanced"
 msgstr ""
 
-#: app/src/screens/connection.rs
+#: app/src/screens/connection.rs app/src/screens/welcome.rs
+#: app/src/widgets/connection_editors.rs
 msgid "Custom Headers"
 msgstr ""
 
@@ -170,7 +171,7 @@ msgstr ""
 msgid "Disable SSL Verification"
 msgstr ""
 
-#: app/src/screens/connection.rs
+#: app/src/screens/connection.rs app/src/screens/welcome.rs
 msgid "Connect to servers with any certificate"
 msgstr ""
 
@@ -201,7 +202,8 @@ msgid ""
 "Customize the application User-Agent header. Leave empty for the default."
 msgstr ""
 
-#: app/src/screens/connection.rs
+#: app/src/screens/connection.rs app/src/screens/welcome.rs
+#: app/src/widgets/connection_editors.rs
 msgid "Client Certificate (Experimental)"
 msgstr ""
 
@@ -229,71 +231,8 @@ msgid "Disconnecting"
 msgstr ""
 
 #: app/src/screens/connection.rs app/src/screens/library.rs
+#: app/src/widgets/connection_editors.rs
 msgid "None"
-msgstr ""
-
-#: app/src/screens/connection.rs
-msgid "{count} header"
-msgid_plural "{count} headers"
-msgstr[0] ""
-msgstr[1] ""
-
-#: app/src/screens/connection.rs
-msgid "Incomplete: not used when streaming playback"
-msgstr ""
-
-#: app/src/screens/connection.rs app/src/screens/settings.rs
-#: app/src/screens/welcome.rs
-msgid "Cancel"
-msgstr ""
-
-#: app/src/screens/connection.rs
-msgid "Save"
-msgstr ""
-
-#: app/src/screens/connection.rs
-msgid ""
-"Specify headers for server connections — one \"Name: Value\" pair per line. "
-"They're attached to every request to this server."
-msgstr ""
-
-#: app/src/screens/connection.rs
-msgid "Choose a certificate file first."
-msgstr ""
-
-#: app/src/screens/connection.rs
-msgid ""
-"Used for signing in, syncing and downloads, but not for streaming playback: "
-"books on this server only play once downloaded. A .p12/.pfx bundle and its "
-"export password."
-msgstr ""
-
-#: app/src/screens/connection.rs
-msgid "Experimental and incomplete"
-msgstr ""
-
-#: app/src/screens/connection.rs
-msgid "No file chosen"
-msgstr ""
-
-#: app/src/screens/connection.rs
-msgid "Choose File…"
-msgstr ""
-
-#: app/src/screens/connection.rs
-msgid "Choose a certificate"
-msgstr ""
-
-#: app/src/screens/connection.rs
-msgid "PKCS#12 certificate"
-msgstr ""
-
-#: app/src/screens/connection.rs
-msgid "Export password"
-msgstr ""
-
-#: app/src/screens/connection.rs
-msgid "Remove Certificate"
 msgstr ""
 
 #: app/src/screens/downloads.rs app/src/screens/main_window.rs
@@ -1201,6 +1140,11 @@ msgid_plural ""
 msgstr[0] ""
 msgstr[1] ""
 
+#: app/src/screens/settings.rs app/src/screens/welcome.rs
+#: app/src/widgets/connection_editors.rs
+msgid "Cancel"
+msgstr ""
+
 #: app/src/screens/settings.rs
 msgid "{count} sec"
 msgid_plural "{count} sec"
@@ -1248,7 +1192,7 @@ msgid "Password"
 msgstr ""
 
 #: app/src/screens/welcome.rs
-msgid "API Token"
+msgid "API Key"
 msgstr ""
 
 #: app/src/screens/welcome.rs
@@ -1269,15 +1213,15 @@ msgid ""
 msgstr ""
 
 #: app/src/screens/welcome.rs
+msgid "For servers behind a proxy, a firewall or a private certificate"
+msgstr ""
+
+#: app/src/screens/welcome.rs
+msgid "Allow Untrusted Certificate"
+msgstr ""
+
+#: app/src/screens/welcome.rs
 msgid "Connecting…"
-msgstr ""
-
-#: app/src/screens/welcome.rs
-msgid "API tokens aren't supported yet"
-msgstr ""
-
-#: app/src/screens/welcome.rs
-msgid "Sign in with your username and password instead."
 msgstr ""
 
 #: app/src/screens/welcome.rs
@@ -1316,11 +1260,69 @@ msgid "Unable to sign in"
 msgstr ""
 
 #: app/src/screens/welcome.rs
+msgid "API key not accepted"
+msgstr ""
+
+#: app/src/screens/welcome.rs
+msgid "Check the key, and that the user it belongs to is active."
+msgstr ""
+
+#: app/src/screens/welcome.rs
 msgid "Can't verify this server's certificate"
 msgstr ""
 
 #: app/src/screens/welcome.rs
-msgid "If you trust it, allow it in that server's connection settings."
+msgid "If you trust it, turn on “Allow Untrusted Certificate” under Advanced."
+msgstr ""
+
+#: app/src/screens/welcome.rs
+msgid "This server wants a client certificate"
+msgstr ""
+
+#: app/src/screens/welcome.rs
+msgid ""
+"Choose one under Advanced › Client Certificate. If you already did, the "
+"server doesn't accept it."
+msgstr ""
+
+#: app/src/screens/welcome.rs
+msgid "The server refused the request"
+msgstr ""
+
+#: app/src/screens/welcome.rs
+msgid ""
+"A proxy or firewall in front of it may need a custom header or a client "
+"certificate. Add them under Advanced."
+msgstr ""
+
+#: app/src/screens/welcome.rs
+msgid "No Audiobookshelf server found here"
+msgstr ""
+
+#: app/src/screens/welcome.rs
+msgid "Check the address, including any path such as /audiobookshelf."
+msgstr ""
+
+#. TRANSLATORS: {status} is an HTTP status code such as 502.
+#: app/src/screens/welcome.rs
+msgid "The server had a problem (HTTP {status})"
+msgstr ""
+
+#: app/src/screens/welcome.rs
+msgid "Try again in a moment."
+msgstr ""
+
+#. TRANSLATORS: {status} is an HTTP status code such as 418.
+#: app/src/screens/welcome.rs
+msgid "Unexpected answer from the server (HTTP {status})"
+msgstr ""
+
+#: app/src/screens/welcome.rs
+msgid "Check the address and try again."
+msgstr ""
+
+#: app/src/screens/welcome.rs
+msgid "Can't use the connection settings"
 msgstr ""
 
 #: app/src/screens/welcome.rs
@@ -1357,6 +1359,65 @@ msgstr ""
 
 #: app/src/widgets/banner.rs
 msgid "Couldn't update your library"
+msgstr ""
+
+#: app/src/widgets/connection_editors.rs
+msgid "Save"
+msgstr ""
+
+#: app/src/widgets/connection_editors.rs
+msgid "{count} header"
+msgid_plural "{count} headers"
+msgstr[0] ""
+msgstr[1] ""
+
+#: app/src/widgets/connection_editors.rs
+msgid "Incomplete: not used when streaming playback"
+msgstr ""
+
+#: app/src/widgets/connection_editors.rs
+msgid ""
+"Specify headers for server connections — one \"Name: Value\" pair per line. "
+"They're attached to every request to this server."
+msgstr ""
+
+#: app/src/widgets/connection_editors.rs
+msgid "Choose a certificate file first."
+msgstr ""
+
+#: app/src/widgets/connection_editors.rs
+msgid ""
+"Used for signing in, syncing and downloads, but not for streaming playback: "
+"books on this server only play once downloaded. A .p12/.pfx bundle and its "
+"export password."
+msgstr ""
+
+#: app/src/widgets/connection_editors.rs
+msgid "Experimental and incomplete"
+msgstr ""
+
+#: app/src/widgets/connection_editors.rs
+msgid "No file chosen"
+msgstr ""
+
+#: app/src/widgets/connection_editors.rs
+msgid "Choose File…"
+msgstr ""
+
+#: app/src/widgets/connection_editors.rs
+msgid "Choose a certificate"
+msgstr ""
+
+#: app/src/widgets/connection_editors.rs
+msgid "PKCS#12 certificate"
+msgstr ""
+
+#: app/src/widgets/connection_editors.rs
+msgid "Export password"
+msgstr ""
+
+#: app/src/widgets/connection_editors.rs
+msgid "Remove Certificate"
 msgstr ""
 
 #: app/src/widgets/cover_image.rs

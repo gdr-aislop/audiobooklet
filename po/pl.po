@@ -158,11 +158,12 @@ msgstr ""
 "To połączenie służy do synchronizacji, streamingu i pobierania — przechodzi "
 "przez nie cały ruch aplikacji do serwera."
 
-#: app/src/screens/connection.rs
+#: app/src/screens/connection.rs app/src/screens/welcome.rs
 msgid "Advanced"
 msgstr "Zaawansowane"
 
-#: app/src/screens/connection.rs
+#: app/src/screens/connection.rs app/src/screens/welcome.rs
+#: app/src/widgets/connection_editors.rs
 msgid "Custom Headers"
 msgstr "Własne nagłówki"
 
@@ -170,7 +171,7 @@ msgstr "Własne nagłówki"
 msgid "Disable SSL Verification"
 msgstr "Wyłącz weryfikację SSL"
 
-#: app/src/screens/connection.rs
+#: app/src/screens/connection.rs app/src/screens/welcome.rs
 msgid "Connect to servers with any certificate"
 msgstr "Łącz się z serwerami z dowolnym certyfikatem"
 
@@ -204,7 +205,8 @@ msgid ""
 msgstr ""
 "Dostosuj nagłówek User-Agent aplikacji. Pozostaw puste, aby użyć domyślnego."
 
-#: app/src/screens/connection.rs
+#: app/src/screens/connection.rs app/src/screens/welcome.rs
+#: app/src/widgets/connection_editors.rs
 #, fuzzy
 msgid "Client Certificate (Experimental)"
 msgstr "Certyfikat klienta"
@@ -235,75 +237,9 @@ msgid "Disconnecting"
 msgstr "Rozłączanie"
 
 #: app/src/screens/connection.rs app/src/screens/library.rs
+#: app/src/widgets/connection_editors.rs
 msgid "None"
 msgstr "Brak"
-
-#: app/src/screens/connection.rs
-msgid "{count} header"
-msgid_plural "{count} headers"
-msgstr[0] "{count} nagłówek"
-msgstr[1] "{count} nagłówki"
-msgstr[2] "{count} nagłówków"
-
-#: app/src/screens/connection.rs
-msgid "Incomplete: not used when streaming playback"
-msgstr ""
-
-#: app/src/screens/connection.rs app/src/screens/settings.rs
-#: app/src/screens/welcome.rs
-msgid "Cancel"
-msgstr "Anuluj"
-
-#: app/src/screens/connection.rs
-msgid "Save"
-msgstr "Zapisz"
-
-#: app/src/screens/connection.rs
-msgid ""
-"Specify headers for server connections — one \"Name: Value\" pair per line. "
-"They're attached to every request to this server."
-msgstr ""
-"Podaj nagłówki HTTP dla połączeń z serwerem — jedna para „Nazwa: Wartość” w "
-"wierszu. Są dołączane do każdego zapytania wysyłanego do tego serwera."
-
-#: app/src/screens/connection.rs
-msgid "Choose a certificate file first."
-msgstr "Najpierw wybierz plik z certyfikatem."
-
-#: app/src/screens/connection.rs
-msgid ""
-"Used for signing in, syncing and downloads, but not for streaming playback: "
-"books on this server only play once downloaded. A .p12/.pfx bundle and its "
-"export password."
-msgstr ""
-
-#: app/src/screens/connection.rs
-msgid "Experimental and incomplete"
-msgstr ""
-
-#: app/src/screens/connection.rs
-msgid "No file chosen"
-msgstr "Nie wybrano pliku"
-
-#: app/src/screens/connection.rs
-msgid "Choose File…"
-msgstr "Wybierz plik…"
-
-#: app/src/screens/connection.rs
-msgid "Choose a certificate"
-msgstr "Wybierz certyfikat"
-
-#: app/src/screens/connection.rs
-msgid "PKCS#12 certificate"
-msgstr "Certyfikat PKCS#12"
-
-#: app/src/screens/connection.rs
-msgid "Export password"
-msgstr "Hasło eksportu"
-
-#: app/src/screens/connection.rs
-msgid "Remove Certificate"
-msgstr "Usuń certyfikat"
 
 #: app/src/screens/downloads.rs app/src/screens/main_window.rs
 msgid "Downloads"
@@ -1240,6 +1176,11 @@ msgstr[2] ""
 "Postęp słuchania {count} książek nie dotarł jeszcze do serwera i zostanie "
 "utracony."
 
+#: app/src/screens/settings.rs app/src/screens/welcome.rs
+#: app/src/widgets/connection_editors.rs
+msgid "Cancel"
+msgstr "Anuluj"
+
 #: app/src/screens/settings.rs
 msgid "{count} sec"
 msgid_plural "{count} sec"
@@ -1292,7 +1233,8 @@ msgid "Password"
 msgstr "Hasło"
 
 #: app/src/screens/welcome.rs
-msgid "API Token"
+#, fuzzy
+msgid "API Key"
 msgstr "Token API"
 
 #: app/src/screens/welcome.rs
@@ -1314,16 +1256,17 @@ msgstr ""
 "Loguje ponownie, gdy serwer zakończy sesję. Przechowywane w bazie kluczy."
 
 #: app/src/screens/welcome.rs
+msgid "For servers behind a proxy, a firewall or a private certificate"
+msgstr ""
+
+#: app/src/screens/welcome.rs
+#, fuzzy
+msgid "Allow Untrusted Certificate"
+msgstr "Usuń certyfikat"
+
+#: app/src/screens/welcome.rs
 msgid "Connecting…"
 msgstr "Łączenie…"
-
-#: app/src/screens/welcome.rs
-msgid "API tokens aren't supported yet"
-msgstr "Tokeny API nie są jeszcze obsługiwane"
-
-#: app/src/screens/welcome.rs
-msgid "Sign in with your username and password instead."
-msgstr "Zaloguj się zamiast tego nazwą użytkownika i hasłem."
 
 #: app/src/screens/welcome.rs
 msgid "Replace"
@@ -1367,12 +1310,76 @@ msgid "Unable to sign in"
 msgstr "Nie można się zalogować"
 
 #: app/src/screens/welcome.rs
+msgid "API key not accepted"
+msgstr ""
+
+#: app/src/screens/welcome.rs
+msgid "Check the key, and that the user it belongs to is active."
+msgstr ""
+
+#: app/src/screens/welcome.rs
 msgid "Can't verify this server's certificate"
 msgstr "Nie można zweryfikować certyfikatu tego serwera"
 
 #: app/src/screens/welcome.rs
-msgid "If you trust it, allow it in that server's connection settings."
-msgstr "Jeśli mu ufasz, zezwól na to w ustawieniach połączenia tego serwera."
+msgid "If you trust it, turn on “Allow Untrusted Certificate” under Advanced."
+msgstr ""
+
+#: app/src/screens/welcome.rs
+#, fuzzy
+msgid "This server wants a client certificate"
+msgstr "Łącz się z serwerami z dowolnym certyfikatem"
+
+#: app/src/screens/welcome.rs
+msgid ""
+"Choose one under Advanced › Client Certificate. If you already did, the "
+"server doesn't accept it."
+msgstr ""
+
+#: app/src/screens/welcome.rs
+#, fuzzy
+msgid "The server refused the request"
+msgstr "Serwer odrzucił to żądanie"
+
+#: app/src/screens/welcome.rs
+msgid ""
+"A proxy or firewall in front of it may need a custom header or a client "
+"certificate. Add them under Advanced."
+msgstr ""
+
+#: app/src/screens/welcome.rs
+#, fuzzy
+msgid "No Audiobookshelf server found here"
+msgstr "Połącz się z serwerem Audiobookshelf"
+
+#: app/src/screens/welcome.rs
+msgid "Check the address, including any path such as /audiobookshelf."
+msgstr ""
+
+#. TRANSLATORS: {status} is an HTTP status code such as 502.
+#: app/src/screens/welcome.rs
+msgid "The server had a problem (HTTP {status})"
+msgstr ""
+
+#: app/src/screens/welcome.rs
+#, fuzzy
+msgid "Try again in a moment."
+msgstr "Spróbuj zalogować się ponownie."
+
+#. TRANSLATORS: {status} is an HTTP status code such as 418.
+#: app/src/screens/welcome.rs
+msgid "Unexpected answer from the server (HTTP {status})"
+msgstr ""
+
+#: app/src/screens/welcome.rs
+#, fuzzy
+msgid "Check the address and try again."
+msgstr "Sprawdź adres i połączenie."
+
+#: app/src/screens/welcome.rs
+#, fuzzy
+msgid "Can't use the connection settings"
+msgstr "nie udało się wczytać ustawień połączenia z serwerem: {error}"
 
 #: app/src/screens/welcome.rs
 msgid "Can't reach this server"
@@ -1411,6 +1418,68 @@ msgstr "Wyświetlane są dane zapisane na tym urządzeniu."
 #: app/src/widgets/banner.rs
 msgid "Couldn't update your library"
 msgstr "Nie udało się zaktualizować biblioteki"
+
+#: app/src/widgets/connection_editors.rs
+msgid "Save"
+msgstr "Zapisz"
+
+#: app/src/widgets/connection_editors.rs
+msgid "{count} header"
+msgid_plural "{count} headers"
+msgstr[0] "{count} nagłówek"
+msgstr[1] "{count} nagłówki"
+msgstr[2] "{count} nagłówków"
+
+#: app/src/widgets/connection_editors.rs
+msgid "Incomplete: not used when streaming playback"
+msgstr ""
+
+#: app/src/widgets/connection_editors.rs
+msgid ""
+"Specify headers for server connections — one \"Name: Value\" pair per line. "
+"They're attached to every request to this server."
+msgstr ""
+"Podaj nagłówki HTTP dla połączeń z serwerem — jedna para „Nazwa: Wartość” w "
+"wierszu. Są dołączane do każdego zapytania wysyłanego do tego serwera."
+
+#: app/src/widgets/connection_editors.rs
+msgid "Choose a certificate file first."
+msgstr "Najpierw wybierz plik z certyfikatem."
+
+#: app/src/widgets/connection_editors.rs
+msgid ""
+"Used for signing in, syncing and downloads, but not for streaming playback: "
+"books on this server only play once downloaded. A .p12/.pfx bundle and its "
+"export password."
+msgstr ""
+
+#: app/src/widgets/connection_editors.rs
+msgid "Experimental and incomplete"
+msgstr ""
+
+#: app/src/widgets/connection_editors.rs
+msgid "No file chosen"
+msgstr "Nie wybrano pliku"
+
+#: app/src/widgets/connection_editors.rs
+msgid "Choose File…"
+msgstr "Wybierz plik…"
+
+#: app/src/widgets/connection_editors.rs
+msgid "Choose a certificate"
+msgstr "Wybierz certyfikat"
+
+#: app/src/widgets/connection_editors.rs
+msgid "PKCS#12 certificate"
+msgstr "Certyfikat PKCS#12"
+
+#: app/src/widgets/connection_editors.rs
+msgid "Export password"
+msgstr "Hasło eksportu"
+
+#: app/src/widgets/connection_editors.rs
+msgid "Remove Certificate"
+msgstr "Usuń certyfikat"
 
 #: app/src/widgets/cover_image.rs
 msgid "View cover"
@@ -1579,6 +1648,16 @@ msgstr ""
 "oraz utrzymuj synchronizację postępu słuchania z serwerem. Integruje się z "
 "pulpitem przez MPRIS2 i wstrzymuje odtwarzanie podczas połączeń "
 "telefonicznych."
+
+#~ msgid "API tokens aren't supported yet"
+#~ msgstr "Tokeny API nie są jeszcze obsługiwane"
+
+#~ msgid "Sign in with your username and password instead."
+#~ msgstr "Zaloguj się zamiast tego nazwą użytkownika i hasłem."
+
+#~ msgid "If you trust it, allow it in that server's connection settings."
+#~ msgstr ""
+#~ "Jeśli mu ufasz, zezwól na to w ustawieniach połączenia tego serwera."
 
 #~ msgid ""
 #~ "Use a client certificate for mTLS — a .p12/.pfx bundle and its export "

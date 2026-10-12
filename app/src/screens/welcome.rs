@@ -6,22 +6,29 @@
 
 use std::rc::Rc;
 
-use abs_core::accounts::{AddedAccount, ReloginSeed, ReplacementKind};
+use abs_core::accounts::{AddedAccount, ClientCertificate, ConnectionSettings, ReloginSeed, ReplacementKind, SignIn};
 use abs_core::error::CoreError;
 use adw::glib;
 use adw::prelude::*;
 use sqlx::SqlitePool;
 
-use crate::i18n::{tr, tr_args, tr_noop};
+use crate::i18n::{tr, tr_args};
+use crate::widgets::connection_editors::{
+    cert_subtitle, headers_subtitle, headers_text, show_certificate_editor, show_headers_editor, ApplyCertificate, ApplyHeaders, CertificateChoice,
+};
 
-/// Only Password mode is wired to a real backend call right now — `abs-core`/`abs-api` have no
-/// token-based login (Audiobookshelf's `/login` is username+password only; a bare API token isn't
-/// a login mechanism the server exposes). The toggle is kept for visual completeness with the
-/// design spec, but Connect in this mode shows an explanatory banner instead of silently failing.
+/// Shows a failed sign-in (the error, and whether the attempt was a password one).
+type ShowFailure = Rc<dyn Fn(&CoreError, bool)>;
+/// Runs the sign-in, after confirming first when a re-login would replace local data (the kind,
+/// the URL and the username it is about).
+type ConfirmOrRun = Rc<dyn Fn(Option<ReplacementKind>, &str, &str)>;
+
+/// The two ways to sign in: a username and password, or an API key (a bearer token made in the
+/// server's settings, which names its own user — see `abs_core::accounts::SignIn`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum AuthMode {
     Password,
-    ApiToken,
+    ApiKey,
 }
 
 pub struct WelcomeScreen {
@@ -39,10 +46,21 @@ pub struct TestHooks {
     pub connect_button: gtk4::Button,
     pub cancel_button: gtk4::Button,
     pub banner: crate::widgets::banner::ErrorBanner,
+    pub mode_key: gtk4::ToggleButton,
+    pub key_row: adw::EntryRow,
+    pub advanced_row: adw::ExpanderRow,
+    pub untrusted_switch: gtk4::Switch,
+    pub headers_row: adw::ActionRow,
+    pub certificate_row: adw::ActionRow,
+    pub settings: Rc<std::cell::RefCell<ConnectionSettings>>,
 }
 
 #[cfg(test)]
 impl WelcomeScreen {
+    pub fn test_settings(&self) -> &Rc<std::cell::RefCell<ConnectionSettings>> {
+        &self.hooks.settings
+    }
+
     pub fn test_hooks(&self) -> &TestHooks {
         &self.hooks
     }
@@ -101,7 +119,7 @@ pub fn build(
     // Auth-mode toggle: two linked GtkToggleButtons — AdwToggleGroup is 1.4+ and won't compile
     // under this crate's v1_2 feature ceiling, so this is the hand-rolled equivalent.
     let mode_password = gtk4::ToggleButton::builder().label(tr("Password")).active(true).build();
-    let mode_token = gtk4::ToggleButton::builder().label(tr("API Token")).build();
+    let mode_token = gtk4::ToggleButton::builder().label(tr("API Key")).build();
     mode_token.set_group(Some(&mode_password));
     let mode_box = gtk4::Box::builder()
         .css_classes(["linked"])
@@ -139,7 +157,7 @@ pub fn build(
         .activatable_widget(&remember_switch)
         .build();
     remember_row.add_suffix(&remember_switch);
-    let token_row = adw::EntryRow::builder().title(tr("API Token")).show_apply_button(false).build();
+    let token_row = adw::EntryRow::builder().title(tr("API Key")).show_apply_button(false).build();
     token_row.set_visible(false);
 
     list.append(&url_row);
@@ -147,6 +165,43 @@ pub fn build(
     list.append(&password_row);
     list.append(&remember_row);
     list.append(&token_row);
+
+    // Advanced: what a server behind a private certificate, a proxy or a firewall needs before a
+    // sign-in can get through. Chosen here, used for the attempt and saved on the server's row
+    // once it succeeds (`ConnectionSettings`); the Connection page edits the same options later.
+    let settings: Rc<std::cell::RefCell<ConnectionSettings>> = Rc::new(std::cell::RefCell::new(ConnectionSettings::default()));
+    let advanced_row = adw::ExpanderRow::builder()
+        .title(tr("Advanced"))
+        .subtitle(tr("For servers behind a proxy, a firewall or a private certificate"))
+        .build();
+    let untrusted_switch = gtk4::Switch::builder().valign(gtk4::Align::Center).build();
+    let untrusted_row = adw::ActionRow::builder()
+        .title(tr("Allow Untrusted Certificate"))
+        .subtitle(tr("Connect to servers with any certificate"))
+        .activatable_widget(&untrusted_switch)
+        .build();
+    untrusted_row.add_suffix(&untrusted_switch);
+    untrusted_switch.connect_state_set({
+        let settings = settings.clone();
+        move |_, allow| {
+            settings.borrow_mut().allow_untrusted_certificate = allow;
+            glib::signal::Propagation::Proceed
+        }
+    });
+    let chevron = || gtk4::Image::builder().icon_name("go-next-symbolic").css_classes(["dim-label"]).build();
+    let headers_row = adw::ActionRow::builder().title(tr("Custom Headers")).subtitle(headers_subtitle("{}")).activatable(true).build();
+    headers_row.add_suffix(&chevron());
+    let certificate_row = adw::ActionRow::builder()
+        .title(tr("Client Certificate (Experimental)"))
+        .subtitle(cert_subtitle(None))
+        .subtitle_lines(2)
+        .activatable(true)
+        .build();
+    certificate_row.add_suffix(&chevron());
+    advanced_row.add_row(&untrusted_row);
+    advanced_row.add_row(&headers_row);
+    advanced_row.add_row(&certificate_row);
+    list.append(&advanced_row);
     content.append(&list);
 
     let connect_button = gtk4::Button::builder()
@@ -186,6 +241,48 @@ pub fn build(
         username_row.set_text(&previous.username);
         password_row.grab_focus();
     }
+
+    // The editors are dialogs over the application window, found when a row is activated (this
+    // screen can be built before it has a root).
+    headers_row.connect_activated({
+        let settings = settings.clone();
+        move |row| {
+            let Some(window) = row.root().and_then(|root| root.downcast::<adw::ApplicationWindow>().ok()) else { return };
+            let initial = settings.borrow().custom_headers_json.as_deref().map(headers_text).unwrap_or_default();
+            let on_apply: ApplyHeaders = Rc::new({
+                let settings = settings.clone();
+                let row = row.clone();
+                move |json, dialog, _| {
+                    let none = abs_core::connection::parse_custom_headers(&json).is_empty();
+                    row.set_subtitle(&headers_subtitle(&json));
+                    settings.borrow_mut().custom_headers_json = (!none).then_some(json);
+                    dialog.close();
+                }
+            });
+            show_headers_editor(&window, &initial, on_apply);
+        }
+    });
+    certificate_row.connect_activated({
+        let settings = settings.clone();
+        move |row| {
+            let Some(window) = row.root().and_then(|root| root.downcast::<adw::ApplicationWindow>().ok()) else { return };
+            let current = settings.borrow().client_certificate.as_ref().map(|certificate| certificate.path.to_string_lossy().to_string());
+            let on_apply: ApplyCertificate = Rc::new({
+                let settings = settings.clone();
+                let row = row.clone();
+                move |choice, dialog, _| {
+                    let certificate = match choice {
+                        CertificateChoice::Set { path, password } => Some(ClientCertificate { path, password }),
+                        CertificateChoice::Remove => None,
+                    };
+                    row.set_subtitle(&cert_subtitle(certificate.as_ref().map(|certificate| certificate.path.to_string_lossy().to_string()).as_deref()));
+                    settings.borrow_mut().client_certificate = certificate;
+                    dialog.close();
+                }
+            });
+            show_certificate_editor(&window, current.as_deref(), on_apply);
+        }
+    });
 
     // --- Mode switching: show/hide the fields each mode needs. ---
     let update_visibility: Rc<dyn Fn(AuthMode)> = Rc::new({
@@ -236,7 +333,7 @@ pub fn build(
         let update_sensitivity = update_sensitivity.clone();
         move |btn| {
             if btn.is_active() {
-                update_visibility(AuthMode::ApiToken);
+                update_visibility(AuthMode::ApiKey);
                 update_sensitivity();
             }
         }
@@ -253,11 +350,54 @@ pub fn build(
         move |_| update_sensitivity()
     });
 
-    // --- Connect: validate, confirm any replacement, then run the login. ---
+    // --- Connect: validate, confirm any replacement, then run the sign-in. ---
     //
-    // The actual login run is shared by the direct Connect click and the confirm dialog's
-    // "Replace" response: disable the form, call `relogin` (re-login flow) or
-    // `add_server_and_login` (first run), re-enable, then fire `on_success` or show the error.
+    // Failures are shown the same way wherever they happen (the sign-in itself, or the check of
+    // whose API key it is before a re-login's confirmation): only a rejected credential tints the
+    // credential fields — a connectivity failure isn't a credentials problem — and the failures
+    // that Advanced can fix open it, so the remedy is in view.
+    let show_failure: ShowFailure = Rc::new({
+        let username_row = username_row.clone();
+        let password_row = password_row.clone();
+        let token_row = token_row.clone();
+        let advanced_row = advanced_row.clone();
+        let banner = banner.clone();
+        move |err, password_mode| {
+            if matches!(err, CoreError::Login(abs_api::LoginError::InvalidCredentials)) {
+                if password_mode {
+                    username_row.add_css_class("error");
+                    password_row.add_css_class("error");
+                } else {
+                    token_row.add_css_class("error");
+                }
+            }
+            if advanced_can_fix(err) {
+                advanced_row.set_expanded(true);
+            }
+            let (title, description) = error_message(err, password_mode);
+            banner.set_title(&title);
+            banner.set_description(Some(&description));
+            banner.set_details(login_details(err).as_deref());
+            banner.set_revealed(true);
+        }
+    });
+
+    // The form is locked while a request is out.
+    let set_busy: Rc<dyn Fn(bool)> = Rc::new({
+        let mode_box = mode_box.clone();
+        let list = list.clone();
+        let connect_button = connect_button.clone();
+        move |busy| {
+            mode_box.set_sensitive(!busy);
+            list.set_sensitive(!busy);
+            connect_button.set_label(&if busy { tr("Connecting…") } else { tr("Connect") });
+            connect_button.set_sensitive(!busy);
+        }
+    });
+
+    // The sign-in run is shared by the direct Connect click and the confirm dialog's "Replace"
+    // response: lock the form, call `relogin_with` (re-login flow) or `add_server_and_sign_in`
+    // (first run, Add Server), unlock, then fire `on_success` or show the error.
     let run_connect: Rc<dyn Fn()> = Rc::new({
         let pool = pool.clone();
         let paths = paths.clone();
@@ -265,22 +405,23 @@ pub fn build(
         let url_row = url_row.clone();
         let username_row = username_row.clone();
         let password_row = password_row.clone();
+        let token_row = token_row.clone();
+        let mode_password = mode_password.clone();
         let remember_switch = remember_switch.clone();
-        let mode_box = mode_box.clone();
-        let list = list.clone();
-        let connect_button = connect_button.clone();
-        let banner = banner.clone();
+        let settings = settings.clone();
+        let set_busy = set_busy.clone();
+        let show_failure = show_failure.clone();
         let on_success = Rc::new(on_success);
         move || {
             let url = url_row.text().trim().to_string();
+            let password_mode = mode_password.is_active();
             let username = username_row.text().trim().to_string();
             let password = password_row.text().to_string();
+            let api_key = token_row.text().trim().to_string();
             let remember = remember_switch.is_active();
+            let settings = settings.borrow().clone();
 
-            mode_box.set_sensitive(false);
-            list.set_sensitive(false);
-            connect_button.set_sensitive(false);
-            connect_button.set_label(&tr("Connecting…"));
+            set_busy(true);
 
             // Cloned per call: this closure fires once per Connect press (and once per confirmed
             // replacement), so nothing may be moved out of it — widget handles included.
@@ -288,28 +429,24 @@ pub fn build(
             let paths = paths.clone();
             let previous = previous.clone();
             let on_success = on_success.clone();
-            let username_row = username_row.clone();
-            let password_row = password_row.clone();
-            let mode_box = mode_box.clone();
-            let list = list.clone();
-            let connect_button = connect_button.clone();
-            let banner = banner.clone();
+            let set_busy = set_busy.clone();
+            let show_failure = show_failure.clone();
 
             // Before the first request: this attempt's own failure logs must already hide them.
             crate::log_privacy::global().register_server_url(&url);
-            crate::log_privacy::global().register_username(&username);
+            if password_mode {
+                crate::log_privacy::global().register_username(&username);
+            }
 
             glib::spawn_future_local(async move {
                 let passwords = crate::password_keyring::store();
+                let sign_in = if password_mode { SignIn::Password { username: &username, password: &password } } else { SignIn::ApiKey(&api_key) };
                 let result = match &previous {
-                    Some(seed) => abs_core::accounts::relogin(&pool, &paths, seed, &url, &username, &password, passwords.as_ref(), remember).await,
-                    None => abs_core::accounts::add_server_and_login(&pool, &url, &username, &password, passwords.as_ref(), remember).await,
+                    Some(seed) => abs_core::accounts::relogin_with(&pool, &paths, seed, &url, &sign_in, passwords.as_ref(), remember, &settings).await,
+                    None => abs_core::accounts::add_server_and_sign_in(&pool, &url, &sign_in, passwords.as_ref(), remember, &settings).await,
                 };
 
-                mode_box.set_sensitive(true);
-                list.set_sensitive(true);
-                connect_button.set_label(&tr("Connect"));
-                connect_button.set_sensitive(true);
+                set_busy(false);
 
                 if result.is_ok() {
                     crate::log_privacy::refresh_from_db(&pool).await;
@@ -317,84 +454,99 @@ pub fn build(
 
                 match result {
                     Ok(added) => on_success(added),
-                    Err(err) => {
-                        // Only an authentication failure implicates the username/password
-                        // fields — tinting them on a connectivity failure (unreachable host,
-                        // DNS, TLS) would misdirect the user into thinking their password is
-                        // wrong when the server itself couldn't be reached.
-                        if matches!(err, CoreError::Login(abs_api::LoginError::InvalidCredentials)) {
-                            username_row.add_css_class("error");
-                            password_row.add_css_class("error");
-                        }
-                        let (title, description) = error_message(&err);
-                        banner.set_title(&tr(title));
-                        banner.set_description(Some(&tr(description)));
-                        banner.set_details(login_details(&err).as_deref());
-                        banner.set_revealed(true);
-                    }
+                    Err(err) => show_failure(&err, password_mode),
                 }
             });
         }
     });
 
+    // Re-login flow: credentials that would replace the previous session's local data are
+    // confirmed before anything runs. The dialog only *previews* `replacement_kind`'s verdict —
+    // nothing is persisted until the new sign-in actually succeeds (a failed sign-in leaves the old
+    // session intact, so even a confirmed replacement that then fails changes nothing).
+    let confirm_or_run: ConfirmOrRun = Rc::new({
+        let previous = previous.clone();
+        let run_connect = run_connect.clone();
+        move |replacement, url, username| {
+            let (Some(kind), Some(previous)) = (replacement, previous.as_ref()) else {
+                run_connect();
+                return;
+            };
+            let (heading, body) = replacement_warning(&kind, previous, url, username);
+            let dialog = gtk4::MessageDialog::builder()
+                .message_type(gtk4::MessageType::Warning)
+                .text(heading)
+                .secondary_text(body)
+                .modal(true)
+                .build();
+            dialog.add_button(&tr("Cancel"), gtk4::ResponseType::Cancel);
+            let replace = dialog.add_button(&tr("Replace"), gtk4::ResponseType::Ok);
+            replace.add_css_class("destructive-action");
+            dialog.connect_response({
+                let run_connect = run_connect.clone();
+                move |dialog, response| {
+                    dialog.destroy();
+                    if response == gtk4::ResponseType::Ok {
+                        run_connect();
+                    }
+                }
+            });
+            dialog.present();
+        }
+    });
+
     connect_button.connect_clicked({
+        let pool = pool.clone();
         let url_row = url_row.clone();
         let username_row = username_row.clone();
         let password_row = password_row.clone();
+        let token_row = token_row.clone();
         let mode_password = mode_password.clone();
         let banner = banner.clone();
         let previous = previous.clone();
-        let run_connect = run_connect.clone();
+        let settings = settings.clone();
+        let set_busy = set_busy.clone();
+        let show_failure = show_failure.clone();
+        let confirm_or_run = confirm_or_run.clone();
         move |_| {
-            let is_password_mode = mode_password.is_active();
+            let password_mode = mode_password.is_active();
             banner.set_revealed(false);
             banner.set_details(None);
             username_row.remove_css_class("error");
             password_row.remove_css_class("error");
-
-            if !is_password_mode {
-                banner.set_title(&tr("API tokens aren't supported yet"));
-                banner.set_description(Some(&tr("Sign in with your username and password instead.")));
-                banner.set_revealed(true);
-                return;
-            }
+            token_row.remove_css_class("error");
 
             let url = url_row.text().trim().to_string();
             let username = username_row.text().trim().to_string();
 
-            // Re-login flow: credentials that would replace the previous session's local data are
-            // confirmed before anything runs. The dialog only *previews* `replacement_kind`'s
-            // verdict — nothing is persisted until the new login actually succeeds (a failed
-            // login leaves the old session intact, so even a confirmed replacement that then
-            // fails changes nothing).
-            let replacement = previous
-                .as_ref()
-                .and_then(|seed| abs_core::accounts::replacement_kind(seed, &url, &username));
-            if let Some(kind) = replacement {
-                let (heading, body) = replacement_warning(&kind, previous.as_ref().unwrap(), &url, &username);
-                let dialog = gtk4::MessageDialog::builder()
-                    .message_type(gtk4::MessageType::Warning)
-                    .text(heading)
-                    .secondary_text(body)
-                    .modal(true)
-                    .build();
-                dialog.add_button(&tr("Cancel"), gtk4::ResponseType::Cancel);
-                let replace = dialog.add_button(&tr("Replace"), gtk4::ResponseType::Ok);
-                replace.add_css_class("destructive-action");
-                dialog.connect_response({
-                    let run_connect = run_connect.clone();
-                    move |dialog, response| {
-                        dialog.destroy();
-                        if response == gtk4::ResponseType::Ok {
-                            run_connect();
-                        }
-                    }
-                });
-                dialog.present();
+            let Some(seed) = previous.clone().filter(|_| !password_mode) else {
+                // A password names its user up front, so what a re-login would replace is known now.
+                let replacement = previous.as_ref().and_then(|seed| abs_core::accounts::replacement_kind(seed, &url, &username)).filter(|_| password_mode);
+                confirm_or_run(replacement, &url, &username);
                 return;
-            }
+            };
 
-            run_connect();
+            // An API key names no user until the server is asked, and which user decides whether
+            // this re-login replaces anything.
+            let key = token_row.text().trim().to_string();
+            let pool = pool.clone();
+            let settings = settings.borrow().clone();
+            let set_busy = set_busy.clone();
+            let show_failure = show_failure.clone();
+            let confirm_or_run = confirm_or_run.clone();
+            crate::log_privacy::global().register_server_url(&url);
+            set_busy(true);
+            glib::spawn_future_local(async move {
+                let owner = abs_core::accounts::api_key_username(&pool, &seed, &url, &key, &settings).await;
+                set_busy(false);
+                match owner {
+                    Ok(owner) => {
+                        crate::log_privacy::global().register_username(&owner);
+                        confirm_or_run(abs_core::accounts::replacement_kind(&seed, &url, &owner), &url, &owner);
+                    }
+                    Err(err) => show_failure(&err, false),
+                }
+            });
         }
     });
 
@@ -448,6 +600,13 @@ pub fn build(
         connect_button: connect_button.clone(),
         cancel_button: cancel_button.clone(),
         banner: banner.clone(),
+        mode_key: mode_token.clone(),
+        key_row: token_row.clone(),
+        advanced_row: advanced_row.clone(),
+        untrusted_switch: untrusted_switch.clone(),
+        headers_row: headers_row.clone(),
+        certificate_row: certificate_row.clone(),
+        settings: settings.clone(),
     };
 
     // The whole screen scrolls, so it can get as short as the window does when the on-screen
@@ -488,27 +647,53 @@ fn replacement_warning(kind: &ReplacementKind, previous: &ReloginSeed, url: &str
     }
 }
 
+/// Whether the login screen's Advanced section holds the fix for this failure — it then opens by
+/// itself.
+fn advanced_can_fix(err: &CoreError) -> bool {
+    use abs_api::LoginError as L;
+    matches!(err, CoreError::Login(L::Tls(_) | L::ClientCertificate(_) | L::Blocked(_)) | CoreError::ConnectionSetup(_))
+}
+
 /// Never clears the fields on failure — the user shouldn't have to retype everything after a
-/// typo. Message text is keyed off the error variant, per `docs/design/ui-spec.md`'s error state.
-/// The username/password field tint (see the Connect click handler) is keyed off the same
-/// `InvalidCredentials` variant this function branches on, but deliberately not applied for
-/// `Network`/other variants — a connectivity failure isn't a credentials problem.
-fn error_message(err: &CoreError) -> (&'static str, &'static str) {
+/// typo. Message text is keyed off the error variant, per `docs/design/ui-spec.md`'s error state:
+/// what went wrong, then what to do about it. `password_mode` picks the words for a rejected
+/// credential. The field tint (see `show_failure`) is keyed off `InvalidCredentials` alone —
+/// a connectivity failure isn't a credentials problem.
+fn error_message(err: &CoreError, password_mode: bool) -> (String, String) {
+    use abs_api::LoginError as L;
     match err {
-        CoreError::Login(abs_api::LoginError::InvalidCredentials) => {
-            (tr_noop("Unable to sign in"), tr_noop("Check your username and password and try again."))
-        }
-        CoreError::Login(abs_api::LoginError::Tls(_)) => (
-            tr_noop("Can't verify this server's certificate"),
-            tr_noop("If you trust it, allow it in that server's connection settings."),
+        CoreError::Login(L::InvalidCredentials) if password_mode => (tr("Unable to sign in"), tr("Check your username and password and try again.")),
+        CoreError::Login(L::InvalidCredentials) => (tr("API key not accepted"), tr("Check the key, and that the user it belongs to is active.")),
+        CoreError::Login(L::Tls(_)) => (
+            tr("Can't verify this server's certificate"),
+            tr("If you trust it, turn on “Allow Untrusted Certificate” under Advanced."),
         ),
-        CoreError::Login(abs_api::LoginError::Connect(_) | abs_api::LoginError::Network(_)) => {
-            (tr_noop("Can't reach this server"), tr_noop("Check the address and your connection."))
-        }
-        CoreError::Login(abs_api::LoginError::Timeout(_)) => {
-            (tr_noop("This server took too long to respond"), tr_noop("Check your connection and try again."))
-        }
-        _ => (tr_noop("Something went wrong"), tr_noop("Please try again.")),
+        CoreError::Login(L::ClientCertificate(_)) => (
+            tr("This server wants a client certificate"),
+            tr("Choose one under Advanced › Client Certificate. If you already did, the server doesn't accept it."),
+        ),
+        CoreError::Login(L::Blocked(_)) => (
+            tr("The server refused the request"),
+            tr("A proxy or firewall in front of it may need a custom header or a client certificate. Add them under Advanced."),
+        ),
+        CoreError::Login(L::HttpStatus(404)) => (
+            tr("No Audiobookshelf server found here"),
+            tr("Check the address, including any path such as /audiobookshelf."),
+        ),
+        CoreError::Login(L::HttpStatus(status)) if (500..600).contains(status) => (
+            // TRANSLATORS: {status} is an HTTP status code such as 502.
+            tr_args("The server had a problem (HTTP {status})", &[("status", &status.to_string())]),
+            tr("Try again in a moment."),
+        ),
+        CoreError::Login(L::HttpStatus(status)) => (
+            // TRANSLATORS: {status} is an HTTP status code such as 418.
+            tr_args("Unexpected answer from the server (HTTP {status})", &[("status", &status.to_string())]),
+            tr("Check the address and try again."),
+        ),
+        CoreError::ConnectionSetup(message) => (tr("Can't use the connection settings"), message.clone()),
+        CoreError::Login(L::Connect(_) | L::Network(_)) => (tr("Can't reach this server"), tr("Check the address and your connection.")),
+        CoreError::Login(L::Timeout(_)) => (tr("This server took too long to respond"), tr("Check your connection and try again.")),
+        _ => (tr("Something went wrong"), tr("Please try again.")),
     }
 }
 
@@ -908,6 +1093,154 @@ pub(crate) mod tests {
             );
             assert_eq!(hooks.banner.title(), "Can't reach this server");
             assert_eq!(hooks.banner.description(), "Check the address and your connection.");
+        }
+    }
+
+    /// The messages for each failure: what went wrong, then what to do — and the right words for
+    /// a rejected password versus a rejected API key. (Plain functions: no GTK involved.)
+    #[test]
+    fn every_failure_says_what_to_do_about_it() {
+        use abs_api::LoginError as L;
+        let login = |err: L| CoreError::Login(err);
+        let title = |err: &CoreError, password_mode: bool| error_message(err, password_mode).0;
+        let description = |err: &CoreError, password_mode: bool| error_message(err, password_mode).1;
+
+        let rejected = login(L::InvalidCredentials);
+        assert_eq!(title(&rejected, true), "Unable to sign in");
+        assert_eq!(title(&rejected, false), "API key not accepted");
+        assert!(description(&rejected, false).contains("key"));
+
+        let blocked = login(L::Blocked(403));
+        assert_eq!(title(&blocked, true), "The server refused the request");
+        assert!(description(&blocked, true).contains("Advanced"));
+        let certificate = login(L::ClientCertificate(None));
+        assert_eq!(title(&certificate, true), "This server wants a client certificate");
+        assert!(description(&certificate, true).contains("Advanced"));
+
+        assert_eq!(title(&login(L::HttpStatus(404)), true), "No Audiobookshelf server found here");
+        assert!(description(&login(L::HttpStatus(404)), true).contains("/audiobookshelf"));
+        assert_eq!(title(&login(L::HttpStatus(502)), true), "The server had a problem (HTTP 502)");
+        assert_eq!(title(&login(L::HttpStatus(418)), true), "Unexpected answer from the server (HTTP 418)");
+
+        let setup = CoreError::ConnectionSetup("The client certificate couldn't be opened.".to_string());
+        assert_eq!(title(&setup, true), "Can't use the connection settings");
+        assert_eq!(description(&setup, true), "The client certificate couldn't be opened.");
+
+        assert_eq!(title(&CoreError::UnexpectedResponse("x".into()), true), "Something went wrong");
+
+        // The ones Advanced can fix open it; the rest don't.
+        for err in [&blocked, &certificate, &setup] {
+            assert!(advanced_can_fix(err));
+        }
+        assert!(!advanced_can_fix(&rejected));
+        assert!(!advanced_can_fix(&login(L::HttpStatus(404))));
+    }
+
+    /// API-key sign-in and the Advanced section through the real Connect button. Not a `#[test]`
+    /// itself — see `main.rs`'s `mod tests`.
+    pub(crate) fn run_api_key_and_advanced(runtime: &tokio::runtime::Runtime) {
+        use wiremock::matchers::{header, method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let connect = |hooks: &TestHooks, url: &str, key: &str| {
+            hooks.url_row.set_text(url);
+            hooks.mode_key.set_active(true);
+            hooks.key_row.set_text(key);
+            assert!(hooks.connect_button.is_sensitive(), "a URL and a key are all API-key mode needs");
+            hooks.connect_button.emit_clicked();
+        };
+
+        // --- A key the server accepts: the account is named by /api/me and has nothing to refresh;
+        // Advanced starts closed and the password fields are out of the way. ---
+        {
+            let mock_server = runtime.block_on(MockServer::start());
+            runtime.block_on(
+                Mock::given(method("GET"))
+                    .and(path("/api/me"))
+                    .and(header("authorization", "Bearer key-123"))
+                    .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({ "id": "user-1", "username": "jane", "mediaProgress": [] })))
+                    .mount(&mock_server),
+            );
+            let pool = runtime.block_on(pool());
+            let result: Rc<RefCell<Option<AddedAccount>>> = Rc::new(RefCell::new(None));
+            let screen = build(pool.clone(), crate::test_support::test_paths(), None, {
+                let result = result.clone();
+                move |added| *result.borrow_mut() = Some(added)
+            }, None);
+            let hooks = screen.test_hooks();
+
+            assert_eq!(hooks.mode_key.label().as_deref(), Some("API Key"));
+            assert!(!hooks.advanced_row.is_expanded(), "Advanced starts closed");
+            connect(hooks, &mock_server.uri(), "key-123");
+            assert!(!hooks.username_row.is_visible() && !hooks.password_row.is_visible() && hooks.key_row.is_visible());
+            pump_until(|| result.borrow().is_some(), Duration::from_secs(10));
+
+            let added = result.borrow_mut().take().expect("the key was accepted");
+            let account = runtime.block_on(abs_storage::repo::accounts::get(&pool, &added.account_id)).unwrap();
+            assert_eq!((account.username.as_str(), account.token.as_str(), account.refresh_token), ("jane", "key-123", None));
+            assert!(!hooks.banner.widget().reveals_child());
+        }
+
+        // --- A key the server rejects: the key field is tinted, the words are about the key, and
+        // nothing else opens or changes. ---
+        {
+            let mock_server = runtime.block_on(MockServer::start());
+            runtime.block_on(Mock::given(method("GET")).and(path("/api/me")).respond_with(ResponseTemplate::new(401)).mount(&mock_server));
+            let pool = runtime.block_on(pool());
+            let screen = build(pool.clone(), crate::test_support::test_paths(), None, |_| panic!("a rejected key must not sign in"), None);
+            let hooks = screen.test_hooks();
+            connect(hooks, &mock_server.uri(), "revoked");
+            pump_until(|| hooks.banner.widget().reveals_child(), Duration::from_secs(10));
+            assert_eq!(Some(hooks.banner.title().as_str()), Some("API key not accepted"));
+            assert!(hooks.key_row.has_css_class("error"));
+            assert!(!hooks.advanced_row.is_expanded());
+            assert!(runtime.block_on(abs_storage::repo::servers::list(&pool)).unwrap().is_empty(), "a failed sign-in stores nothing");
+        }
+
+        // --- A proxy in front refuses: the message points at Advanced, which opens by itself. ---
+        {
+            let mock_server = runtime.block_on(MockServer::start());
+            runtime.block_on(Mock::given(method("GET")).and(path("/api/me")).respond_with(ResponseTemplate::new(403)).mount(&mock_server));
+            let pool = runtime.block_on(pool());
+            let screen = build(pool, crate::test_support::test_paths(), None, |_| panic!("a blocked request must not sign in"), None);
+            let hooks = screen.test_hooks();
+            connect(hooks, &mock_server.uri(), "key-123");
+            pump_until(|| hooks.banner.widget().reveals_child(), Duration::from_secs(10));
+            assert_eq!(Some(hooks.banner.title().as_str()), Some("The server refused the request"));
+            assert!(hooks.advanced_row.is_expanded(), "the section that holds the fix opens");
+            assert!(!hooks.key_row.has_css_class("error"), "a proxy refusing isn't a bad key");
+        }
+
+        // --- What Advanced holds is used for the attempt and saved on the new server's row. ---
+        {
+            let mock_server = runtime.block_on(MockServer::start());
+            runtime.block_on(
+                Mock::given(method("GET"))
+                    .and(path("/api/me"))
+                    .and(header("x-proxy-auth", "s3cret"))
+                    .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({ "id": "user-1", "username": "jane" })))
+                    .mount(&mock_server),
+            );
+            runtime.block_on(Mock::given(method("GET")).and(path("/api/me")).respond_with(ResponseTemplate::new(403)).mount(&mock_server));
+            let pool = runtime.block_on(pool());
+            let result: Rc<RefCell<Option<AddedAccount>>> = Rc::new(RefCell::new(None));
+            let screen = build(pool.clone(), crate::test_support::test_paths(), None, {
+                let result = result.clone();
+                move |added| *result.borrow_mut() = Some(added)
+            }, None);
+            let hooks = screen.test_hooks();
+            assert_eq!(hooks.headers_row.title().as_str(), "Custom Headers");
+            assert_eq!(hooks.certificate_row.title().as_str(), "Client Certificate (Experimental)");
+            hooks.untrusted_switch.set_state(true);
+            hooks.untrusted_switch.set_active(true);
+            // The header editor needs a window to sit on; apply its result the way its Save does.
+            screen.test_settings().borrow_mut().custom_headers_json = Some(abs_core::connection::validate_custom_headers_text("X-Proxy-Auth: s3cret").unwrap());
+            connect(hooks, &mock_server.uri(), "key-123");
+            pump_until(|| result.borrow().is_some(), Duration::from_secs(10));
+            let added = result.borrow_mut().take().expect("the header opened the proxy");
+            let row = runtime.block_on(abs_storage::repo::servers::get(&pool, &added.server_id)).unwrap();
+            assert!(row.disable_ssl_verify);
+            assert_eq!(row.custom_headers_json, r#"{"X-Proxy-Auth":"s3cret"}"#);
         }
     }
 }

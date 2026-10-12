@@ -77,6 +77,8 @@ def make_handler(log_path, header):
         def reply(self, status, body=b"", ctype="application/json", extra=None):
             if isinstance(body, (dict, list)):
                 body = json.dumps(body).encode()
+            # Logged before the reply goes out, so a test that has the answer can rely on the log.
+            self.record(status)
             self.send_response(status)
             self.send_header("Content-Type", ctype)
             self.send_header("Content-Length", str(len(body)))
@@ -85,7 +87,6 @@ def make_handler(log_path, header):
             self.end_headers()
             if self.command != "HEAD":
                 self.wfile.write(body)
-            self.record(status)
 
         def gated(self):
             if want_name and self.headers.get(want_name) != want_value:
@@ -112,6 +113,8 @@ def make_handler(log_path, header):
                 return self.reply(200, {"isInit": True, "app": "audiobookshelf", "serverVersion": "2.36.0"})
             if not self.authed():
                 return self.reply(401, {"error": "Unauthorized"})
+            if path == "/api/me":
+                return self.reply(200, {"id": "u1", "username": USER, "mediaProgress": []})
             if path == "/api/libraries":
                 return self.reply(200, {"libraries": [{"id": "11111111-1111-4111-8111-111111111111", "name": "Books", "mediaType": "book", "displayOrder": 1, "icon": "database"}]})
             if path.startswith("/api/items/") and "/file/" in path:

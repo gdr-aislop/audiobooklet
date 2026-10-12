@@ -16,6 +16,109 @@ pub struct AddedAccount {
     pub account_id: String,
 }
 
+/// How to sign in: a username and password, or an API key (a bearer token created in the
+/// server's settings, with no username and no refresh token).
+pub enum SignIn<'a> {
+    Password { username: &'a str, password: &'a str },
+    ApiKey(&'a str),
+}
+
+/// A client certificate bundle (PKCS#12) and its export password.
+#[derive(Clone, PartialEq)]
+pub struct ClientCertificate {
+    pub path: std::path::PathBuf,
+    pub password: Option<String>,
+}
+
+impl std::fmt::Debug for ClientCertificate {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ClientCertificate").field("path", &self.path).field("password", &self.password.as_ref().map(|_| "<redacted>")).finish()
+    }
+}
+
+/// Connection options chosen on the login screen's Advanced section, for a server that may not
+/// have a row yet. They apply to the attempt on top of what a known server's row already holds,
+/// and are saved on the server's row once the sign-in succeeds (a failed attempt saves nothing).
+/// Empty by default: nothing chosen, the row's own settings apply.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct ConnectionSettings {
+    /// Trust any certificate (the server row's "Disable SSL verification").
+    pub allow_untrusted_certificate: bool,
+    /// The canonical JSON `abs_core::connection::validate_custom_headers_text` produces.
+    pub custom_headers_json: Option<String>,
+    pub client_certificate: Option<ClientCertificate>,
+}
+
+/// The options for an attempt: `base` (a known server's saved options, or none) with whatever
+/// `settings` provides laid over it.
+fn attempt_options(base: Option<abs_api::ConnectionOptions>, settings: &ConnectionSettings) -> abs_api::ConnectionOptions {
+    let mut options = base.unwrap_or_default();
+    if settings.allow_untrusted_certificate {
+        options.disable_ssl_verify = true;
+    }
+    if let Some(json) = &settings.custom_headers_json {
+        options.extra_headers = crate::connection::parse_custom_headers(json);
+    }
+    if let Some(certificate) = &settings.client_certificate {
+        options.client_cert_path = Some(certificate.path.clone());
+        options.client_cert_password = certificate.password.clone().filter(|password| !password.is_empty());
+    }
+    options
+}
+
+/// Writes the settings the user provided onto the server's row, after a successful sign-in.
+async fn save_settings(pool: &SqlitePool, server_id: &str, settings: &ConnectionSettings) -> Result<()> {
+    if settings.allow_untrusted_certificate {
+        servers::set_disable_ssl_verify(pool, server_id, true).await?;
+    }
+    if let Some(json) = &settings.custom_headers_json {
+        servers::set_custom_headers_json(pool, server_id, json).await?;
+    }
+    if let Some(certificate) = &settings.client_certificate {
+        servers::set_client_cert_path(pool, server_id, Some(&certificate.path.to_string_lossy())).await?;
+        servers::set_client_cert_password(pool, server_id, certificate.password.as_deref().filter(|password| !password.is_empty())).await?;
+    }
+    Ok(())
+}
+
+/// A connection setting that can't be used, in words a person can act on.
+fn setup_error(err: abs_api::ConnectionBuildError) -> crate::error::CoreError {
+    use abs_api::ConnectionBuildError::*;
+    crate::error::CoreError::ConnectionSetup(match err {
+        InvalidBearerToken => "The API key contains characters that can't be used.".to_string(),
+        InvalidHeader(name) => format!("The custom header {name:?} isn't valid."),
+        ClientCertificate { path, .. } => {
+            let file = path.file_name().map(|name| name.to_string_lossy().to_string()).unwrap_or_else(|| path.to_string_lossy().to_string());
+            format!("The client certificate {file} couldn't be opened. Check that the file is still there and that its password is right.")
+        }
+        other => other.to_string(),
+    })
+}
+
+/// Signs in to the server at `url` with `options`, returning what the account row stores. An
+/// API key is a bearer token: `/api/me` says whose it is, and there is nothing to refresh.
+async fn authenticate(url: &str, options: &abs_api::ConnectionOptions, sign_in: &SignIn<'_>) -> Result<abs_api::LoginResult> {
+    match sign_in {
+        SignIn::Password { username, password } => {
+            let client = abs_api::Client::with_options(url, options).map_err(setup_error)?;
+            Ok(client.login(username, password).await?)
+        }
+        SignIn::ApiKey(key) => {
+            let key = key.trim();
+            let client = abs_api::Client::with_bearer_token_and_options(url, key, std::time::Duration::from_secs(15), options).map_err(setup_error)?;
+            let who = client.whoami().await?;
+            Ok(abs_api::LoginResult { user_id: who.user_id, username: who.username, access_token: key.to_string(), refresh_token: None })
+        }
+    }
+}
+
+/// Remembers (or forgets) a password after a sign-in; an API key has none to remember.
+async fn remember_after_sign_in(passwords: &dyn PasswordStore, account_id: &str, sign_in: &SignIn<'_>, remember: bool) {
+    if let SignIn::Password { password, .. } = sign_in {
+        crate::passwords::remember_after_login(passwords, account_id, password, remember).await;
+    }
+}
+
 /// The previous session's identity, captured by the shell before sending the user back to the
 /// login screen after an authorization failure. `relogin` compares what the user typed against
 /// this to decide whether a successful login is a token rotation on the same account, a different
@@ -87,16 +190,26 @@ pub async fn add_server_and_login(
     passwords: &dyn PasswordStore,
     remember: bool,
 ) -> Result<AddedAccount> {
+    add_server_and_sign_in(pool, url, &SignIn::Password { username, password }, passwords, remember, &ConnectionSettings::default()).await
+}
+
+/// [`add_server_and_login`] for either kind of credential, with connection options chosen on the
+/// login screen. A known server's saved options apply to the attempt, with `settings` laid over
+/// them; on success the options `settings` provides are saved on the server's row.
+pub async fn add_server_and_sign_in(
+    pool: &SqlitePool,
+    url: &str,
+    sign_in: &SignIn<'_>,
+    passwords: &dyn PasswordStore,
+    remember: bool,
+    settings: &ConnectionSettings,
+) -> Result<AddedAccount> {
     let url = servers::normalize_url(url);
     let known = servers::find_by_url(pool, url).await?;
 
     // A known server's saved connection settings (custom headers, TLS) apply to this login too.
-    let options = known
-        .first()
-        .map(|row| crate::connection::ConnectionTarget::resolve(row, None).options)
-        .unwrap_or_default();
-    let client = abs_api::Client::with_options(url, &options).map_err(|e| crate::error::CoreError::UnexpectedResponse(e.to_string()))?;
-    let login_result = client.login(username, password).await?;
+    let options = attempt_options(known.first().map(|row| crate::connection::ConnectionTarget::resolve(row, None).options), settings);
+    let login_result = authenticate(url, &options, sign_in).await?;
 
     let mut empty_row = None;
     for server in &known {
@@ -104,7 +217,8 @@ pub async fn add_server_and_login(
         if let Some(account) = accounts_here.iter().find(|a| a.username == login_result.username) {
             accounts::set_tokens(pool, &account.id, &login_result.access_token, login_result.refresh_token.as_deref()).await?;
             accounts::set_active(pool, &account.id).await?;
-            crate::passwords::remember_after_login(passwords, &account.id, password, remember).await;
+            save_settings(pool, &server.id, settings).await?;
+            remember_after_sign_in(passwords, &account.id, sign_in, remember).await;
             tracing::info!(account_id = %account.id, "signed in again to an account already on this device");
             return Ok(AddedAccount { server_id: server.id.clone(), account_id: account.id.clone() });
         }
@@ -136,7 +250,8 @@ pub async fn add_server_and_login(
         }
     };
     accounts::set_active(pool, &account_id).await?;
-    crate::passwords::remember_after_login(passwords, &account_id, password, remember).await;
+    save_settings(pool, &server_id, settings).await?;
+    remember_after_sign_in(passwords, &account_id, sign_in, remember).await;
     if !new_row {
         tracing::info!(%server_id, "signed in to a server already on this device");
     }
@@ -185,6 +300,41 @@ pub async fn relogin(
     passwords: &dyn PasswordStore,
     remember: bool,
 ) -> Result<AddedAccount> {
+    relogin_with(pool, paths, previous, url, &SignIn::Password { username, password }, passwords, remember, &ConnectionSettings::default()).await
+}
+
+/// The options a re-login attempt uses: the previous server's saved ones when `url` is that same
+/// server (see [`relogin_with`]), with `settings` laid over them.
+async fn relogin_options(pool: &SqlitePool, previous: &ReloginSeed, url: &str, settings: &ConnectionSettings) -> abs_api::ConnectionOptions {
+    let saved = match servers::get(pool, &previous.server_id).await {
+        Ok(row) if normalize_url(&row.url) == url => Some(crate::connection::ConnectionTarget::resolve(&row, None).options),
+        _ => None,
+    };
+    attempt_options(saved, settings)
+}
+
+/// Whose API key this is, asked of the server the way [`relogin_with`] would sign in — so the
+/// re-login screen can run [`replacement_kind`] (and confirm a replacement) before anything
+/// changes. A key carries no username to compare until the server has been asked.
+pub async fn api_key_username(pool: &SqlitePool, previous: &ReloginSeed, url: &str, key: &str, settings: &ConnectionSettings) -> Result<String> {
+    let url = normalize_url(url);
+    let options = relogin_options(pool, previous, url, settings).await;
+    Ok(authenticate(url, &options, &SignIn::ApiKey(key)).await?.username)
+}
+
+/// [`relogin`] for either kind of credential, with connection options chosen on the login
+/// screen (see [`add_server_and_sign_in`]).
+#[allow(clippy::too_many_arguments)]
+pub async fn relogin_with(
+    pool: &SqlitePool,
+    paths: &AppPaths,
+    previous: &ReloginSeed,
+    url: &str,
+    sign_in: &SignIn<'_>,
+    passwords: &dyn PasswordStore,
+    remember: bool,
+    settings: &ConnectionSettings,
+) -> Result<AddedAccount> {
     // Normalized once, up front: every use below (the HTTP client's baseurl, the same-server
     // comparison, the new server row) sees the same canonical form, so a user-typed trailing
     // slash can't fork the flow.
@@ -192,14 +342,10 @@ pub async fn relogin(
     // A same-server re-login honors the server's saved connection settings — a self-signed
     // server must be reachable through its own TLS policy, or "sign in again" would be the one
     // flow that breaks exactly where every other call works. Any other case (a different
-    // server) has no settings to honor yet: defaults apply, and connection settings can only
-    // be configured once a server exists.
-    let options = match servers::get(pool, &previous.server_id).await {
-        Ok(row) if normalize_url(&row.url) == url => crate::connection::ConnectionTarget::resolve(&row, None).options,
-        _ => abs_api::ConnectionOptions::default(),
-    };
-    let client = abs_api::Client::with_options(url, &options).map_err(|e| crate::error::CoreError::UnexpectedResponse(e.to_string()))?;
-    let login_result = client.login(username, password).await?;
+    // server) has no saved settings to honor: defaults apply, plus whatever the login screen's
+    // Advanced section provides.
+    let options = relogin_options(pool, previous, url, settings).await;
+    let login_result = authenticate(url, &options, sign_in).await?;
 
     let same_server = url == normalize_url(&previous.url);
     let same_account = same_server && login_result.username == previous.username;
@@ -212,7 +358,8 @@ pub async fn relogin(
             login_result.refresh_token.as_deref(),
         )
         .await?;
-        crate::passwords::remember_after_login(passwords, &previous.account_id, password, remember).await;
+        save_settings(pool, &previous.server_id, settings).await?;
+        remember_after_sign_in(passwords, &previous.account_id, sign_in, remember).await;
         return Ok(AddedAccount {
             server_id: previous.server_id.clone(),
             account_id: previous.account_id.clone(),
@@ -231,7 +378,8 @@ pub async fn relogin(
         accounts::set_active(pool, &account_id).await?;
         accounts::remove(pool, &previous.account_id).await?;
         crate::passwords::forget(passwords, &previous.account_id).await;
-        crate::passwords::remember_after_login(passwords, &account_id, password, remember).await;
+        save_settings(pool, &previous.server_id, settings).await?;
+        remember_after_sign_in(passwords, &account_id, sign_in, remember).await;
         return Ok(AddedAccount { server_id: previous.server_id.clone(), account_id });
     }
 
@@ -255,7 +403,8 @@ pub async fn relogin(
     accounts::set_active(pool, &account_id).await?;
     servers::remove(pool, &previous.server_id).await?;
     crate::passwords::forget(passwords, &previous.account_id).await;
-    crate::passwords::remember_after_login(passwords, &account_id, password, remember).await;
+    save_settings(pool, &server_id, settings).await?;
+    remember_after_sign_in(passwords, &account_id, sign_in, remember).await;
     if let Err(err) = paths.purge_server_data(&previous.server_id).await {
         tracing::warn!(%err, server_id = %previous.server_id, "couldn't purge the old server's on-disk cache after switching servers; the files are orphaned but harmless");
     }

@@ -146,7 +146,7 @@ network address, API keys and their combinations, run against real sockets: `fak
 (`crates/abs-core/tests/support/`) plays a server behind a self-signed certificate, mutual TLS
 and/or a shared-secret header gate. Rerun with
 `cargo test -p abs-core --test connection_options -- --ignored --test-threads=4` (API calls,
-login, token refresh, track download) and
+login, API-key sign-in, token refresh, track download) and
 `cargo test -p abs-player --test streaming_options -- --ignored --test-threads=1` (GStreamer
 playback). They need `python3` and `openssl`. Only the app's logic and HTTP/TLS layers were
 exercised, not the GTK screens.
@@ -171,20 +171,12 @@ exercised, not the GTK screens.
    `http-headers` property that `souphttpsrc` doesn't have (it is `extra-headers`) and its
    `has_property` guard turned that into a silent no-op. A header-protected server answered 403 to
    every stream. A unit test now pins the property names.
-2. **A new server that needs an option can't be added** (not fixed): options live on a server row,
-   and only a successful login creates one, so a self-signed, header-protected or mTLS server
-   can't be added from the login screen. Its error even says to "allow it in that server's
-   connection settings". It works only if a row already exists (a server signed out of, or left
-   without an account). Needs an "Advanced" part on the login screen, or a row created before
-   the login.
-3. **Misleading login errors:** a missing or untrusted client certificate is classified as a
-   certificate error ("Can't verify this server's certificate … allow it in connection
-   settings") or, if the connection is reset first, "Can't reach this server". A 403 from a header
-   gate, and a client certificate bundle that won't open, both show "Something went wrong".
-4. **API key login isn't implemented:** the login screen's "API Token" toggle only shows "API
-   tokens aren't supported yet". The engine copes with such a credential once stored (see above),
-   so this is mostly a login-screen job: take the key, call an authenticated endpoint to learn the
-   user, store it as the token with no refresh token.
+
+Afterwards, from these findings (all fixed): the login screen got an Advanced section (allow an
+untrusted certificate, custom headers, client certificate) that applies to the sign-in and is
+saved on the new server; failures are told apart (untrusted server certificate, client certificate
+wanted or refused, a proxy's 403/407, 404, 5xx, a client certificate bundle that can't be opened)
+and say what to do; and the "API Key" toggle signs in with an API key.
 
 ## Manual pass results — 2026-09-25
 
@@ -256,8 +248,8 @@ injection beyond what's noted inline. These are gaps in *pass coverage*, not kno
 - [x] **WT-1 — First launch shows the login screen.** Fresh app data (or after signing out of
       every server, once Settings exists). Launch the app.
       *Expected:* "Connect to your Audiobookshelf server" screen with icon, description, a
-      Password / API Token toggle, Server URL + Username + Password fields, and a **Connect**
-      button. No back button anywhere.
+      Password / API Key toggle, Server URL + Username + Password fields, a collapsed
+      **Advanced** row, and a **Connect** button. No back button anywhere.
       *Note (2026-09-25):* caught a real window-shape bug here — see this doc's dated results
       note after §0. Fixed; re-verified at exactly 390×760 on a brand-new `$HOME`.
 
@@ -273,8 +265,8 @@ injection beyond what's noted inline. These are gaps in *pass coverage*, not kno
 - [x] **WT-4 — Password show/hide.** Tap the eye icon in the Password field.
       *Expected:* password text toggles between dots and plain text.
 
-- [x] **WT-5 — Mode switch swaps fields.** Tap "API Token".
-      *Expected:* Username and Password disappear entirely; a single "API Token" field appears.
+- [x] **WT-5 — Mode switch swaps fields.** Tap "API Key".
+      *Expected:* Username and Password disappear entirely; a single "API Key" field appears.
       Tapping "Password" brings them back.
 
 - [x] **WT-6 — Successful login.** Fill in valid credentials and tap Connect.
@@ -301,10 +293,22 @@ injection beyond what's noted inline. These are gaps in *pass coverage*, not kno
       *Expected:* everything you typed is still there, the form is re-enabled, and Connect works
       again without retyping.
 
-- [x] **WT-11 — API token mode is explicitly unsupported.** Switch to API Token, fill URL +
-      token, tap Connect.
-      *Expected:* a banner explaining that signing in with an API token isn't supported yet —
-      use username and password. No crash, no fake login.
+- [ ] **WT-11 — API key sign-in.** Create an API key in the server's settings (Settings → API
+      Keys), switch to API Key, fill URL + key, tap Connect.
+      *Expected:* signed in as the key's user (Settings shows that username); nothing asks for a
+      password. A revoked or mistyped key shows "API key not accepted" and tints the key field.
+      *Automated:* `welcome_api_key_and_advanced`, and abs-core's `connection_options` tests (keys
+      on plain, header-gated, self-signed and mutual-TLS servers). Not yet tried against a real
+      Audiobookshelf server: a key must be accepted as a bearer token by `/api/me` and in a
+      stream URL's `?token=`.
+
+- [ ] **WT-11b — Advanced options on the login screen.** Against a server behind a self-signed
+      certificate, a header-gating proxy or mutual TLS, try to connect without touching Advanced.
+      *Expected:* the banner names the problem ("Can't verify this server's certificate", "The
+      server refused the request", "This server wants a client certificate"), Advanced opens by
+      itself, and what you set there (Allow Untrusted Certificate, Custom Headers, Client
+      Certificate) makes the next attempt work and is kept on the server (Connection page).
+      *Automated:* `welcome_api_key_and_advanced`, `every_failure_says_what_to_do_about_it`.
 
 - [ ] **WT-12 — Login screen during no network.** With airplane mode on, connect with any
       credentials.
@@ -327,7 +331,7 @@ injection beyond what's noted inline. These are gaps in *pass coverage*, not kno
 - [ ] **WT-15 — Remember password is on by default and goes to the keyring.** Look at the form,
       then sign in without touching the switch.
       *Expected:* "Remember password" sits under the Password field, switched on, and is hidden in
-      API Token mode. After signing in, the keyring (Seahorse, or `secret-tool search xdg:schema
+      API Key mode. After signing in, the keyring (Seahorse, or `secret-tool search xdg:schema
       io.github.gdr_aislop.audiobooklet.Password`) holds one item for the account. If the keyring is
       locked, the system unlock prompt may appear. Signing in again with the switch off, or
       signing out, removes the item.

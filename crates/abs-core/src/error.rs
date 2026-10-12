@@ -12,6 +12,12 @@ pub enum CoreError {
     #[error("server returned an unexpected response: {0}")]
     UnexpectedResponse(String),
 
+    /// A connection setting that can't be used: a client certificate bundle that won't open (gone,
+    /// or the wrong password), an invalid custom header, an API key with characters a header can't
+    /// carry. The text is written for a person.
+    #[error("{0}")]
+    ConnectionSetup(String),
+
     /// The server never answered: the connection was refused, the address didn't resolve or
     /// lead anywhere, or nothing came back in time. Told apart from `UnexpectedResponse` so the
     /// UI can say "can't reach your server" rather than blame the server's answer.

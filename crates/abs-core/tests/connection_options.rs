@@ -6,15 +6,15 @@
 //! `#[ignore]`d because it needs `python3` and `openssl` on the PATH. Run with:
 //!   cargo test -p abs-core --test connection_options -- --ignored --test-threads=4 --nocapture
 //!
-//! The tests also document today's limits: an option can only be set on a server that already has
-//! a row, and a row is only created by a successful login (see
-//! `a_new_server_that_needs_an_option_cannot_be_added_from_the_login_screen`).
+//! Options chosen on the login screen's Advanced section reach a server that has no row yet as
+//! `ConnectionSettings` (see `a_new_server_that_needs_every_option_can_be_added_from_the_login_screen`).
 
 use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 
 use abs_api::LoginError;
+use abs_core::accounts::{ClientCertificate, ConnectionSettings, SignIn};
 use abs_core::auth::Session;
 use abs_core::error::CoreError;
 use abs_core::passwords::NoPasswords;
@@ -218,21 +218,35 @@ async fn a_self_signed_server_works_once_its_row_has_verification_off() {
     assert!(rig.requests().iter().all(|r| r["tls"] == true));
 }
 
-/// The documented catch-22: a brand-new server that *needs* an option (here: trusting a
-/// self-signed certificate) can't be logged in to, and the error tells the user to change a
-/// setting that doesn't exist yet. Connection settings need a server row, and only a successful
-/// login creates one.
+/// A brand-new server that needs every option at once (a self-signed certificate, a header gate
+/// and mutual TLS) is added with the options chosen on the login screen, which are then saved on
+/// the server's row; without them nothing gets through and nothing is stored.
 #[tokio::test]
 #[ignore]
-async fn a_new_server_that_needs_an_option_cannot_be_added_from_the_login_screen() {
+async fn a_new_server_that_needs_every_option_can_be_added_from_the_login_screen() {
     let certs = Certs::new();
     let rig = Rig::start(Some(&certs), true, Some(GATE));
     let (pool, _tmp) = pool().await;
-    for attempt in 0..2 {
-        let err = rejected(login(&pool, &rig.url()).await, "nothing here can be reached with default options");
-        eprintln!("new server behind TLS+mTLS+header (attempt {attempt}): {err:?}");
-    }
-    assert!(servers::list(&pool).await.unwrap().is_empty(), "no row exists to attach options to");
+    let err = rejected(login(&pool, &rig.url()).await, "default options can't reach this server");
+    eprintln!("new server behind TLS+mTLS+header, no options: {err:?}");
+    assert!(servers::list(&pool).await.unwrap().is_empty(), "a failed attempt stores nothing");
+
+    let settings = ConnectionSettings {
+        allow_untrusted_certificate: true,
+        custom_headers_json: Some(abs_core::connection::validate_custom_headers_text(GATE).unwrap()),
+        client_certificate: Some(ClientCertificate { path: certs.client_p12().into(), password: Some("pw".into()) }),
+    };
+    let sign_in = SignIn::Password { username: "test", password: "test" };
+    let added = abs_core::accounts::add_server_and_sign_in(&pool, &rig.url(), &sign_in, &NoPasswords, false, &settings).await.expect("with the options chosen");
+
+    let row = servers::get(&pool, &added.server_id).await.unwrap();
+    assert!(row.disable_ssl_verify);
+    assert_eq!(row.custom_headers_json, r#"{"X-Proxy-Auth":"s3cret"}"#);
+    assert_eq!(row.client_cert_path.as_deref(), Some(certs.client_p12().as_str()));
+    assert_eq!(row.client_cert_password.as_deref(), Some("pw"));
+    // The saved options are all a later session needs.
+    let session = session_for(&pool, &added).await;
+    session.api_client().await.unwrap().get_libraries().await.expect("the row's options carry every later call");
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -246,7 +260,7 @@ async fn a_header_protected_server_refuses_a_login_without_the_header() {
     let (pool, _tmp) = pool().await;
     let err = rejected(login(&pool, &rig.url()).await, "the proxy answers 403");
     eprintln!("header gate, no header: {err:?}");
-    assert!(matches!(err, CoreError::Login(LoginError::UnexpectedResponse(_))), "{err:?}");
+    assert!(matches!(err, CoreError::Login(LoginError::Blocked(403))), "{err:?}");
     assert!(servers::list(&pool).await.unwrap().is_empty());
 }
 
@@ -264,6 +278,13 @@ async fn the_custom_header_reaches_every_kind_of_request() {
     target.plain_client().unwrap().refresh("whatever").await.unwrap();
     let file = client.get_item_file_response("item-1", "ino-1", None).await.expect("a track download");
     drop(file);
+    // The rig logs a request once its reply is written, which can be just after the client hangs up.
+    for _ in 0..40 {
+        if !rig.requests_to("/api/items/item-1/file/ino-1").is_empty() {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
     let requests = rig.requests();
     let paths: Vec<_> = requests.iter().map(|r| r["path"].as_str().unwrap().to_string()).collect();
     for expected in ["/login", "/api/libraries", "/auth/refresh", "/api/items/item-1/file/ino-1"] {
@@ -287,6 +308,9 @@ async fn an_mtls_server_needs_a_client_certificate_and_accepts_the_right_one() {
     row_with(&pool, &rig.url(), &Options { disable_ssl_verify: true, ..Options::default() }).await;
     let err = rejected(login(&pool, &rig.url()).await, "the handshake needs a client certificate");
     eprintln!("mTLS, no client certificate: {err:?}");
+    // The server's alert normally arrives as a TLS error; a connection reset that beats it can't be
+    // told apart from a network failure.
+    assert!(matches!(err, CoreError::Login(LoginError::ClientCertificate(_) | LoginError::Network(_))), "{err:?}");
     assert!(rig.requests().is_empty());
 
     // A certificate from a CA the server doesn't trust.
@@ -294,12 +318,14 @@ async fn an_mtls_server_needs_a_client_certificate_and_accepts_the_right_one() {
     apply(&pool, &server.id, &Options { client_cert: Some((&certs.other_p12(), "pw")), ..Options::default() }).await;
     let err = rejected(login(&pool, &rig.url()).await, "an untrusted client certificate is refused");
     eprintln!("mTLS, certificate from another CA: {err:?}");
+    assert!(matches!(err, CoreError::Login(LoginError::ClientCertificate(_) | LoginError::Network(_))), "{err:?}");
     assert!(rig.requests().is_empty());
 
     // The right certificate, but the wrong export password: a clear mint-time error.
     apply(&pool, &server.id, &Options { client_cert: Some((&certs.client_p12(), "wrong")), ..Options::default() }).await;
     let err = rejected(login(&pool, &rig.url()).await, "a bundle that can't be opened");
     eprintln!("mTLS, wrong bundle password: {err:?}");
+    assert!(matches!(err, CoreError::ConnectionSetup(_)), "{err:?}");
     assert!(rig.requests().is_empty());
 
     // The right certificate and password.
@@ -329,7 +355,7 @@ async fn a_client_certificate_file_that_disappears_fails_loudly_not_silently() {
     session.api_client().await.unwrap().get_libraries().await.expect("the cached client still has its identity");
     // …but anything that builds a client afresh (a restart, a new session) says what is wrong.
     let fresh = session_for(&pool, &added).await;
-    let err = fresh.api_client().await.err().expect("a new mint must fail");
+    let Err(err) = fresh.api_client().await else { panic!("a new mint must fail") };
     eprintln!("client certificate file gone: {err:?}");
     assert!(err.to_string().contains("client certificate"), "{err}");
 }
@@ -444,6 +470,67 @@ async fn an_account_holding_an_api_key_instead_of_a_login_works_without_refreshi
     assert_eq!(session.access_token().await, "api-key-token");
     session.api_client().await.unwrap().get_libraries().await.expect("the key is sent as a bearer token");
     assert!(rig.requests_to("/auth/refresh").is_empty());
+}
+
+/// API-key sign-in on every kind of server: the key goes out as a bearer token, `/api/me` names the
+/// user, and the account has no refresh token.
+#[tokio::test]
+#[ignore]
+async fn an_api_key_signs_in_on_plain_header_gated_self_signed_and_mutual_tls_servers() {
+    let certs = Certs::new();
+    let plain = Rig::start(None, false, None);
+    let gated = Rig::start(None, false, Some(GATE));
+    let self_signed = Rig::start(Some(&certs), false, None);
+    let everything = Rig::start(Some(&certs), true, Some(GATE));
+    let header = ConnectionSettings { custom_headers_json: Some(abs_core::connection::validate_custom_headers_text(GATE).unwrap()), ..ConnectionSettings::default() };
+    let untrusted = ConnectionSettings { allow_untrusted_certificate: true, ..ConnectionSettings::default() };
+    let all = ConnectionSettings {
+        allow_untrusted_certificate: true,
+        custom_headers_json: header.custom_headers_json.clone(),
+        client_certificate: Some(ClientCertificate { path: certs.client_p12().into(), password: Some("pw".into()) }),
+    };
+    for (name, rig, settings) in [("plain", &plain, ConnectionSettings::default()), ("header gate", &gated, header), ("self-signed", &self_signed, untrusted), ("everything", &everything, all)] {
+        let (pool, _tmp) = pool().await;
+        let key = format!("{}.key.sig", fake_jwt().split('.').next().unwrap());
+        let added = abs_core::accounts::add_server_and_sign_in(&pool, &rig.url(), &SignIn::ApiKey(&format!(" {key} ")), &NoPasswords, false, &settings)
+            .await
+            .unwrap_or_else(|err| panic!("{name}: {err:?}"));
+        let account = accounts::get(&pool, &added.account_id).await.unwrap();
+        assert_eq!(account.username, "test", "{name}: named by /api/me");
+        assert_eq!(account.token, key, "{name}: the key, trimmed");
+        assert_eq!(account.refresh_token, None, "{name}: nothing to refresh");
+        let session = session_for(&pool, &added).await;
+        session.api_client().await.unwrap().get_libraries().await.unwrap_or_else(|err| panic!("{name}: {err:?}"));
+        assert!(rig.requests_to("/auth/refresh").is_empty(), "{name}");
+        assert_eq!(rig.requests_to("/api/me").len(), 1, "{name}");
+    }
+}
+
+/// Signing in again with a key: the same user keeps the account; a server that doesn't accept the
+/// key stores nothing; a key with characters a header can't carry says so.
+#[tokio::test]
+#[ignore]
+async fn an_api_key_relogin_and_failures() {
+    let rig = Rig::start(None, false, Some(GATE));
+    let (pool, tmp) = pool().await;
+    let paths = abs_storage::AppPaths::rooted_at(tmp.path().join("data"), tmp.path().join("cache"), tmp.path().join("state"));
+    let header = ConnectionSettings { custom_headers_json: Some(abs_core::connection::validate_custom_headers_text(GATE).unwrap()), ..ConnectionSettings::default() };
+    let key = fake_jwt();
+    let added = abs_core::accounts::add_server_and_sign_in(&pool, &rig.url(), &SignIn::ApiKey(&key), &NoPasswords, false, &header).await.unwrap();
+
+    // Without the header the proxy refuses the key check: Blocked, nothing changes.
+    let err = rejected(abs_core::accounts::add_server_and_sign_in(&pool, &dead_url("http"), &SignIn::ApiKey(&key), &NoPasswords, false, &ConnectionSettings::default()).await, "nothing listens there");
+    eprintln!("key, dead address: {err:?}");
+    assert_eq!(servers::list(&pool).await.unwrap().len(), 1);
+
+    let seed = abs_core::accounts::ReloginSeed { server_id: added.server_id.clone(), account_id: added.account_id.clone(), url: rig.url(), username: "test".into() };
+    let username = abs_core::accounts::api_key_username(&pool, &seed, &rig.url(), &key, &ConnectionSettings::default()).await.expect("the saved header applies to a same-server re-login");
+    assert_eq!(username, "test");
+    let again = abs_core::accounts::relogin_with(&pool, &paths, &seed, &rig.url(), &SignIn::ApiKey(&key), &NoPasswords, false, &ConnectionSettings::default()).await.unwrap();
+    assert_eq!(again.account_id, added.account_id, "the same user on the same server keeps the account");
+
+    let err = rejected(abs_core::accounts::add_server_and_sign_in(&pool, &rig.url(), &SignIn::ApiKey("bad\nkey"), &NoPasswords, false, &header).await, "an unusable key");
+    assert!(matches!(err, CoreError::ConnectionSetup(_)), "{err:?}");
 }
 
 fn fake_jwt() -> String {
