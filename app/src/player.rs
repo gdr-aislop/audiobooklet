@@ -378,10 +378,12 @@ struct NowPlaying {
     /// write then records it finished (at its full duration) rather than unfinished at wherever
     /// the pipeline stopped, and the next play starts it over. Cleared by any seek.
     ended: bool,
-    /// `Some(speed the backend actually runs at)` while a speed picked during a pause on a
-    /// stream hasn't been handed to the backend yet — applying it is a flushing seek, i.e. a
-    /// range request to the server, and nothing is heard until Play anyway. `play()` applies it;
-    /// if the backend refuses it, this is the speed to show again. `speed` is the picked one.
+    /// `Some(speed the backend actually runs at)` while a picked speed hasn't been handed to the
+    /// backend yet. Either it was picked during a pause on a stream — applying it is a flushing
+    /// seek, i.e. a range request to the server, and nothing is heard until Play anyway — and
+    /// `play()` applies it; or the pipeline hadn't prerolled yet and refused the rate change, and
+    /// the tick applies it once the pipeline reports a position. If the backend refuses it then,
+    /// this is the speed to show again. `speed` is the picked one.
     speed_unapplied: Option<f64>,
     /// The seek target never landed after its re-issues and the file was reloaded once to get
     /// there (see `Inner::observe_position`). A second failure then stops with an error instead
@@ -1433,9 +1435,14 @@ impl Inner {
         });
     }
 
-    /// Hands the backend a speed picked while paused on a stream (`NowPlaying::speed_unapplied`),
-    /// right before it plays. A refusal puts the speed it still runs at back on display.
+    /// Hands the backend a speed it hasn't taken yet (`NowPlaying::speed_unapplied`): right
+    /// before a paused stream plays, or once a pipeline that refused it before prerolling can
+    /// take it. A refusal puts the speed it still runs at back on display.
     fn apply_deferred_speed(&mut self) {
+        // Not prerolled yet: it would only be refused again. It stays pending for the tick.
+        if self.backend.position().is_none() {
+            return;
+        }
         let Some(now_playing) = &mut self.now_playing else { return };
         let Some(applied) = now_playing.speed_unapplied.take() else { return };
         let speed = now_playing.speed;
@@ -3282,10 +3289,21 @@ impl PlayerController {
             inner.drop_stale_end_of_stream();
         }
         let accepted = !holds_track || inner.backend.set_speed(speed, Duration::from_secs_f64(within)).is_ok();
-        if accepted {
-            if let Some(now_playing) = &mut inner.now_playing {
+        // A rate change is a flushing seek, which a pipeline still prerolling refuses — and a
+        // fresh book at 1.0× plays without waiting for preroll. Keep the pick for the tick to
+        // apply once the pipeline reports a position, rather than dropping it.
+        let not_prerolled = !accepted && inner.backend.position().is_none();
+        if let Some(now_playing) = &mut inner.now_playing {
+            if accepted {
                 now_playing.speed = speed;
                 now_playing.speed_unapplied = None;
+            } else if not_prerolled {
+                tracing::info!(speed, "pipeline not ready for a rate change; the speed applies once it is");
+                let applied = *now_playing.speed_unapplied.get_or_insert(now_playing.speed);
+                now_playing.speed = speed;
+                if (applied - speed).abs() < f64::EPSILON {
+                    now_playing.speed_unapplied = None;
+                }
             }
         }
         inner.publish();
@@ -3353,6 +3371,14 @@ impl PlayerController {
 
         if let Some((item_id, generation)) = inner.observe_position() {
             Inner::spawn_load_track(self.inner.clone(), item_id, generation);
+        }
+
+        // A speed the pipeline refused before prerolling (see `set_speed`); the publish at the
+        // end of this tick shows the outcome.
+        let speed_waits_for_preroll =
+            inner.now_playing.as_ref().is_some_and(|n| n.is_playing && n.speed_unapplied.is_some()) && inner.backend_holds_track();
+        if speed_waits_for_preroll && inner.backend.position().is_some() {
+            inner.apply_deferred_speed();
         }
 
         let event = match inner.deferred_event.take() {
@@ -5090,6 +5116,11 @@ pub(crate) mod tests {
         hold_preroll: bool,
         play_calls: u32,
         speed_calls: Vec<(f64, Duration)>,
+        /// When set, `set_speed` is refused while `position()` is `None` — a real pipeline
+        /// can't take a rate change (a flushing seek) before it has prerolled.
+        refuse_speed_until_prerolled: bool,
+        /// When set, every `set_speed` is refused, prerolled or not.
+        refuse_every_speed: bool,
     }
 
     struct ScriptedBackend(Rc<RefCell<ScriptedBackendState>>);
@@ -5125,6 +5156,9 @@ pub(crate) mod tests {
         fn set_speed(&mut self, speed: f64, position: Duration) -> abs_player::Result<()> {
             let mut state = self.0.borrow_mut();
             state.speed_calls.push((speed, position));
+            if state.refuse_every_speed || (state.refuse_speed_until_prerolled && state.position.is_none()) {
+                return Err(abs_player::PlayerError::SeekFailed);
+            }
             state.position = Some(position);
             Ok(())
         }
@@ -6236,6 +6270,66 @@ pub(crate) mod tests {
         assert!(snapshot.last_error.is_some() && !snapshot.is_playing, "the error stands until the user retries");
         assert_eq!(state.borrow().play_calls, plays, "the abandoned load must not resume the released pipeline");
         assert!((snapshot.position_seconds - 25.0).abs() < 0.5, "the position is where the load was headed, got {}", snapshot.position_seconds);
+        controller.stop();
+    }
+
+    /// Not a `#[test]` itself — see `main.rs`'s `mod tests`. A fresh book at 1.0× skips the
+    /// load's preroll wait, so it is "playing" while the pipeline still can't take a rate change.
+    /// A speed picked then used to be refused and silently dropped; it now shows at once and
+    /// reaches the backend once the pipeline has prerolled.
+    pub(crate) fn run_speed_picked_before_preroll_applies_once_ready(runtime: &tokio::runtime::Runtime) {
+        let mock_server = runtime.block_on(MockServer::start());
+        runtime.block_on(mock_item(&mock_server, "item-1", &[20], &[], None));
+        let pool = runtime.block_on(pool());
+        let (server, account) = runtime.block_on(account_and_server(&pool, &mock_server.uri()));
+        runtime.block_on(insert_synced_item(&pool, &server.id, "item-1", "Book One"));
+        let (controller, state) = scripted_controller(&pool);
+        {
+            let mut state = state.borrow_mut();
+            state.hold_preroll = true;
+            state.refuse_speed_until_prerolled = true;
+        }
+        controller.start(abs_core::auth::Session::new(pool.clone(), &server, &account), request("item-1", "Book One"), 1.0);
+        pump_until(|| controller.snapshot().is_some_and(|s| !s.is_loading && s.is_playing), Duration::from_secs(10));
+        assert!(state.borrow().position.is_none(), "precondition: the pipeline hasn't prerolled yet");
+
+        controller.set_speed(1.5);
+        assert_eq!(controller.snapshot().unwrap().speed, 1.5, "the picked speed shows at once rather than being dropped");
+        assert_eq!(state.borrow().speed_calls.len(), 1, "the backend was asked once, and refused");
+
+        state.borrow_mut().position = Some(Duration::from_secs(1));
+        pump_until(|| state.borrow().speed_calls.len() >= 2, Duration::from_secs(5));
+        pump_until(|| false, Duration::from_millis(500));
+        let calls = state.borrow().speed_calls.clone();
+        assert_eq!(calls.len(), 2, "applied exactly once more after preroll, got {calls:?}");
+        assert_eq!(calls[1].0, 1.5);
+        assert_eq!(controller.snapshot().unwrap().speed, 1.5);
+        controller.stop();
+    }
+
+    /// Not a `#[test]` itself — see `main.rs`'s `mod tests`. A speed held back until preroll that
+    /// the pipeline still refuses afterwards puts the speed it really runs at back on display.
+    pub(crate) fn run_speed_refused_by_a_ready_pipeline_shows_the_running_speed(runtime: &tokio::runtime::Runtime) {
+        let mock_server = runtime.block_on(MockServer::start());
+        runtime.block_on(mock_item(&mock_server, "item-1", &[20], &[], None));
+        let pool = runtime.block_on(pool());
+        let (server, account) = runtime.block_on(account_and_server(&pool, &mock_server.uri()));
+        runtime.block_on(insert_synced_item(&pool, &server.id, "item-1", "Book One"));
+        let (controller, state) = scripted_controller(&pool);
+        {
+            let mut state = state.borrow_mut();
+            state.hold_preroll = true;
+            state.refuse_every_speed = true;
+        }
+        controller.start(abs_core::auth::Session::new(pool.clone(), &server, &account), request("item-1", "Book One"), 1.0);
+        pump_until(|| controller.snapshot().is_some_and(|s| !s.is_loading && s.is_playing), Duration::from_secs(10));
+
+        controller.set_speed(1.5);
+        assert_eq!(controller.snapshot().unwrap().speed, 1.5);
+        state.borrow_mut().position = Some(Duration::from_secs(1));
+        pump_until(|| controller.snapshot().is_some_and(|s| s.speed == 1.0), Duration::from_secs(5));
+        assert_eq!(controller.snapshot().unwrap().speed, 1.0, "a refusal after preroll shows the speed the backend runs at");
+        assert_eq!(state.borrow().speed_calls.len(), 2, "tried once before preroll and once after, not again on every tick");
         controller.stop();
     }
 

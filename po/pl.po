@@ -3,7 +3,7 @@
 #
 msgid ""
 msgstr ""
-"Project-Id-Version: audiobooklet 0.9.7\n"
+"Project-Id-Version: audiobooklet 0.9.8\n"
 "Report-Msgid-Bugs-To: https://github.com/gdr-aislop/audiobooklet/issues\n"
 "PO-Revision-Date: 2026-10-09 12:00+0000\n"
 "Last-Translator: \n"
@@ -203,9 +203,8 @@ msgstr ""
 
 #: app/src/screens/connection.rs app/src/screens/welcome.rs
 #: app/src/widgets/connection_editors.rs
-#, fuzzy
 msgid "Client Certificate (Experimental)"
-msgstr "Certyfikat klienta"
+msgstr "Certyfikat klienta (eksperymentalne)"
 
 #: app/src/screens/connection.rs
 msgid "Disconnect from the Server"
@@ -1221,9 +1220,8 @@ msgid "Password"
 msgstr "Hasło"
 
 #: app/src/screens/welcome.rs
-#, fuzzy
 msgid "API Key"
-msgstr "Token API"
+msgstr "Klucz API"
 
 #: app/src/screens/welcome.rs
 msgid "Server URL"
@@ -1245,12 +1243,11 @@ msgstr ""
 
 #: app/src/screens/welcome.rs
 msgid "For servers behind a proxy, a firewall or a private certificate"
-msgstr ""
+msgstr "Dla serwerów za proxy, zaporą sieciową lub z prywatnym certyfikatem"
 
 #: app/src/screens/welcome.rs
-#, fuzzy
 msgid "Allow Untrusted Certificate"
-msgstr "Certyfikat klienta"
+msgstr "Zezwalaj na niezaufany certyfikat"
 
 #: app/src/screens/welcome.rs
 msgid "Connecting…"
@@ -1299,11 +1296,11 @@ msgstr "Nie można się zalogować"
 
 #: app/src/screens/welcome.rs
 msgid "API key not accepted"
-msgstr ""
+msgstr "Klucz API nie został przyjęty"
 
 #: app/src/screens/welcome.rs
 msgid "Check the key, and that the user it belongs to is active."
-msgstr ""
+msgstr "Sprawdź klucz oraz czy użytkownik, do którego należy, jest aktywny."
 
 #: app/src/screens/welcome.rs
 msgid "Can't verify this server's certificate"
@@ -1312,62 +1309,62 @@ msgstr "Nie można zweryfikować certyfikatu tego serwera"
 #: app/src/screens/welcome.rs
 msgid "If you trust it, turn on “Allow Untrusted Certificate” under Advanced."
 msgstr ""
+"Jeśli mu ufasz, włącz „Zezwalaj na niezaufany certyfikat” w sekcji "
+"Zaawansowane."
 
 #: app/src/screens/welcome.rs
-#, fuzzy
 msgid "This server wants a client certificate"
-msgstr "Łącz się z serwerami z dowolnym certyfikatem"
+msgstr "Ten serwer wymaga certyfikatu klienta"
 
 #: app/src/screens/welcome.rs
 msgid ""
 "Choose one under Advanced › Client Certificate. If you already did, the "
 "server doesn't accept it."
 msgstr ""
+"Wybierz go w sekcji Zaawansowane › Certyfikat klienta. Jeśli już to "
+"zrobiono, serwer go nie akceptuje."
 
 #: app/src/screens/welcome.rs
-#, fuzzy
 msgid "The server refused the request"
-msgstr "Serwer odrzucił to żądanie"
+msgstr "Serwer odrzucił żądanie"
 
 #: app/src/screens/welcome.rs
 msgid ""
 "A proxy or firewall in front of it may need a custom header or a client "
 "certificate. Add them under Advanced."
 msgstr ""
+"Proxy lub zapora sieciowa przed nim może wymagać własnego nagłówka lub "
+"certyfikatu klienta. Dodaj je w sekcji Zaawansowane."
 
 #: app/src/screens/welcome.rs
-#, fuzzy
 msgid "No Audiobookshelf server found here"
-msgstr "Połącz się z serwerem Audiobookshelf"
+msgstr "Nie znaleziono tu serwera Audiobookshelf"
 
 #: app/src/screens/welcome.rs
 msgid "Check the address, including any path such as /audiobookshelf."
-msgstr ""
+msgstr "Sprawdź adres, łącznie ze ścieżką, np. /audiobookshelf."
 
 #. TRANSLATORS: {status} is an HTTP status code such as 502.
 #: app/src/screens/welcome.rs
 msgid "The server had a problem (HTTP {status})"
-msgstr ""
+msgstr "Wystąpił problem po stronie serwera (HTTP {status})"
 
 #: app/src/screens/welcome.rs
-#, fuzzy
 msgid "Try again in a moment."
-msgstr "Spróbuj zalogować się ponownie."
+msgstr "Spróbuj ponownie za chwilę."
 
 #. TRANSLATORS: {status} is an HTTP status code such as 418.
 #: app/src/screens/welcome.rs
 msgid "Unexpected answer from the server (HTTP {status})"
-msgstr ""
+msgstr "Nieoczekiwana odpowiedź serwera (HTTP {status})"
 
 #: app/src/screens/welcome.rs
-#, fuzzy
 msgid "Check the address and try again."
-msgstr "Sprawdź adres i połączenie."
+msgstr "Sprawdź adres i spróbuj ponownie."
 
 #: app/src/screens/welcome.rs
-#, fuzzy
 msgid "Can't use the connection settings"
-msgstr "nie udało się wczytać ustawień połączenia z serwerem: {error}"
+msgstr "Nie można użyć ustawień połączenia"
 
 #: app/src/screens/welcome.rs
 msgid "Can't reach this server"
@@ -1420,7 +1417,7 @@ msgstr[2] "{count} nagłówków"
 
 #: app/src/widgets/connection_editors.rs
 msgid "Incomplete: not used when streaming playback"
-msgstr ""
+msgstr "Niekompletne: nieużywane podczas odtwarzania strumieniowego"
 
 #: app/src/widgets/connection_editors.rs
 msgid ""
@@ -1440,10 +1437,13 @@ msgid ""
 "books on this server only play once downloaded. A .p12/.pfx bundle and its "
 "export password."
 msgstr ""
+"Używany do logowania, synchronizacji i pobierania, ale nie do odtwarzania "
+"strumieniowego: książki z tego serwera można odtwarzać dopiero po pobraniu. "
+"Plik .p12/.pfx i jego hasło eksportu."
 
 #: app/src/widgets/connection_editors.rs
 msgid "Experimental and incomplete"
-msgstr ""
+msgstr "Eksperymentalne i niekompletne"
 
 #: app/src/widgets/connection_editors.rs
 msgid "No file chosen"
