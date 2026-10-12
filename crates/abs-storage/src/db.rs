@@ -198,4 +198,54 @@ mod tests {
             );
         }
     }
+
+    /// Query plans for the queries the app runs often, and for the lookups SQLite makes on a
+    /// parent's delete to find child rows (foreign-key cascades). A bare `SCAN` of a table in
+    /// any of them means a missing index; the scans left alone (tiny tables, one-off or rare
+    /// queries) are not listed.
+    #[tokio::test]
+    async fn hot_queries_and_foreign_key_lookups_use_an_index() {
+        let tmp = tempfile::tempdir().unwrap();
+        let pool = connect_and_migrate(&tmp.path().join("db.sqlite3")).await.unwrap();
+
+        let queries = [
+            "SELECT * FROM items WHERE server_id = ? AND library_id = ? AND has_audio = 1 ORDER BY added_at DESC",
+            "SELECT id, cover_cache_path FROM items WHERE server_id = ? AND library_id = ?",
+            "SELECT * FROM items WHERE server_id = ? AND id = ?",
+            "SELECT * FROM libraries WHERE server_id = ? ORDER BY display_order ASC",
+            "SELECT * FROM accounts WHERE is_active = 1",
+            "SELECT * FROM accounts WHERE server_id = ? ORDER BY created_at ASC",
+            "SELECT * FROM progress WHERE account_id = ? AND server_id = ? AND item_id = ?",
+            "SELECT * FROM progress WHERE account_id = ? AND needs_push = 1",
+            "SELECT * FROM progress WHERE account_id = ? ORDER BY updated_at DESC LIMIT ?",
+            "SELECT * FROM chapters WHERE server_id = ? AND item_id = ? ORDER BY chapter_index ASC",
+            "SELECT * FROM chapters WHERE server_id = ? AND item_id = ? AND start_seconds <= ? AND ? < end_seconds LIMIT 1",
+            "SELECT * FROM tracks WHERE server_id = ? AND item_id = ? ORDER BY track_index ASC",
+            "SELECT * FROM series_books WHERE server_id = ? AND item_id = ? LIMIT 1",
+            "SELECT * FROM series_books WHERE server_id = ? AND series_id = ?",
+            "DELETE FROM series_books WHERE server_id = ? AND library_id = ?",
+            "SELECT * FROM download_tracks WHERE server_id = ? AND item_id = ? AND ino = ?",
+            "SELECT * FROM download_tracks WHERE server_id = ? AND item_id = ?",
+            "SELECT DISTINCT item_id FROM download_tracks WHERE server_id = ? AND status = 'complete'",
+            // What deleting a parent row looks up in each child table.
+            "SELECT 1 FROM progress WHERE server_id = ? AND item_id = ?",
+            "SELECT 1 FROM bookmarks WHERE server_id = ? AND item_id = ?",
+            "SELECT 1 FROM chapters WHERE server_id = ? AND item_id = ?",
+            "SELECT 1 FROM tracks WHERE server_id = ? AND item_id = ?",
+            "SELECT 1 FROM series_books WHERE server_id = ? AND item_id = ?",
+            "SELECT 1 FROM progress WHERE account_id = ?",
+            "SELECT 1 FROM bookmarks WHERE account_id = ?",
+            "SELECT 1 FROM accounts WHERE server_id = ?",
+            "SELECT 1 FROM libraries WHERE server_id = ?",
+            "SELECT 1 FROM items WHERE server_id = ? AND library_id = ?",
+            "SELECT 1 FROM download_tracks WHERE server_id = ? AND item_id = ? AND ino = ?",
+        ];
+        for query in queries {
+            let plan: Vec<(i64, i64, i64, String)> =
+                sqlx::query_as(&format!("EXPLAIN QUERY PLAN {query}")).fetch_all(&pool).await.unwrap();
+            for (_, _, _, detail) in &plan {
+                assert!(!detail.starts_with("SCAN "), "`{query}` scans: {plan:?}");
+            }
+        }
+    }
 }
