@@ -177,15 +177,11 @@ exercised, not the GTK screens.
    connection settings". It works only if a row already exists (a server signed out of, or left
    without an account). Needs an "Advanced" part on the login screen, or a row created before
    the login.
-3. **Streaming playback can't use a client certificate** (not fixed, documented in
-   `connect_source_setup`): API calls and downloads can, `souphttpsrc` can't, so on an mTLS server
-   only downloaded books play. A fix needs a `GTlsInteraction` subclass (not available in
-   gio-rs 0.20) or a loopback proxy through the app's own client.
-4. **Misleading login errors:** a missing or untrusted client certificate is classified as a
+3. **Misleading login errors:** a missing or untrusted client certificate is classified as a
    certificate error ("Can't verify this server's certificate … allow it in connection
    settings") or, if the connection is reset first, "Can't reach this server". A 403 from a header
    gate, and a client certificate bundle that won't open, both show "Something went wrong".
-5. **API key login isn't implemented:** the login screen's "API Token" toggle only shows "API
+4. **API key login isn't implemented:** the login screen's "API Token" toggle only shows "API
    tokens aren't supported yet". The engine copes with such a credential once stored (see above),
    so this is mostly a login-screen job: take the key, call an authenticated endpoint to learn the
    user, store it as the token with no refresh token.

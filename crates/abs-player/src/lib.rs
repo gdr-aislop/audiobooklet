@@ -240,9 +240,15 @@ impl GstBackend {
 /// Wires `playbin`'s `source-setup` signal: whatever HTTP source GStreamer creates for the next
 /// `load()` gets the connection's transport properties applied — but only the properties that
 /// source actually has, so a local `file://` source (no `user-agent`, no `ssl-strict`) is never
-/// touched. Client certificates are a documented limitation: souphttpsrc's mTLS support is a
-/// separate mechanism from these properties, and a server requiring it fails the request
-/// visibly rather than silently.
+/// touched.
+///
+/// Streaming can't present a client certificate: `souphttpsrc` takes one only through its
+/// `tls-interaction` property, a `GTlsInteraction` whose `request_certificate` supplies it, and
+/// gio-rs can't subclass `GTlsInteraction` yet (not in 0.22.10, the latest at the time of
+/// writing). Once it can, build the interaction from the server's PKCS#12 bundle
+/// (`gio::TlsCertificate::from_pkcs12`), carry the bundle in [`ConnectionProperties`] and set
+/// `tls-interaction` here; the mutual-TLS case in `tests/streaming_options.rs` then becomes a
+/// passing one. Until then a server that requires a certificate fails the request visibly.
 fn connect_source_setup(pipeline: &gst::Element, properties: std::sync::Arc<std::sync::Mutex<ConnectionProperties>>) {
     pipeline.connect("source-setup", false, move |values| {
         let source = values[1].get::<gst::Element>().expect("source-setup signal carries the source element");

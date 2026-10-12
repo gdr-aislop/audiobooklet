@@ -179,10 +179,6 @@ msgid "Saving the SSL verification setting"
 msgstr ""
 
 #: app/src/screens/connection.rs
-msgid "Client Certificate"
-msgstr ""
-
-#: app/src/screens/connection.rs
 msgid "Local Network Server Address"
 msgstr ""
 
@@ -203,6 +199,10 @@ msgstr ""
 #: app/src/screens/connection.rs
 msgid ""
 "Customize the application User-Agent header. Leave empty for the default."
+msgstr ""
+
+#: app/src/screens/connection.rs
+msgid "Client Certificate (Experimental)"
 msgstr ""
 
 #: app/src/screens/connection.rs
@@ -238,6 +238,10 @@ msgid_plural "{count} headers"
 msgstr[0] ""
 msgstr[1] ""
 
+#: app/src/screens/connection.rs
+msgid "Incomplete: not used when streaming playback"
+msgstr ""
+
 #: app/src/screens/connection.rs app/src/screens/settings.rs
 #: app/src/screens/welcome.rs
 msgid "Cancel"
@@ -259,8 +263,13 @@ msgstr ""
 
 #: app/src/screens/connection.rs
 msgid ""
-"Use a client certificate for mTLS — a .p12/.pfx bundle and its export "
-"password."
+"Used for signing in, syncing and downloads, but not for streaming playback: "
+"books on this server only play once downloaded. A .p12/.pfx bundle and its "
+"export password."
+msgstr ""
+
+#: app/src/screens/connection.rs
+msgid "Experimental and incomplete"
 msgstr ""
 
 #: app/src/screens/connection.rs

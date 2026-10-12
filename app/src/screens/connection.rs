@@ -152,22 +152,6 @@ pub fn build(
     ssl_row.set_activatable_widget(Some(&ssl_switch));
     advanced_group.add(&ssl_row);
 
-    let cert_row = adw::ActionRow::builder()
-        .title(tr("Client Certificate"))
-        .subtitle(cert_subtitle(server.client_cert_path.as_deref()))
-        .activatable(true)
-        .build();
-    cert_row.add_suffix(&chevron());
-    cert_row.connect_activated({
-        let window = window.clone();
-        let pool = pool.clone();
-        let server_id = server_id.clone();
-        let row = cert_row.clone();
-        let current_path = server.client_cert_path.clone();
-        move |_| show_cert_dialog(&window, &pool, &server_id, &row, current_path.as_deref())
-    });
-    advanced_group.add(&cert_row);
-
     let local_address_row = adw::ActionRow::builder()
         .title(tr("Local Network Server Address"))
         .subtitle(text_subtitle(server.local_network_address.as_deref()))
@@ -268,6 +252,25 @@ pub fn build(
         }
     });
     advanced_group.add(&user_agent_row);
+
+    // Last on purpose: it is the one setting that doesn't reach every kind of traffic
+    // (see `show_cert_dialog`), so it sits apart from the settings that do.
+    let cert_row = adw::ActionRow::builder()
+        .title(tr("Client Certificate (Experimental)"))
+        .subtitle(cert_subtitle(server.client_cert_path.as_deref()))
+        .subtitle_lines(2)
+        .activatable(true)
+        .build();
+    cert_row.add_suffix(&chevron());
+    cert_row.connect_activated({
+        let window = window.clone();
+        let pool = pool.clone();
+        let server_id = server_id.clone();
+        let row = cert_row.clone();
+        let current_path = server.client_cert_path.clone();
+        move |_| show_cert_dialog(&window, &pool, &server_id, &row, current_path.as_deref())
+    });
+    advanced_group.add(&cert_row);
 
     page.add(&advanced_group);
 
@@ -381,15 +384,17 @@ fn headers_subtitle(custom_headers_json: &str) -> String {
     }
 }
 
-/// The Client Certificate row's subtitle: the bundle's file name, or "None".
+/// The Client Certificate row's subtitle: the bundle's file name (or "None"), then a line saying
+/// the setting is incomplete.
 fn cert_subtitle(path: Option<&str>) -> String {
-    match path {
+    let value = match path {
         Some(path) => std::path::Path::new(path)
             .file_name()
             .map(|name| name.to_string_lossy().to_string())
             .unwrap_or_else(|| path.to_string()),
         None => tr("None"),
-    }
+    };
+    format!("{value}\n{}", tr("Incomplete: not used when streaming playback"))
 }
 
 fn show_error(error_label: &gtk4::Label, message: &str) {
@@ -519,7 +524,7 @@ fn show_headers_dialog(window: &adw::ApplicationWindow, pool: &SqlitePool, serve
 fn show_cert_dialog(window: &adw::ApplicationWindow, pool: &SqlitePool, server_id: &str, row: &adw::ActionRow, current_path: Option<&str>) {
     let chosen: Rc<std::cell::RefCell<Option<std::path::PathBuf>>> = Rc::new(std::cell::RefCell::new(current_path.map(std::path::PathBuf::from)));
 
-    let (dialog, save_error_label) = save_cancel_dialog(window, &tr("Client Certificate"), {
+    let (dialog, save_error_label) = save_cancel_dialog(window, &tr("Client Certificate (Experimental)"), {
         let pool = pool.clone();
         let server_id = server_id.to_string();
         let row = row.clone();
@@ -557,7 +562,16 @@ fn show_cert_dialog(window: &adw::ApplicationWindow, pool: &SqlitePool, server_i
         })
     });
 
-    let content = add_dialog_content(&dialog, &tr("Use a client certificate for mTLS — a .p12/.pfx bundle and its export password."));
+    let content = add_dialog_content(
+        &dialog,
+        &tr("Used for signing in, syncing and downloads, but not for streaming playback: books on this server only play once downloaded. A .p12/.pfx bundle and its export password."),
+    );
+    let experimental_label = gtk4::Label::builder()
+        .label(tr("Experimental and incomplete"))
+        .css_classes(["warning", "heading"])
+        .halign(gtk4::Align::Start)
+        .build();
+    content.insert_child_after(&experimental_label, None::<&gtk4::Widget>);
     let file_label = gtk4::Label::new(Some(&current_path.map(|path| path.to_string()).unwrap_or_else(|| tr("No file chosen"))));
     file_label.set_ellipsize(gtk4::pango::EllipsizeMode::End);
     let choose_button = gtk4::Button::builder().label(tr("Choose File…")).halign(gtk4::Align::Start).build();
@@ -624,7 +638,7 @@ fn show_cert_dialog(window: &adw::ApplicationWindow, pool: &SqlitePool, server_i
                         show_error(&error_label, &err.to_string());
                         return;
                     }
-                    row.set_subtitle(&tr("None"));
+                    row.set_subtitle(&cert_subtitle(None));
                     dialog.close();
                 });
             }
@@ -774,7 +788,16 @@ pub(crate) mod tests {
 
         // Initial subtitles: nothing is configured on a freshly-added server.
         assert_eq!(screen.hooks.headers_row.subtitle().as_deref(), Some("None"));
-        assert_eq!(screen.hooks.cert_row.subtitle().as_deref(), Some("None"));
+        assert_eq!(
+            screen.hooks.cert_row.subtitle().as_deref(),
+            Some("None\nIncomplete: not used when streaming playback"),
+            "the value, then a line saying the setting is incomplete"
+        );
+        assert_eq!(screen.hooks.cert_row.title().as_str(), "Client Certificate (Experimental)");
+        assert_eq!(screen.hooks.cert_row.subtitle_lines(), 2);
+        // Last in the Advanced group, after Change User Agent.
+        assert!(screen.hooks.cert_row.next_sibling().is_none(), "nothing follows the Client Certificate row");
+        assert_eq!(screen.hooks.user_agent_row.next_sibling().as_ref(), Some(screen.hooks.cert_row.upcast_ref::<gtk4::Widget>()));
         assert_eq!(screen.hooks.local_address_row.subtitle().as_deref(), Some("None"));
         assert_eq!(screen.hooks.user_agent_row.subtitle().as_deref(), Some("Default"));
         assert!(!screen.hooks.ssl_switch.state(), "SSL verification starts on (the setting is *disable* verification)");
@@ -864,6 +887,10 @@ pub(crate) mod tests {
         adw::prelude::ActionRowExt::activate(&screen.hooks.cert_row);
         pump_until_dialog_mapped();
         let dialog = find_dialog().unwrap();
+        assert_eq!(dialog.title().as_deref(), Some("Client Certificate (Experimental)"));
+        let first_label = find_descendant::<gtk4::Label>(dialog.content_area().upcast_ref()).unwrap();
+        assert_eq!(first_label.label().as_str(), "Experimental and incomplete");
+        assert!(first_label.has_css_class("warning"), "the dialog's first line is the warning");
         dialog.response(gtk4::ResponseType::Ok);
         pump_until(
             || {

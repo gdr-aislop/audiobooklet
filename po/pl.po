@@ -179,10 +179,6 @@ msgid "Saving the SSL verification setting"
 msgstr "Zapisywanie ustawienia weryfikacji SSL"
 
 #: app/src/screens/connection.rs
-msgid "Client Certificate"
-msgstr "Certyfikat klienta"
-
-#: app/src/screens/connection.rs
 msgid "Local Network Server Address"
 msgstr "Adres serwera w sieci lokalnej"
 
@@ -207,6 +203,11 @@ msgid ""
 "Customize the application User-Agent header. Leave empty for the default."
 msgstr ""
 "Dostosuj nagłówek User-Agent aplikacji. Pozostaw puste, aby użyć domyślnego."
+
+#: app/src/screens/connection.rs
+#, fuzzy
+msgid "Client Certificate (Experimental)"
+msgstr "Certyfikat klienta"
 
 #: app/src/screens/connection.rs
 msgid "Disconnect from the Server"
@@ -244,6 +245,10 @@ msgstr[0] "{count} nagłówek"
 msgstr[1] "{count} nagłówki"
 msgstr[2] "{count} nagłówków"
 
+#: app/src/screens/connection.rs
+msgid "Incomplete: not used when streaming playback"
+msgstr ""
+
 #: app/src/screens/connection.rs app/src/screens/settings.rs
 #: app/src/screens/welcome.rs
 msgid "Cancel"
@@ -267,9 +272,14 @@ msgstr "Najpierw wybierz plik z certyfikatem."
 
 #: app/src/screens/connection.rs
 msgid ""
-"Use a client certificate for mTLS — a .p12/.pfx bundle and its export "
-"password."
-msgstr "Użyj certyfikatu klienta do mTLS — pakietu .p12/.pfx i hasła eksportu."
+"Used for signing in, syncing and downloads, but not for streaming playback: "
+"books on this server only play once downloaded. A .p12/.pfx bundle and its "
+"export password."
+msgstr ""
+
+#: app/src/screens/connection.rs
+msgid "Experimental and incomplete"
+msgstr ""
 
 #: app/src/screens/connection.rs
 msgid "No file chosen"
@@ -1569,6 +1579,12 @@ msgstr ""
 "oraz utrzymuj synchronizację postępu słuchania z serwerem. Integruje się z "
 "pulpitem przez MPRIS2 i wstrzymuje odtwarzanie podczas połączeń "
 "telefonicznych."
+
+#~ msgid ""
+#~ "Use a client certificate for mTLS — a .p12/.pfx bundle and its export "
+#~ "password."
+#~ msgstr ""
+#~ "Użyj certyfikatu klienta do mTLS — pakietu .p12/.pfx i hasła eksportu."
 
 #~ msgctxt "library kind"
 #~ msgid "podcast"
