@@ -287,10 +287,9 @@ pub fn build(
                                         crate::error_reporting::report_background_error(&toast_overlay, &tr("Signing out"), err);
                                         return;
                                     }
-                                    crate::application::show_main_or_welcome(&window, pool, paths, playback_settings);
-                                    if !was_active {
-                                        stay_on_settings(&window);
-                                    }
+                                    // A server that isn't the active one: the rebuilt shell opens on Settings, where the
+                                    // user was, instead of Home.
+                                    crate::application::show_main_or_welcome_on(&window, pool, paths, playback_settings, (!was_active).then_some("settings"));
                                 });
                             }),
                         );
@@ -356,10 +355,9 @@ pub fn build(
                                 if let Err(err) = paths.purge_server_data(&server_id).await {
                                     tracing::warn!(%err, server_id = %server_id, "couldn't purge the removed server's on-disk files; they are orphaned but harmless");
                                 }
-                                crate::application::show_main_or_welcome(&window, pool, paths, playback_settings);
-                                if !was_active {
-                                    stay_on_settings(&window);
-                                }
+                                // A server that isn't the active one: the rebuilt shell opens on Settings, where the
+                                // user was, instead of Home.
+                                crate::application::show_main_or_welcome_on(&window, pool, paths, playback_settings, (!was_active).then_some("settings"));
                             });
                         }),
                     );
@@ -879,12 +877,6 @@ pub(crate) fn host_of(url: &str) -> &str {
     rest.trim_end_matches('/')
 }
 
-/// After a Settings action on a server that isn't the active one, the shell is rebuilt (the
-/// Servers list changed) — but the user was in Settings and should stay there, not land on Home.
-fn stay_on_settings(window: &adw::ApplicationWindow) {
-    use gtk4::prelude::ToVariant;
-    let _ = WidgetExt::activate_action(window, "win.switch-tab", Some(&"settings".to_variant()));
-}
 
 /// The extra sentence a sign-out/remove confirmation carries when some listening progress on this
 /// device hasn't reached the server yet — removing the rows would lose it for good.

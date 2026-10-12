@@ -266,6 +266,19 @@ pub(crate) fn show_main_or_welcome(
     paths: abs_storage::AppPaths,
     playback_settings: abs_core::settings::PlaybackSettings,
 ) {
+    show_main_or_welcome_on(window, pool, paths, playback_settings, None);
+}
+
+/// [`show_main_or_welcome`], opening the main shell on `tab` (a page name such as `"settings"`)
+/// instead of Home — for a Settings action that rebuilds the shell but leaves the user where they
+/// were (signing out of, or removing, a server that isn't the active one).
+pub(crate) fn show_main_or_welcome_on(
+    window: &adw::ApplicationWindow,
+    pool: SqlitePool,
+    paths: abs_storage::AppPaths,
+    playback_settings: abs_core::settings::PlaybackSettings,
+    tab: Option<&'static str>,
+) {
     let window_for_callback = window.clone();
     glib::spawn_future_local(async move {
         let active = abs_storage::repo::accounts::get_active(&pool)
@@ -278,6 +291,10 @@ pub(crate) fn show_main_or_welcome(
                         .await;
                 crate::widgets::swap_content(&window_for_callback, &main_window.root);
                 retain_main_window(main_window);
+                if let Some(tab) = tab {
+                    use gtk4::prelude::ToVariant;
+                    let _ = WidgetExt::activate_action(&window_for_callback, "win.switch-tab", Some(&tab.to_variant()));
+                }
             }
             None => show_welcome(&window_for_callback, pool, paths, playback_settings, None),
         }

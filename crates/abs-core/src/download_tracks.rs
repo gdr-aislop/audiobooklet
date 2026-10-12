@@ -500,6 +500,12 @@ pub async fn download_track(
             }
         };
 
+        // Cancelled while the request was out (Remove Server cancels and then deletes the server's
+        // folder): stop before creating anything on disk, or the folder comes back empty.
+        if cancel() {
+            return Ok(TrackDownloadOutcome::Canceled);
+        }
+
         // The server ignored our Range request and sent the full body from byte 0 — start the
         // file over rather than risk appending a full body onto already-written bytes.
         let fresh_start = range.is_some() && !file_response.resumed;

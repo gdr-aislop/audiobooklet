@@ -171,7 +171,7 @@ async fn remove_unlisted_items(
         items::remove(pool, server_id, &item_id).await?;
         removed += 1;
     }
-    if removed > 0 || kept > 0 {
+    if removed > 0 {
         tracing::info!(library_id, removed, kept_downloaded = kept, "removed books the server no longer lists");
     }
     Ok(kept)
