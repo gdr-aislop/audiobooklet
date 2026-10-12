@@ -256,12 +256,16 @@ fn connect_source_setup(pipeline: &gst::Element, properties: std::sync::Arc<std:
                 source.set_property("user-agent", user_agent.as_str());
             }
         }
-        if !properties.extra_headers.is_empty() && source.has_property("http-headers", Some(gst::Structure::static_type())) {
+        // `extra-headers` is souphttpsrc's property for this; an earlier version asked for a
+        // non-existent `http-headers`, which the `has_property` guard turned into a silent no-op,
+        // so a header-protected server never saw its header on a stream (found by
+        // `abs-player/tests/streaming_options.rs`).
+        if !properties.extra_headers.is_empty() && source.has_property("extra-headers", Some(gst::Structure::static_type())) {
             let mut headers = gst::Structure::new_empty("extra-headers");
             for (name, value) in &properties.extra_headers {
                 headers.set(name.as_str(), value.as_str());
             }
-            source.set_property("http-headers", headers);
+            source.set_property("extra-headers", headers);
         }
         None
     });
@@ -487,6 +491,22 @@ mod tests {
         }
         writer.finalize().unwrap();
         format!("file://{}", path.display())
+    }
+
+    /// `connect_source_setup` guards each property with `has_property`, so a misspelt name is a
+    /// silent no-op (custom headers never reached a stream that way once). Pins the names against
+    /// the real element. Skipped where the HTTP source plugin isn't installed.
+    #[test]
+    fn souphttpsrc_has_every_property_the_source_setup_sets() {
+        init().expect("gstreamer should initialize in this environment");
+        let Ok(source) = gst::ElementFactory::make("souphttpsrc").build() else { return };
+        for (name, ty) in [
+            ("ssl-strict", glib::Type::BOOL),
+            ("user-agent", glib::Type::STRING),
+            ("extra-headers", gst::Structure::static_type()),
+        ] {
+            assert!(source.has_property(name, Some(ty)), "souphttpsrc has no `{name}` property of the expected type");
+        }
     }
 
     fn backend() -> GstBackend {

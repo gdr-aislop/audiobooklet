@@ -139,6 +139,57 @@ test and the `#[ignore]` bus test `a_second_registration_waits_for_the_first_han
 `dbus-run-session -- cargo test -p abs-player -- --ignored mpris --test-threads=1`). Not yet checked
 by hand on a desktop: repeat MP-17 and confirm `playerctl status` follows the new server's book.
 
+### Connection options pass — 2026-10-12
+
+Custom headers, client certificate, self-signed certificate / "Disable SSL verification", local
+network address, API keys and their combinations, run against real sockets: `fake_abs.py`
+(`crates/abs-core/tests/support/`) plays a server behind a self-signed certificate, mutual TLS
+and/or a shared-secret header gate. Rerun with
+`cargo test -p abs-core --test connection_options -- --ignored --test-threads=4` (API calls,
+login, token refresh, track download) and
+`cargo test -p abs-player --test streaming_options -- --ignored --test-threads=1` (GStreamer
+playback). They need `python3` and `openssl`. Only the app's logic and HTTP/TLS layers were
+exercised, not the GTK screens.
+
+**Works:**
+- Each option alone, on login, API calls, token refresh and track downloads: header gate (header
+  on every request, user agent included), self-signed server with verification off, mutual TLS
+  with the right PKCS#12 bundle, and all three together.
+- A local network address: used when something listens there, the public URL otherwise, and the
+  server's other options apply to it too (self-signed + client certificate + header over the
+  local address). Login always goes to the public URL.
+- Without the right options the failures are clean and nothing is stored: no request gets past
+  a refused handshake, and a failed login adds no server row.
+- A client certificate file that disappears: the running session keeps its cached client; a new
+  session says "couldn't load the client certificate".
+- A stored token with no refresh token (an API key pasted in as the token) works as-is, with no
+  refresh attempts.
+- Streaming playback: plain HTTP, self-signed with verification off, header gate, and both.
+
+**Found:**
+1. **Custom headers never reached streaming playback** (fixed): `connect_source_setup` set a
+   `http-headers` property that `souphttpsrc` doesn't have (it is `extra-headers`) and its
+   `has_property` guard turned that into a silent no-op. A header-protected server answered 403 to
+   every stream. A unit test now pins the property names.
+2. **A new server that needs an option can't be added** (not fixed): options live on a server row,
+   and only a successful login creates one, so a self-signed, header-protected or mTLS server
+   can't be added from the login screen. Its error even says to "allow it in that server's
+   connection settings". It works only if a row already exists (a server signed out of, or left
+   without an account). Needs an "Advanced" part on the login screen, or a row created before
+   the login.
+3. **Streaming playback can't use a client certificate** (not fixed, documented in
+   `connect_source_setup`): API calls and downloads can, `souphttpsrc` can't, so on an mTLS server
+   only downloaded books play. A fix needs a `GTlsInteraction` subclass (not available in
+   gio-rs 0.20) or a loopback proxy through the app's own client.
+4. **Misleading login errors:** a missing or untrusted client certificate is classified as a
+   certificate error ("Can't verify this server's certificate … allow it in connection
+   settings") or, if the connection is reset first, "Can't reach this server". A 403 from a header
+   gate, and a client certificate bundle that won't open, both show "Something went wrong".
+5. **API key login isn't implemented:** the login screen's "API Token" toggle only shows "API
+   tokens aren't supported yet". The engine copes with such a credential once stored (see above),
+   so this is mostly a login-screen job: take the key, call an authenticated endpoint to learn the
+   user, store it as the token with no refresh token.
+
 ## Manual pass results — 2026-09-25
 
 A full manual pass was run against a locally-seeded Audiobookshelf server (Docker,
