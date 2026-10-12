@@ -64,26 +64,62 @@ Each result was checked against the app log and its SQLite database.
   - A relaunch with four servers restores the active account without a login.
   - Remembered passwords are removed with their accounts.
 
-**Found:**
+**Found** (all fixed on `claude/amazing-knuth-fbmiu5`; verification below):
 1. **Serious:** a library deleted on the server makes every later sync of that server fail with
    HTTP 404 for its items. `sync_libraries` never drops libraries the server no longer lists, and
-   `sync_all` fetches items for all stored ones.
+   `sync_all` fetches items for all stored ones. **Fixed:** sync fetches only the libraries the
+   server lists and prunes the rest; downloaded books are kept (their library is hidden from
+   "Your Libraries" until the downloads are deleted).
 2. **Serious:** signing out of, or removing, the *active* account lands on the first-run login
    screen with no Cancel, even with other accounts left. It survives a relaunch. Logging in again
-   adds a duplicate server row, and the old row keeps the downloads.
+   adds a duplicate server row, and the old row keeps the downloads. **Fixed:** the most recently
+   used remaining account becomes active; the login screen without Cancel is only for "no
+   accounts left".
 3. Adding a server URL that is already in the list creates another row, even for the same user.
+   **Fixed:** the same URL (trailing slashes ignored) and user signs that account in again; a row
+   left without accounts is reused; a different user still gets a row of their own.
 4. Podcasts and e-books are listed like books. Play shows "Connection lost" (real error: no audio
-   files).
+   files). **Fixed:** both are hidden; a podcast library's Home row says "Podcasts aren't
+   supported yet"; an item with no audio says "Nothing to play here".
 5. "Remove Server" in the server menu is invisible with libadwaita 1.5 (`flat` +
-   `destructive-action` gives white on white), though clickable.
+   `destructive-action` gives white on white), though clickable. **Fixed**, and the same for the
+   Connection page's "Disconnect from the Server" (found in the single-server pass below).
 6. The Library tab doesn't refresh after Home's Sync now or after leaving offline mode. Once,
    after offline mode was turned on and off with a search active, it stayed on "No items yet" with
-   24 items stored.
-7. Smaller issues:
+   24 items stored. **Fixed:** each screen re-reads after the other's sync; leaving offline mode
+   syncs; the empty state names its cause ("No matches", "No downloaded items", "No items yet").
+7. Smaller issues (all **fixed**):
    - A server added in offline mode says it has no libraries, and leaving offline mode doesn't
-     sync it.
-   - Continue Listening waits for the next sync.
-   - An empty search says "Check your connection".
+     sync it. Now: "Offline mode is on", and turning it off syncs.
+   - Continue Listening waits for the next sync. Now: it updates about 2 s after playback stops.
+   - An empty search says "Check your connection". Now: "No matches".
+   - Running downloads are kept across a server switch and shown again on switching back; Remove
+     Server cancels that server's downloads first.
+
+### Fix verification — 2026-10-12
+
+Release build of the fixes, same three-server setup and fresh app data. Every check (R1–R11)
+passed, after two fixes made during the pass:
+- removing a server that isn't active now stays on Settings (the tab switch ran before the
+  rebuilt shell was in place);
+- Remove Server during a download no longer leaves an empty download folder behind.
+
+Single-server pass (server A as `root` only, fresh app data): first login, Home and Library
+(list/grid, search, Author chip, view options, Sync now), playback controls (±skip, next chapter,
+speed, sleep timer, chapters, seek), resume after a relaunch, whole-book download, offline mode
+(only downloaded books, playback with the server stopped, progress pushed on leaving it), delete
+download + "Download remaining chapters", "Log in again" after the server ended the session (same
+account, downloads kept), settings persisting across a relaunch, signing out of the last account
+(login screen without Cancel; logging in again reuses the server row and its downloads) and
+removing the last server (everything purged). Pull-to-refresh needs touch input, so it was
+covered by its automated scenarios. The log showed no new warnings.
+
+Pre-existing, not fixed here:
+- Item Detail's download button shows ↓ for a book that is already downloaded, until a download
+  event for it arrives (the chapter rows show the checkmarks).
+- After a direct shell-to-shell rebuild (switching servers, adding one, a Settings action on a
+  server that isn't active), MPRIS fails to register ("An object is already exported"): the new
+  shell is built before the old one is released.
 
 ## Manual pass results — 2026-09-25
 
@@ -368,6 +404,10 @@ injection beyond what's noted inline. These are gaps in *pass coverage*, not kno
 ---
 
 ## 4. Library picker (LP) — 🚧 not yet built
+
+Today every library on a server is merged into Home and Library (see the 2026-10-12 pass).
+Podcast libraries are listed under Home's "Your Libraries" as "Podcasts aren't supported yet",
+and their episodes, like e-book-only items, are not shown anywhere.
 
 Shown between login and Home only when the server exposes **more than one** library.
 
