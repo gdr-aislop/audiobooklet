@@ -71,18 +71,53 @@ pub async fn get(pool: &SqlitePool, server_id: &str, id: &str) -> Result<Item> {
     .ok_or_else(|| StorageError::NotFound(format!("item {id} on server {server_id}")))
 }
 
+/// A library's items that can be played: podcasts and e-book-only items (`has_audio = 0`) are
+/// left out, so no list in the app shows them.
 pub async fn list_for_library(pool: &SqlitePool, server_id: &str, library_id: &str) -> Result<Vec<Item>> {
     let items = sqlx::query_as(
         "SELECT id, server_id, library_id, title, author, narrator, description,
                 cover_cache_path, duration_seconds, added_at, synced_at,
                 series_name, genres AS genres_json
-         FROM items WHERE server_id = ? AND library_id = ? ORDER BY added_at DESC",
+         FROM items WHERE server_id = ? AND library_id = ? AND has_audio = 1 ORDER BY added_at DESC",
     )
     .bind(server_id)
     .bind(library_id)
     .fetch_all(pool)
     .await?;
     Ok(items)
+}
+
+/// Every item stored for a library, playable or not, with its cached cover path — what sync
+/// compares against the server's list to find books the server no longer has.
+pub async fn list_ids_for_library(pool: &SqlitePool, server_id: &str, library_id: &str) -> Result<Vec<(String, Option<String>)>> {
+    let rows = sqlx::query_as("SELECT id, cover_cache_path FROM items WHERE server_id = ? AND library_id = ?")
+        .bind(server_id)
+        .bind(library_id)
+        .fetch_all(pool)
+        .await?;
+    Ok(rows)
+}
+
+/// Records which of a library's items have no playable audio: `without_audio` get
+/// `has_audio = 0`, every other item of the library `1`. One transaction, so a list read
+/// mid-update never sees a half-applied state.
+pub async fn set_without_audio(pool: &SqlitePool, server_id: &str, library_id: &str, without_audio: &[String]) -> Result<()> {
+    let mut tx = pool.begin().await?;
+    sqlx::query("UPDATE items SET has_audio = 1 WHERE server_id = ? AND library_id = ? AND has_audio = 0")
+        .bind(server_id)
+        .bind(library_id)
+        .execute(&mut *tx)
+        .await?;
+    for id in without_audio {
+        sqlx::query("UPDATE items SET has_audio = 0 WHERE server_id = ? AND library_id = ? AND id = ?")
+            .bind(server_id)
+            .bind(library_id)
+            .bind(id)
+            .execute(&mut *tx)
+            .await?;
+    }
+    tx.commit().await?;
+    Ok(())
 }
 
 pub async fn set_cover_cache_path(

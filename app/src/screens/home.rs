@@ -782,6 +782,7 @@ fn spawn_sync_cycle(ctx: SyncCtx, widgets: HomeWidgets, manual: Option<crate::wi
         let spawned_sync = tokio::spawn({
             let pool = pool.clone();
             let session = session.clone();
+            let sync_paths = paths.clone();
             let server_id = server_id.clone();
             let account_id = account_id.clone();
             // Asked at call time, not captured at build time — a token captured here would
@@ -800,7 +801,7 @@ fn spawn_sync_cycle(ctx: SyncCtx, widgets: HomeWidgets, manual: Option<crate::wi
                     }
                 };
                 let started = std::time::Instant::now();
-                let sync_result = abs_core::sync::sync_all(&pool, &connection, &server_id, &access_token).await;
+                let sync_result = abs_core::sync::sync_all(&pool, &connection, &sync_paths, &server_id, &access_token).await;
                 let sync_took = started.elapsed();
                 let started = std::time::Instant::now();
 
@@ -1028,7 +1029,9 @@ fn apply(data: &HomeData, widgets: &HomeWidgets) {
     }
 
     clear_listbox(&widgets.libraries_list);
-    for library in &data.libraries {
+    // A library the server no longer lists is kept only for downloaded books, which show on the
+    // shelves and in Library; it isn't one of "your libraries" any more.
+    for library in data.libraries.iter().filter(|library| !library.removed_on_server) {
         widgets.libraries_list.append(&library_row(library));
     }
 }
@@ -1100,8 +1103,8 @@ fn library_row(library: &Library) -> adw::ActionRow {
     let kind = match library.media_type.as_str() {
         // TRANSLATORS: kind of an Audiobookshelf library, shown under its name on Home. Lowercase in English.
         "book" => tr_ctx("library kind", "book"),
-        // TRANSLATORS: kind of an Audiobookshelf library, shown under its name on Home. Lowercase in English.
-        "podcast" => tr_ctx("library kind", "podcast"),
+        // TRANSLATORS: shown under a podcast library's name on Home; the app can't play podcasts, so their shows aren't listed anywhere.
+        "podcast" => tr("Podcasts aren't supported yet"),
         other => other.to_string(),
     };
     let row = adw::ActionRow::builder().title(library.name.as_str()).subtitle(kind.as_str()).build();

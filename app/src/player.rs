@@ -2169,6 +2169,12 @@ impl PlayerController {
             }
             let target = match target_result {
                 Ok(target) => target,
+                // Nothing here to play (a podcast, an e-book): no download can stand in for it.
+                Err(err @ abs_core::CoreError::NoPlayableAudio(_)) => {
+                    tracing::warn!(%err, item_id = %item.item_id, "this item has no audio to play");
+                    fail_start(failed_now_playing(abs_player::PlaybackErrorKind::NoAudio, err.to_string()));
+                    return;
+                }
                 Err(err) => {
                     // The server is unreachable (or errored): fall back to locally cached track
                     // metadata, letting downloaded files play offline. A fully-downloaded item

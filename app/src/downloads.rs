@@ -286,7 +286,11 @@ impl DownloadManager {
                     }
                     Err(err) => {
                         tracing::warn!(%err, item_id, "couldn't resolve tracks for download");
-                        inner_rc.borrow().publish(DownloadEvent::ItemStateChanged { item_id, state: ItemDownloadState::Failed(err.to_string()) });
+                        let reason = match err {
+                            abs_core::CoreError::NoPlayableAudio(_) => tr("this item has no audio to download"),
+                            other => other.to_string(),
+                        };
+                        inner_rc.borrow().publish(DownloadEvent::ItemStateChanged { item_id, state: ItemDownloadState::Failed(reason) });
                         return;
                     }
                 }

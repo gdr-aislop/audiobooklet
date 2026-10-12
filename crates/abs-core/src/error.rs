@@ -21,6 +21,16 @@ pub enum CoreError {
     /// The app's offline mode is on: nothing may reach the server until it's switched off.
     #[error("offline mode is on")]
     Offline,
+
+    /// The item has no audio this app can play: a podcast (its audio is in episodes) or an
+    /// e-book-only book. Retrying can't help.
+    #[error("item {0} has no audio files")]
+    NoPlayableAudio(String),
+
+    /// The server answered that the item doesn't exist (any more): deleted on the server, or no
+    /// longer shared with this account.
+    #[error("{0} isn't on the server")]
+    NotOnServer(String),
 }
 
 pub type Result<T> = std::result::Result<T, CoreError>;

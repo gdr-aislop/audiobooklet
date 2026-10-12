@@ -1142,6 +1142,7 @@ fn spawn_sync_cycle(ctx: SyncCtx, widgets: LibraryWidgets, manual: Option<crate:
         let spawned_sync = tokio::spawn({
             let pool = pool.clone();
             let session = session.clone();
+            let sync_paths = paths.clone();
             let server_id = server_id.clone();
             let account_id = account_id.clone();
             async move {
@@ -1157,7 +1158,7 @@ fn spawn_sync_cycle(ctx: SyncCtx, widgets: LibraryWidgets, manual: Option<crate:
                     }
                 };
                 let started = std::time::Instant::now();
-                let sync_result = abs_core::sync::sync_all(&pool, &connection, &server_id, &access_token).await;
+                let sync_result = abs_core::sync::sync_all(&pool, &connection, &sync_paths, &server_id, &access_token).await;
                 let sync_took = started.elapsed();
 
                 let started = std::time::Instant::now();

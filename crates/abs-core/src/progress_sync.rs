@@ -155,7 +155,7 @@ async fn push_unconfirmed_progress(
             Some(server_copy) if server_copy.duration_seconds > 0.0 => server_copy.duration_seconds,
             _ => abs_storage::repo::items::get(pool, server_id, &local.item_id).await.map(|item| item.duration_seconds).unwrap_or(0.0),
         };
-        crate::streaming::sync_progress_to_server(
+        let push = crate::streaming::sync_progress_to_server(
             connection,
             access_token,
             &local.item_id,
@@ -163,7 +163,16 @@ async fn push_unconfirmed_progress(
             duration_seconds,
             local.is_finished,
         )
-        .await?;
+        .await;
+        match push {
+            Ok(()) => {}
+            // The book is gone from the server (a downloaded copy can outlive it): its progress
+            // has nowhere to go. Retrying it would block every later push behind it for good.
+            Err(CoreError::NotOnServer(_)) => {
+                tracing::info!(item_id = %local.item_id, "this book isn't on the server any more; keeping its progress on this device only");
+            }
+            Err(err) => return Err(err),
+        }
         abs_storage::repo::progress::mark_pushed(pool, account_id, server_id, &local.item_id, local.current_time_seconds, local.is_finished)
             .await?;
         pushed.insert(local.item_id);
@@ -402,6 +411,31 @@ mod tests {
         let local = abs_storage::repo::progress::get(&pool, &account_id, &server_id, "item-1").await.unwrap().unwrap();
         assert_eq!(local.current_time_seconds, 70.0, "the server's stale copy must not overwrite what was just pushed");
         assert!(!local.needs_push, "a successful push clears the flag");
+    }
+
+    /// A downloaded book can outlive its removal from the server. Its unpushed progress gets a
+    /// 404, which used to stop every later push behind it for good.
+    #[tokio::test]
+    async fn a_book_gone_from_the_server_does_not_block_other_pushes() {
+        let mock_server = MockServer::start().await;
+        Mock::given(method("GET")).and(path("/api/me")).respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({ "mediaProgress": [] }))).mount(&mock_server).await;
+        Mock::given(method("PATCH")).and(path("/api/me/progress/gone")).respond_with(ResponseTemplate::new(404)).mount(&mock_server).await;
+        Mock::given(method("PATCH")).and(path("/api/me/progress/item-1")).respond_with(ResponseTemplate::new(200)).expect(1).mount(&mock_server).await;
+
+        let (pool, server_id, account_id) = pool_with_synced_item(&mock_server.uri(), "item-1").await;
+        let gone = items::UpsertItem { id: "gone", server_id: &server_id, library_id: "lib-1", title: "Gone", author: None, narrator: None, description: None, duration_seconds: 0.0, added_at: chrono::Utc::now(), series_name: None, genres: &[] };
+        items::upsert(&pool, gone).await.unwrap();
+        abs_storage::repo::progress::set(&pool, &account_id, &server_id, "gone", 30.0, false).await.unwrap();
+        abs_storage::repo::progress::set(&pool, &account_id, &server_id, "item-1", 70.0, false).await.unwrap();
+
+        reconcile_all_progress(&pool, &ConnectionTarget::direct(&mock_server.uri()), "token", &account_id, &server_id, None).await.unwrap();
+
+        for item_id in ["gone", "item-1"] {
+            let local = abs_storage::repo::progress::get(&pool, &account_id, &server_id, item_id).await.unwrap().unwrap();
+            assert!(!local.needs_push, "{item_id}: nothing left to push");
+        }
+        let gone_local = abs_storage::repo::progress::get(&pool, &account_id, &server_id, "gone").await.unwrap().unwrap();
+        assert_eq!(gone_local.current_time_seconds, 30.0, "the position stays on this device");
     }
 
     #[tokio::test]
