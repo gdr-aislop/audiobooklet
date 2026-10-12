@@ -117,9 +117,27 @@ covered by its automated scenarios. The log showed no new warnings.
 Pre-existing, not fixed here:
 - Item Detail's download button shows ↓ for a book that is already downloaded, until a download
   event for it arrives (the chapter rows show the checkmarks).
-- After a direct shell-to-shell rebuild (switching servers, adding one, a Settings action on a
-  server that isn't active), MPRIS fails to register ("An object is already exported"): the new
-  shell is built before the old one is released.
+
+### Switching servers while a book plays — fixes
+
+After a direct shell-to-shell rebuild (switching servers, adding one, a Settings action on a
+server that isn't active), MPRIS failed to register ("An object is already exported"): the new
+shell was built before the old one was released, and the old one then released the name, leaving
+no MPRIS service until a restart (every second rebuild failed). **Fixed**, with the related
+problems found in the same review:
+- the old shell is retired (position saved, MPRIS released) before the new one is built; Add Server
+  retires the parked shell as soon as the login succeeds, not when the Welcome screen is finalized;
+- a retired player ignores a Play tap on its still-visible widgets, and no longer keeps the
+  retired shell alive through its callbacks;
+- a retiring player clears the "loaded item" record only if it is still its own;
+- the playback settings are re-read from the database on every rebuild (a stale startup copy was
+  written back by the next settings edit, reverting earlier changes);
+- a failed second MPRIS object registration no longer leaves the first one exported;
+- "Switch to this server" is disabled while the switch runs.
+Covered by `run_a_retired_player_goes_silent_and_stays_that_way`, the `sync_coordinator` loaded-item
+test and the `#[ignore]` bus test `a_second_registration_waits_for_the_first_handle_to_drop` (run
+`dbus-run-session -- cargo test -p abs-player -- --ignored mpris --test-threads=1`). Not yet checked
+by hand on a desktop: repeat MP-17 and confirm `playerctl status` follows the new server's book.
 
 ## Manual pass results — 2026-09-25
 
@@ -690,7 +708,10 @@ was and wasn't verified.
 - [ ] **MP-17 — Switching accounts retires the old player.** Play a book, then sign in as another
       account (or sign out). Press a media key or use the lock-screen card.
       *Expected:* the old book stops (its position saved, log: `retired the previous player`);
-      the media controls no longer start or move it, and the new shell has nothing playing.
+      the media controls no longer start or move it, and the new shell has nothing playing. After
+      a server switch the media controls (`playerctl`, media keys, lock-screen card) work again for
+      the new shell's next book, with no "already exported" warning in the log, however many
+      times you switch.
 
 - [ ] **MP-18 — Opening the player while a book loads.** On a slow connection, tap Play on a book
       detail screen.

@@ -838,6 +838,10 @@ struct Inner {
     /// An end-of-stream found on the bus by `play()` (which drains what arrived while paused),
     /// handed to the next tick, which is where end-of-stream is handled.
     deferred_event: Option<abs_player::PlayerEvent>,
+    /// Set by `PlayerController::retire`: the shell that owned this controller is gone, so a Play
+    /// tap still landing on its (briefly still visible) widgets must not start audio nobody can
+    /// see or stop.
+    retired: bool,
 }
 
 impl Inner {
@@ -1652,6 +1656,7 @@ impl PlayerController {
                 last_auto_recover_at: None,
                 stale_connection_after: STALE_CONNECTION_AFTER,
                 deferred_event: None,
+                retired: false,
             })),
             tick_source: Rc::new(RefCell::new(None)),
         }
@@ -1699,6 +1704,12 @@ impl PlayerController {
     /// drops the MPRIS registration the shell's listener owns), so media keys and the lock-screen
     /// card can no longer drive a player nobody sees any more.
     pub fn retire(&self) {
+        let held = {
+            let inner = self.inner.borrow();
+            inner.now_playing.as_ref().map(|np| (np.server_id.clone(), np.account_id.clone(), np.item_id.clone())).or_else(|| {
+                inner.pending_start.as_ref().map(|p| (p.server_id.clone(), p.account_id.clone(), p.item_id.clone()))
+            })
+        };
         {
             let mut inner = self.inner.borrow_mut();
             if inner.now_playing.is_some() {
@@ -1708,13 +1719,23 @@ impl PlayerController {
             inner.reset_backend();
             inner.now_playing = None;
             inner.pending_start = None;
+            inner.retired = true;
             inner.listeners.borrow_mut().clear();
             inner.full_update = None;
+            // These capture the shell's widgets and a strong controller clone (a reference cycle
+            // through `Inner`), which kept the whole retired shell alive. The final progress push
+            // queued above already holds its own clone of the sync listener.
+            inner.on_progress_sync = None;
+            inner.on_position_adopted = None;
         }
         if let Some(id) = self.tick_source.borrow_mut().take() {
             id.remove();
         }
-        crate::sync_coordinator::set_loaded_item(None);
+        // Only if it still names this controller's book: a successor shell may already hold
+        // (and have published) its own.
+        if let Some((server_id, account_id, item_id)) = held {
+            crate::sync_coordinator::clear_loaded_item_if(&server_id, &account_id, &item_id);
+        }
         tracing::info!("retired the previous player");
     }
 
@@ -1901,6 +1922,10 @@ impl PlayerController {
     /// over, reloads after an error, and checks for progress made elsewhere after a long pause.
     /// Only a book whose start failed before anything resolved is started again from scratch.
     pub fn start_with(&self, session: abs_core::auth::Session, item: PlayRequest, default_speed: f64, start_chapter: Option<usize>) {
+        if self.inner.borrow().retired {
+            tracing::info!(item_id = %item.item_id, "ignoring a start on a retired player");
+            return;
+        }
         let default_speed = usable_speed(default_speed).unwrap_or(abs_core::playback::DEFAULT_SPEED);
         let same_book = |item_id: &str, server_id: &str, account_id: &str| {
             item_id == item.item_id && server_id == session.server_id() && account_id == session.account_id()
@@ -6964,8 +6989,25 @@ pub(crate) mod tests {
         state.borrow_mut().position = Some(Duration::from_secs(7));
         pump_until(|| controller.snapshot().is_some_and(|s| s.position_seconds >= 6.5), Duration::from_secs(5));
 
+        // Callbacks hold the shell's widgets and a controller clone; retiring must let go of them.
+        let held_by_adopted = Rc::new(());
+        let held_by_sync = Rc::new(());
+        controller.set_on_position_adopted({
+            let held = held_by_adopted.clone();
+            move |_, _| {
+                let _ = &held;
+            }
+        });
+        controller.set_on_progress_sync({
+            let held = held_by_sync.clone();
+            move |_| {
+                let _ = &held;
+            }
+        });
+
         let resets_before = state.borrow().reset_calls;
         controller.retire();
+        assert_eq!(Rc::strong_count(&held_by_adopted), 1, "retiring drops the position-adopted callback");
         assert!(state.borrow().reset_calls > resets_before, "the backend is released");
         assert!(controller.snapshot().is_none(), "nothing is loaded any more");
         let heard_at_retirement = heard.get();
@@ -6973,6 +7015,8 @@ pub(crate) mod tests {
         // Late arrivals: media-key presses and a stale start's network answer.
         controller.play();
         controller.skip(30.0);
+        // A Play tap on the old, still visible, widgets must not start audio nobody can stop.
+        controller.start(abs_core::auth::Session::new(pool.clone(), &server, &account), request("item-1", "Test Item"), 1.0);
         pump_until(|| false, Duration::from_millis(800));
         assert_eq!(heard.get(), heard_at_retirement, "no listener hears from a retired controller");
         assert!(controller.snapshot().is_none());
@@ -6985,6 +7029,9 @@ pub(crate) mod tests {
         };
         pump_until(saved, Duration::from_secs(5));
         assert!(saved(), "the position at retirement is saved");
+        // The retirement's own final push may still hold the sync listener until it finishes.
+        pump_until(|| Rc::strong_count(&held_by_sync) == 1, Duration::from_secs(5));
+        assert_eq!(Rc::strong_count(&held_by_sync), 1, "retiring lets go of the progress-sync callback");
     }
 
     /// Not a `#[test]` itself — see `main.rs`'s `mod tests`. While a book is still starting it is
