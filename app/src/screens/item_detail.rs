@@ -422,7 +422,6 @@ pub fn build(
         toast_overlay: toast_overlay.clone(),
     };
     let options_menu = item_options_menu::build(
-        None,
         {
             let action = progress_action.clone();
             move || action.apply(&tr("Marked as finished"), &tr("Marking as finished"), |duration| (duration, true))

@@ -61,10 +61,6 @@ msgstr ""
 msgid "Play / pause"
 msgstr ""
 
-#: app/src/application.rs app/src/screens/player.rs
-msgid "Add bookmark"
-msgstr ""
-
 #: app/src/application.rs
 msgid "Full player"
 msgstr ""
@@ -216,8 +212,8 @@ msgstr ""
 #. TRANSLATORS: Dialog body. {username} is the account being signed out.
 #: app/src/screens/connection.rs app/src/screens/settings.rs
 msgid ""
-"{username}'s listening progress and bookmarks stored on this device will be "
-"removed — everything on the server stays where it is."
+"{username}'s listening progress stored on this device will be removed — "
+"everything on the server stays where it is."
 msgstr ""
 
 #: app/src/screens/connection.rs
@@ -754,14 +750,6 @@ msgstr ""
 
 #: app/src/screens/main_window.rs app/src/screens/settings.rs
 msgid "Settings"
-msgstr ""
-
-#: app/src/screens/main_window.rs app/src/screens/player.rs
-msgid "Bookmark added"
-msgstr ""
-
-#: app/src/screens/main_window.rs app/src/screens/player.rs
-msgid "Adding bookmark"
 msgstr ""
 
 #: app/src/screens/main_window.rs

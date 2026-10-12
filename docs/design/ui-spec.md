@@ -146,7 +146,7 @@ Fractal) rather than copying Lissen's Material Design look.
   different server — first asks for confirmation (a modal `GtkMessageDialog`, since this crate's
   libadwaita ceiling predates `AdwAlertDialog`), spelling out what is replaced: a different
   account on the same server keeps the server's cached libraries/items/covers/downloads (they're
-  keyed by server) but removes the old account's on-device progress and bookmarks; a different
+  keyed by server) but removes the old account's on-device progress; a different
   server removes everything cached for the old server, rows and on-disk files alike. Nothing is
   removed until the new login actually succeeds — a failed login leaves the old session intact.
   Both ways, everything that matters stays on the server; only the local cache is touched.
@@ -394,7 +394,7 @@ in the mockup itself as OS-rendered, not app UI, since there's nothing here for 
 
 ### Player — full
 - `AdwNavigationPage` with a transparent/blurred header (down-chevron to collapse, `⋯` menu for
-  "Sleep timer", "Playback speed", "Add bookmark").
+  "Sleep timer", "Playback speed").
 - Large cover art, title, author, and the current chapter (`<title> · n of m`, one ellipsized
   line; tapping it opens the chapters list), then a `GtkScale`-based scrubber with
   elapsed/remaining time labels. With chapters, the scrubber and both labels cover the current
@@ -532,8 +532,8 @@ in the mockup itself as OS-rendered, not app UI, since there's nothing here for 
 - A destructive **"Disconnect from the Server"** plain-text action (real; styled like
   `AdwButton`'s `destructive-action` but flat, not a filled button, since it's an infrequent,
   page-level action rather than a primary one) sits below the groups, vertically separated
-  rather than boxed in its own card. It signs out the server's account — its local progress and
-  bookmarks cascade away, the server and its cache survive — after a confirming
+  rather than boxed in its own card. It signs out the server's account — its local progress
+  cascades away, the server and its cache survive — after a confirming
   `GtkMessageDialog`, then hands control back to the shell rebuilder (Welcome when no active
   account is left).
 
@@ -622,7 +622,6 @@ already exists on-screen, so a keyboard user is never offered anything the touch
 | `Space` | Play / pause | Global (no-op when nothing is loaded) |
 | `Alt+1` … `Alt+4` | Switch tab: Home / Library / Downloads / Settings | Global |
 | `Ctrl+F` | Focus the Library search field (switching to the Library tab first if needed) | Global |
-| `b` | Add bookmark at the current position | Global (no-op when nothing is playing) |
 | `Esc` | Collapse the full player back to the shell | Global |
 | `Ctrl+?` | Open the keyboard-shortcuts overlay (`GtkShortcutsWindow`) | Global |
 | `Ctrl+,` | Open the Settings tab | Global |
@@ -636,11 +635,11 @@ already exists on-screen, so a keyboard user is never offered anything the touch
 Rules, each of which constrains future changes to this table:
 
 - **Typing always wins.** While any text entry has focus (Library search, the Welcome form, the
-  Connection page's header editor), single-key bindings like `Space` and `b` must not fire —
+  Connection page's header editor), single-key bindings like `Space` and `c` must not fire —
   they must type. GTK4 does **not** give this for free: application accelerators
   (`set_accels_for_action`) run in the *capture* phase at the window, ahead of the focused
   widget, so a bare-key accelerator swallows the keypress before a `GtkText` sees it (this is
-  how `b` once stopped typing in the Library search). Hence every modifier-less binding is
+  how a bare key once stopped typing in the Library search). Hence every modifier-less binding is
   installed by `add_single_key_shortcuts` as a `GtkShortcutController` on the window with
   global scope and the *bubble* phase, which only runs once the focused widget has declined the
   key. Any new modifier-less binding goes there, never through `set_accels_for_action`;

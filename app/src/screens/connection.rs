@@ -298,7 +298,7 @@ pub fn build(
                 &tr_args("Disconnect from {host}?", &[("host", host_of(&server.url))]),
                 // TRANSLATORS: {username} is the account being signed out of this server.
                 &tr_args(
-                    "{username}'s listening progress and bookmarks stored on this device will be removed — everything on the server stays where it is.",
+                    "{username}'s listening progress stored on this device will be removed — everything on the server stays where it is.",
                     &[("username", &account.username)],
                 ),
                 &tr("Disconnect"),

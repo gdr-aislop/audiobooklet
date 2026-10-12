@@ -59,10 +59,6 @@ msgstr "Odtwarzanie"
 msgid "Play / pause"
 msgstr "Odtwarzaj / wstrzymaj"
 
-#: app/src/application.rs app/src/screens/player.rs
-msgid "Add bookmark"
-msgstr "Dodaj zakładkę"
-
 #: app/src/application.rs
 msgid "Full player"
 msgstr "Pełny odtwarzacz"
@@ -219,11 +215,11 @@ msgstr "Rozłączyć z {host}?"
 #. TRANSLATORS: Dialog body. {username} is the account being signed out.
 #: app/src/screens/connection.rs app/src/screens/settings.rs
 msgid ""
-"{username}'s listening progress and bookmarks stored on this device will be "
-"removed — everything on the server stays where it is."
+"{username}'s listening progress stored on this device will be removed — "
+"everything on the server stays where it is."
 msgstr ""
-"Postęp słuchania i zakładki użytkownika {username} zapisane na tym "
-"urządzeniu zostaną usunięte — wszystko na serwerze pozostanie bez zmian."
+"Postęp słuchania użytkownika {username} zapisany na tym urządzeniu zostanie "
+"usunięty — wszystko na serwerze pozostanie bez zmian."
 
 #: app/src/screens/connection.rs
 msgid "Disconnect"
@@ -772,14 +768,6 @@ msgstr "Biblioteka"
 #: app/src/screens/main_window.rs app/src/screens/settings.rs
 msgid "Settings"
 msgstr "Ustawienia"
-
-#: app/src/screens/main_window.rs app/src/screens/player.rs
-msgid "Bookmark added"
-msgstr "Dodano zakładkę"
-
-#: app/src/screens/main_window.rs app/src/screens/player.rs
-msgid "Adding bookmark"
-msgstr "Dodawanie zakładki"
 
 #: app/src/screens/main_window.rs
 msgid "Session expired — progress isn't syncing. Log in again"
@@ -1569,6 +1557,15 @@ msgstr ""
 "oraz utrzymuj synchronizację postępu słuchania z serwerem. Integruje się z "
 "pulpitem przez MPRIS2 i wstrzymuje odtwarzanie podczas połączeń "
 "telefonicznych."
+
+#~ msgid "Add bookmark"
+#~ msgstr "Dodaj zakładkę"
+
+#~ msgid "Bookmark added"
+#~ msgstr "Dodano zakładkę"
+
+#~ msgid "Adding bookmark"
+#~ msgstr "Dodawanie zakładki"
 
 #~ msgctxt "library kind"
 #~ msgid "podcast"

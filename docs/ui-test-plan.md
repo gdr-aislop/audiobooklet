@@ -883,9 +883,8 @@ was and wasn't verified.
       *Expected:* popover closes; playback jumps to that chapter's start; reopening the popover
       shows the new chapter highlighted.
 
-- [ ] **FP-12 — Add bookmark.** ⋯ menu → "Add bookmark".
-      *Expected:* menu closes and a toast "Bookmark added" appears. (Spec'd bookmark list/UI is
-      future work — nothing else is expected yet.)
+- **FP-12 — Removed.** Bookmarks are no longer part of the UI; the ID is kept so earlier
+      records still line up.
 
 - [ ] **FP-13 — Mark as finished.** ⋯ menu → "Mark as finished".
       *Expected:* toast "Marked as finished"; the item leaves "Continue Listening" on the next
