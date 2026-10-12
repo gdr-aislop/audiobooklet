@@ -271,11 +271,13 @@ pub fn build(
 
     page.add(&advanced_group);
 
-    // A flat, destructive plain-text action below the groups — vertically separated rather
-    // than boxed in a card (the spec's styling note for infrequent page-level actions).
+    // A destructive action below the groups — vertically separated rather than boxed in a card
+    // (the spec's styling note for infrequent page-level actions). Not `flat`: with
+    // `destructive-action` that draws the label in the page's own background colour (white on
+    // white, found in the 2026-10-12 pass), as `settings.rs`'s Remove Server notes.
     let disconnect_button = gtk4::Button::builder()
         .label(tr("Disconnect from the Server"))
-        .css_classes(["flat", "destructive-action"])
+        .css_classes(["destructive-action"])
         .halign(gtk4::Align::Center)
         .margin_top(28)
         .sensitive(account.is_some())
@@ -726,6 +728,10 @@ pub(crate) mod tests {
         // Disconnect: cancelling the confirmation changes nothing; confirming signs the
         // server's account out (the only one — so the shell hands over to Welcome).
         app_window.set_content(Some(&screen.root));
+        assert!(
+            !screen.hooks.disconnect_button.has_css_class("flat"),
+            "flat + destructive-action draws the label invisibly"
+        );
         screen.hooks.disconnect_button.emit_clicked();
         pump_until(|| find_message_dialog().is_some(), Duration::from_secs(5));
         find_message_dialog().unwrap().response(gtk4::ResponseType::Cancel);
