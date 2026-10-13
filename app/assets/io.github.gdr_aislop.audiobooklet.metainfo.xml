@@ -9,6 +9,10 @@
   <metadata_license>CC0-1.0</metadata_license>
   <project_license>GPL-3.0-or-later</project_license>
 
+  <developer id="io.github.gdr_aislop">
+    <name translate="no">gdr-aislop</name>
+  </developer>
+
   <description>
     <p>
       GNOME-native client for an Audiobookshelf media server, designed for
@@ -31,9 +35,30 @@
   <url type="homepage">https://github.com/gdr-aislop/audiobooklet</url>
   <url type="bugtracker">https://github.com/gdr-aislop/audiobooklet/issues</url>
 
+  <screenshots>
+    <screenshot type="default">
+      <image type="source" width="360" height="720">https://raw.githubusercontent.com/gdr-aislop/audiobooklet/main/docs/images/shot3.png</image>
+      <caption>Home: continue listening and recently added books</caption>
+    </screenshot>
+    <screenshot>
+      <image type="source" width="360" height="720">https://raw.githubusercontent.com/gdr-aislop/audiobooklet/main/docs/images/shot6.png</image>
+      <caption>Now playing</caption>
+    </screenshot>
+    <screenshot>
+      <image type="source" width="360" height="720">https://raw.githubusercontent.com/gdr-aislop/audiobooklet/main/docs/images/shot7.png</image>
+      <caption>The library, grouped by author</caption>
+    </screenshot>
+    <screenshot>
+      <image type="source" width="360" height="720">https://raw.githubusercontent.com/gdr-aislop/audiobooklet/main/docs/images/shot4.png</image>
+      <caption>Book details</caption>
+    </screenshot>
+  </screenshots>
+
   <provides>
     <binary>audiobooklet</binary>
   </provides>
+
+  <content_rating type="oars-1.1"/>
 
   <releases>
     <release version="0.9.8" date="2026-10-12"/>

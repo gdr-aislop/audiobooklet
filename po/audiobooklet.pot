@@ -1567,3 +1567,19 @@ msgid ""
 "keep listening progress in sync with the server. Integrates with the desktop "
 "via MPRIS2 and pauses during phone calls."
 msgstr ""
+
+#: app/assets/io.github.gdr_aislop.audiobooklet.metainfo.xml
+msgid "Home: continue listening and recently added books"
+msgstr ""
+
+#: app/assets/io.github.gdr_aislop.audiobooklet.metainfo.xml
+msgid "Now playing"
+msgstr ""
+
+#: app/assets/io.github.gdr_aislop.audiobooklet.metainfo.xml
+msgid "The library, grouped by author"
+msgstr ""
+
+#: app/assets/io.github.gdr_aislop.audiobooklet.metainfo.xml
+msgid "Book details"
+msgstr ""
