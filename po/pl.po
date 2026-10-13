@@ -1637,6 +1637,22 @@ msgstr ""
 "pulpitem przez MPRIS2 i wstrzymuje odtwarzanie podczas połączeń "
 "telefonicznych."
 
+#: app/assets/io.github.gdr_aislop.audiobooklet.metainfo.xml
+msgid "Home: continue listening and recently added books"
+msgstr "Start: kontynuacja słuchania i ostatnio dodane książki"
+
+#: app/assets/io.github.gdr_aislop.audiobooklet.metainfo.xml
+msgid "Now playing"
+msgstr "Teraz odtwarzane"
+
+#: app/assets/io.github.gdr_aislop.audiobooklet.metainfo.xml
+msgid "The library, grouped by author"
+msgstr "Biblioteka pogrupowana według autorów"
+
+#: app/assets/io.github.gdr_aislop.audiobooklet.metainfo.xml
+msgid "Book details"
+msgstr "Szczegóły książki"
+
 #~ msgid ""
 #~ "Use a client certificate for mTLS — a .p12/.pfx bundle and its export "
 #~ "password."

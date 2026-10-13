@@ -4,7 +4,7 @@ A client for [Audiobookshelf](https://audiobookshelf.org/) servers, for Librem 5
 Offline-first, fast Rust native code, installable on PureOS Crimson as a deb.
 For other Linux phones, Appimage and Flatpak builds are available.
 
-![Home Screen](docs/images/shot6.png) ![Player](docs/images/shot3.png)
+![Player](docs/images/shot6.png) ![Home Screen](docs/images/shot3.png)
 
 ## Features
 

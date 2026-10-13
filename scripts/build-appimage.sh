@@ -191,7 +191,17 @@ rsvg-convert -w 256 -h 256 -o "$ICON_PNG" "app/assets/$APP_ID.svg"
 # appimagetool makes .DirIcon from the root-level icon named after the desktop file's Icon=,
 # preferring a PNG; linuxdeploy only puts the SVG there, so add the PNG next to it.
 ln -s "usr/share/icons/hicolor/256x256/apps/$APP_ID.png" "$APPDIR/$APP_ID.png"
-install -Dm644 "$L10N_DIR/$APP_ID.metainfo.xml" "$APPDIR/usr/share/metainfo/$APP_ID.metainfo.xml"
+# The metainfo goes in under the legacy .appdata.xml name, which AppStream still reads: AppImageHub
+# builds its catalog entry (description, screenshots) only from *appdata.xml, and its linter looks
+# for no other name. The Flatpak and the .deb keep the current .metainfo.xml name.
+METAINFO="$APPDIR/usr/share/metainfo/$APP_ID.appdata.xml"
+install -Dm644 "$L10N_DIR/$APP_ID.metainfo.xml" "$METAINFO"
+# appimagetool validates an .appdata.xml with appstreamcli, URL checks included, and fails on any
+# warning, so an unreachable homepage would fail the build (LDAI_NO_APPSTREAM, below). Check it
+# here without the network instead, where appstreamcli is installed.
+if command -v appstreamcli >/dev/null 2>&1; then
+    appstreamcli validate --no-net "$METAINFO" || die "AppStream metainfo does not validate"
+fi
 mkdir -p "$APPDIR/usr/share/locale"
 cp -a "$L10N_DIR/locale/." "$APPDIR/usr/share/locale/"
 install -Dm644 LICENSE "$APPDIR/usr/share/doc/$APP_NAME/LICENSE"
@@ -343,6 +353,8 @@ OUTPUT_PATH="$OUTPUT_DIR/$APP_NAME-$VERSION-$ARCH.AppImage"
 # The glob must match the *final* (post-rename, below) filename this script publishes, since
 # that's what actually lands on the GitHub release AppImageUpdate resolves this against.
 export LDAI_UPDATE_INFORMATION="gh-releases-zsync|$GH_OWNER|$GH_REPO|latest|$APP_NAME-*-$ARCH.AppImage.zsync"
+# The metainfo was validated offline above.
+export LDAI_NO_APPSTREAM=1
 
 (
     cd "$OUTPUT_DIR"
