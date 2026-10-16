@@ -743,14 +743,6 @@ msgid "End of chapter"
 msgstr ""
 
 #: app/src/screens/player.rs
-msgid "On this device"
-msgstr ""
-
-#: app/src/screens/player.rs
-msgid "Streaming"
-msgstr ""
-
-#: app/src/screens/player.rs
 msgid "{title} · {number} of {total}"
 msgstr ""
 
@@ -887,6 +879,19 @@ msgstr ""
 
 #: app/src/screens/player.rs
 msgid "Playback stopped"
+msgstr ""
+
+#. TRANSLATORS: the full player's subtitle while offline mode is on: the book plays from the device and listening progress isn't sent to the server until offline mode is turned off. Keep it short; it shares the header with two buttons.
+#: app/src/screens/player.rs
+msgid "Offline · progress not synced"
+msgstr ""
+
+#: app/src/screens/player.rs
+msgid "On this device"
+msgstr ""
+
+#: app/src/screens/player.rs
+msgid "Streaming"
 msgstr ""
 
 #: app/src/screens/settings.rs

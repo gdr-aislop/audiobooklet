@@ -626,13 +626,9 @@ pub fn build(
         let cover = cover.clone();
         let error_banner = error_banner.clone();
         move |snapshot: &PlayerSnapshot| {
-            // Unknown until a book has loaded. `update` runs 4 times a second, so only touch the
-            // subtitle when it changes.
-            let source = match (snapshot.is_loading, snapshot.source_is_local) {
-                (true, _) => String::new(),
-                (false, true) => tr("On this device"),
-                (false, false) => tr("Streaming"),
-            };
+            // `update` runs 4 times a second, so only touch the subtitle when it changes — which
+            // also makes it follow offline mode being switched, with no listener of its own.
+            let source = source_subtitle(snapshot);
             if window_title.subtitle() != source {
                 window_title.set_subtitle(&source);
             }
@@ -953,6 +949,19 @@ pub(crate) fn player_gesture_should_collapse(offset_x: f64, offset_y: f64) -> bo
     offset_y >= SWIPE_DOWN_MIN_DISTANCE_PX && offset_y.abs() > offset_x.abs()
 }
 
+/// The full player's subtitle: where the book plays from. Empty until a book has loaded. Offline
+/// mode keeps progress off the server, and this is the one place that says so while listening
+/// (Home's and Library's banners are out of sight then), so it's easy to forget it's on.
+fn source_subtitle(snapshot: &PlayerSnapshot) -> String {
+    match (snapshot.is_loading, snapshot.source_is_local, snapshot.offline) {
+        (true, _, _) => String::new(),
+        // TRANSLATORS: the full player's subtitle while offline mode is on: the book plays from the device and listening progress isn't sent to the server until offline mode is turned off. Keep it short; it shares the header with two buttons.
+        (false, true, true) => tr("Offline · progress not synced"),
+        (false, true, false) => tr("On this device"),
+        (false, false, _) => tr("Streaming"),
+    }
+}
+
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
@@ -978,8 +987,9 @@ pub(crate) mod tests {
         runtime.block_on(insert_synced_item(&pool, &server.id, "item-1", "Test Item"));
 
         let controller = crate::player::PlayerController::new(pool.clone(), crate::test_support::test_paths(), test_backend(), |_| {});
+        let session = abs_core::auth::Session::new(pool.clone(), &server, &account);
         controller.start(
-            abs_core::auth::Session::new(pool.clone(), &server, &account),
+            session.clone(),
             PlayRequest { item_id: "item-1".to_string(), title: "Test Book".to_string(), author: Some("Some Author".to_string()) },
             1.0,
         );
@@ -1005,6 +1015,22 @@ pub(crate) mod tests {
         hooks.play_button.emit_clicked();
         pump_until(|| !controller.snapshot().unwrap().is_playing, Duration::from_secs(5));
         assert!(!controller.snapshot().unwrap().is_playing, "the full player's play/pause button should control the real controller");
+
+        // Offline mode shows in the subtitle, which follows the session's state on the next
+        // update with no rebuild. A streamed book says it streams either way; a downloaded one
+        // says its progress isn't reaching the server.
+        session.set_offline(true);
+        pump_until(|| controller.snapshot().is_some_and(|s| s.offline), Duration::from_secs(2));
+        let offline = controller.snapshot().unwrap();
+        assert!(offline.offline, "the snapshot should report the session's offline mode");
+        assert_eq!(source_subtitle(&offline), "Streaming");
+        let on_device = PlayerSnapshot { source_is_local: true, ..offline };
+        assert_eq!(source_subtitle(&on_device), "Offline · progress not synced");
+        assert_eq!(source_subtitle(&PlayerSnapshot { offline: false, ..on_device.clone() }), "On this device");
+        assert_eq!(source_subtitle(&PlayerSnapshot { is_loading: true, ..on_device }), "", "nothing to say before the book has loaded");
+        session.set_offline(false);
+        pump_until(|| controller.snapshot().is_some_and(|s| !s.offline), Duration::from_secs(2));
+        assert!(!controller.snapshot().unwrap().offline);
 
         hooks.collapse_button.emit_clicked();
         assert!(collapsed.get(), "the down-chevron should call on_collapse");

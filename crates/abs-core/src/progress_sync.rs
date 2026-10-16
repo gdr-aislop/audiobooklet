@@ -177,6 +177,9 @@ async fn push_unconfirmed_progress(
             .await?;
         pushed.insert(local.item_id);
     }
+    if !pushed.is_empty() {
+        tracing::info!(books = pushed.len(), "pushed the progress this device had kept until it could reach the server");
+    }
     Ok(pushed)
 }
 
