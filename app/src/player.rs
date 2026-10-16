@@ -218,6 +218,10 @@ pub struct PlayerSnapshot {
     /// Whether the track playing now is read from a file on the device rather than streamed.
     /// Meaningless (`false`) while a start is still resolving.
     pub source_is_local: bool,
+    /// Whether offline mode is on for the loaded book's session, so progress stays on the device
+    /// instead of reaching the server. The full player says so: offline mode is otherwise only
+    /// shown on Home and Library, out of sight while listening.
+    pub offline: bool,
 }
 
 /// Which chapter is playing, as the full player shows it: "<title> · <number> of <count>".
@@ -519,6 +523,16 @@ struct WrittenProgress {
     is_finished: bool,
 }
 
+/// What the last push to the server did, so the log can say when that changes instead of every
+/// [`SERVER_PROGRESS_SYNC_INTERVAL`] while playing. A push that succeeds or is skipped for offline
+/// mode used to log nothing at all, which left a log with no way to tell the two apart.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum PushState {
+    Synced,
+    SkippedOffline,
+    Failed,
+}
+
 impl WrittenProgress {
     fn matches(&self, item_id: &str, position: f64, is_finished: bool) -> bool {
         self.item_id == item_id && self.is_finished == is_finished && (self.position - position).abs() < 0.5
@@ -549,6 +563,8 @@ struct ProgressWriter {
     /// The push currently running, if any — a push of the same value asked for meanwhile is a
     /// duplicate too.
     in_flight_push: Rc<RefCell<Option<WrittenProgress>>>,
+    /// What the last push did, and for which item — see [`PushState`].
+    last_push_state: Rc<RefCell<Option<(PushState, String)>>>,
 }
 
 /// Puts `write` last in `queue`, replacing a queued write for the same item and keeping what
@@ -582,6 +598,17 @@ impl ProgressWriter {
             || self.in_flight_push.borrow().as_ref().is_some_and(|w| w.matches(item_id, position, is_finished))
             || queued(&self.local_queue)
             || queued(&self.push_queue)
+    }
+
+    /// Records what a push of `item_id` did. Returns whether that differs from the last push's
+    /// outcome or item, and so is worth a log line.
+    fn note_push_state(&self, state: PushState, item_id: &str) -> bool {
+        let mut last = self.last_push_state.borrow_mut();
+        let changed = last.as_ref().is_none_or(|(last_state, last_item)| *last_state != state || last_item != item_id);
+        if changed {
+            *last = Some((state, item_id.to_string()));
+        }
+        changed
     }
 
     /// Makes the next write push even if the server already had that value — for a deliberate
@@ -719,9 +746,15 @@ impl ProgressWriter {
         let api = match session.api_client().await {
             Ok(api) => api,
             // Kept locally (the row stays marked for pushing) until offline mode is switched off,
-            // which pushes it — not a sync failure to tell anyone about.
-            Err(abs_core::CoreError::Offline) => return,
+            // which pushes it — not a sync failure to tell anyone about, but worth one log line.
+            Err(abs_core::CoreError::Offline) => {
+                if self.note_push_state(PushState::SkippedOffline, &item_id) {
+                    tracing::info!(%item_id, position, "offline mode is on; playback progress stays on the device until it's turned off");
+                }
+                return;
+            }
             Err(err) => {
+                self.note_push_state(PushState::Failed, &item_id);
                 tracing::warn!(%err, "couldn't build an API client for this server; progress stays local");
                 report(outcome_of(&err));
                 return;
@@ -729,6 +762,9 @@ impl ProgressWriter {
         };
         match abs_core::streaming::sync_progress_to_server_with_client(&api, &item_id, position, duration_seconds, is_finished).await {
             Ok(()) => {
+                if self.note_push_state(PushState::Synced, &item_id) {
+                    tracing::info!(%item_id, position, is_finished, "playback progress reached the server");
+                }
                 if let Err(err) = abs_storage::repo::progress::mark_pushed(&pool, &account_id, &server_id, &item_id, position, is_finished).await {
                     tracing::warn!(%err, "couldn't record that progress reached the server; it will be pushed again");
                 }
@@ -736,6 +772,7 @@ impl ProgressWriter {
                 report(ProgressSyncOutcome::Synced);
             }
             Err(err) => {
+                self.note_push_state(PushState::Failed, &item_id);
                 tracing::warn!(%err, "couldn't sync playback progress to the server");
                 report(outcome_of(&err));
             }
@@ -864,6 +901,7 @@ impl Inner {
                 has_chapters: false,
                 chapter: None,
                 source_is_local: false,
+                offline: false,
             });
         }
         let now_playing = self.now_playing.as_ref()?;
@@ -890,6 +928,7 @@ impl Inner {
             has_chapters: !now_playing.chapters.is_empty(),
             chapter,
             source_is_local: now_playing.current_source_is_local,
+            offline: now_playing.session.is_offline(),
         })
     }
 
@@ -2829,11 +2868,17 @@ impl PlayerController {
                 _ => false,
             };
             if server_had_something_newer {
+                tracing::info!(
+                    %item_id,
+                    position = after.as_ref().map(|row| row.current_time_seconds),
+                    "back online: the server had newer progress than this device, so this device's isn't pushed"
+                );
                 return;
             }
             // The awaits above took a while: only the book this started for gets written.
             let mut inner = inner_rc.borrow_mut();
             if inner.session_generation == generation && inner.now_playing.as_ref().is_some_and(|np| np.item_id == item_id) {
+                tracing::info!(%item_id, "back online: pushing the progress kept on this device");
                 inner.write_progress();
             }
         });
@@ -7414,6 +7459,21 @@ pub(crate) mod tests {
         let requests = runtime.block_on(mock_server.received_requests()).unwrap();
         assert!(requests.is_empty(), "offline mode: nothing may reach the server, got {:?}", requests.iter().map(|r| r.url.path().to_string()).collect::<Vec<_>>());
         controller.stop();
+    }
+
+    /// A push's outcome is logged only when it changes (or moves to another book), not on every
+    /// periodic push: one line when offline mode starts keeping progress on the device, one when
+    /// it reaches the server again.
+    #[test]
+    fn push_outcomes_are_noted_once_per_change() {
+        let writer = ProgressWriter::default();
+        assert!(writer.note_push_state(PushState::SkippedOffline, "item-1"), "the first outcome is news");
+        assert!(!writer.note_push_state(PushState::SkippedOffline, "item-1"), "the same outcome again isn't");
+        assert!(writer.note_push_state(PushState::Synced, "item-1"), "back online");
+        assert!(!writer.note_push_state(PushState::Synced, "item-1"));
+        assert!(writer.note_push_state(PushState::Synced, "item-2"), "another book's first push is news");
+        assert!(writer.note_push_state(PushState::Failed, "item-2"));
+        assert!(writer.note_push_state(PushState::Synced, "item-2"), "recovering after a failure is news");
     }
 
     fn three_chapters() -> Vec<ChapterInfo> {
