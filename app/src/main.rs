@@ -442,6 +442,7 @@ mod tests {
         (player_screen_playback_error_shows_the_banner, crate::screens::player::tests::run_playback_error_shows_the_banner),
         (player_screen_keyboard_actions, crate::screens::player::tests::run_keyboard_actions),
         (player_screen_chapters_sheet_lists_and_seeks, crate::screens::player::tests::run_chapters_sheet_lists_and_seeks),
+        (player_screen_chapters_sheet_opens_at_the_current_chapter, crate::screens::player::tests::run_chapters_sheet_opens_at_the_current_chapter),
         (player_screen_chapter_buttons_jump_between_chapters, crate::screens::player::tests::run_chapter_buttons_jump_between_chapters),
         (player_screen_chapter_buttons_hide_for_a_book_without_chapters, crate::screens::player::tests::run_chapter_buttons_hide_for_a_book_without_chapters),
         (player_screen_scrubber_tracks_the_current_chapter, crate::screens::player::tests::run_scrubber_tracks_the_current_chapter),

@@ -50,6 +50,7 @@ pub struct TestHooks {
     pub book_left_label: gtk4::Label,
     pub chapters_button: gtk4::MenuButton,
     pub chapters_popover: gtk4::Popover,
+    pub chapters_scroller: gtk4::ScrolledWindow,
     pub chapters_list: gtk4::ListBox,
     pub speed_button: gtk4::MenuButton,
     pub speed_label: gtk4::Label,
@@ -514,7 +515,9 @@ pub fn build(
     });
 
     // Populated fresh every time the popover is about to open (not once at screen-build time), so
-    // "current chapter highlighted" always reflects the position at the moment it's opened.
+    // "current chapter highlighted" always reflects the position at the moment it's opened — and
+    // scrolled to it, which in a long book is otherwise far below the popover's first screenful.
+    let chapter_scroll = ChapterScroll::new(&chapters_scroller, &chapters_box, &chapters_list);
     chapters_popover.connect_show({
         let controller = controller.clone();
         let chapters_list = chapters_list.clone();
@@ -522,7 +525,10 @@ pub fn build(
         move |_| {
             let chapters = controller.chapters();
             let position = controller.snapshot().map(|s| s.position_seconds).unwrap_or(0.0);
-            rebuild_chapters_list(&chapters_list, &chapters, position, &[]);
+            let opening = chapter_scroll.begin();
+            if let Some(current) = rebuild_chapters_list(&chapters_list, &chapters, position, &[]) {
+                chapter_scroll.scroll_to(opening, current);
+            }
 
             // Offline markers need an async DB read (`complete_inos_for_item`), unlike everything
             // else here (in-memory on `controller`) — render without them first, then refine once
@@ -532,6 +538,7 @@ pub fn build(
                 let pool = pool.clone();
                 let chapters_list = chapters_list.clone();
                 let controller = controller.clone();
+                let chapter_scroll = chapter_scroll.clone();
                 glib::spawn_future_local(async move {
                     let chapters = controller.chapters();
                     if chapters.is_empty() {
@@ -540,7 +547,14 @@ pub fn build(
                     let chapter_ranges: Vec<(f64, f64)> = chapters.iter().map(|c| (c.start_seconds, c.end_seconds)).collect();
                     let markers = abs_core::download_tracks::chapter_offline_markers_for_item(&pool, &server_id, &item_id, &chapter_ranges).await.unwrap_or_default();
                     let position = controller.snapshot().map(|s| s.position_seconds).unwrap_or(0.0);
-                    rebuild_chapters_list(&chapters_list, &chapters, position, &markers);
+                    // New rows again: put the current one back in view, unless the list has been
+                    // scrolled by hand since (the lookup can take a while on a phone).
+                    let left_alone = chapter_scroll.left_alone(opening);
+                    if let Some(current) = rebuild_chapters_list(&chapters_list, &chapters, position, &markers) {
+                        if left_alone {
+                            chapter_scroll.scroll_to(opening, current);
+                        }
+                    }
                 });
             }
         }
@@ -746,6 +760,7 @@ pub fn build(
             book_left_label,
             chapters_button,
             chapters_popover,
+            chapters_scroller,
             chapters_list,
             speed_button,
             speed_label,
@@ -783,7 +798,8 @@ fn add_action(group: &gtk4::gio::SimpleActionGroup, name: &'static str, run: imp
 /// offline glyph trailing chapter `i`'s time — an empty slice (the synchronous first pass, before
 /// the async offline lookup lands) means "not downloaded" for every chapter, never "unknown"; a
 /// glyph appearing a moment later is the expected two-stage render, not a flicker to hide.
-fn rebuild_chapters_list(chapters_list: &gtk4::ListBox, chapters: &[ChapterInfo], position: f64, markers: &[bool]) {
+/// Returns the index of the row highlighted as the current chapter, if any.
+fn rebuild_chapters_list(chapters_list: &gtk4::ListBox, chapters: &[ChapterInfo], position: f64, markers: &[bool]) -> Option<usize> {
     while let Some(child) = chapters_list.first_child() {
         chapters_list.remove(&child);
     }
@@ -791,13 +807,83 @@ fn rebuild_chapters_list(chapters_list: &gtk4::ListBox, chapters: &[ChapterInfo]
         let is_downloaded = markers.get(index).copied().unwrap_or(false);
         chapters_list.append(&build_chapter_row(chapter, position, is_downloaded));
     }
+    chapters.iter().position(|chapter| is_current_chapter(chapter, position))
+}
+
+fn is_current_chapter(chapter: &ChapterInfo, position: f64) -> bool {
+    chapter.start_seconds <= position && position < chapter.end_seconds
+}
+
+/// Scrolls the chapters popover to a row once that row has a size. The rows are rebuilt on every
+/// opening and get one only at the popover's next layout, so the scroll waits for it on the frame
+/// clock. GTK 4.8 (this crate's ceiling) has no `Viewport::scroll_to` to do that for us.
+#[derive(Clone)]
+struct ChapterScroll {
+    scroller: gtk4::ScrolledWindow,
+    /// The scrolled content, whose coordinates are the unscrolled ones a row's bounds are taken in.
+    content: gtk4::Box,
+    list: gtk4::ListBox,
+    /// Bumped at every opening, so a scroll still waiting from an earlier one gives up.
+    opening: Rc<std::cell::Cell<u64>>,
+    /// The value this last scrolled to, to tell whether the list has been scrolled by hand since.
+    scrolled_to: Rc<std::cell::Cell<Option<f64>>>,
+}
+
+impl ChapterScroll {
+    /// Frames to wait for the rows' layout before giving up (a popover closed straight away).
+    const MAX_FRAMES: u32 = 10;
+
+    fn new(scroller: &gtk4::ScrolledWindow, content: &gtk4::Box, list: &gtk4::ListBox) -> Self {
+        Self { scroller: scroller.clone(), content: content.clone(), list: list.clone(), opening: Rc::default(), scrolled_to: Rc::default() }
+    }
+
+    /// Starts a new opening; returns its number for [`Self::scroll_to`].
+    fn begin(&self) -> u64 {
+        self.scrolled_to.set(None);
+        self.opening.set(self.opening.get() + 1);
+        self.opening.get()
+    }
+
+    /// Whether, since this opening, the list is either not scrolled yet or still where this put it.
+    fn left_alone(&self, opening: u64) -> bool {
+        self.opening.get() == opening && self.scrolled_to.get().is_none_or(|value| value == self.scroller.vadjustment().value())
+    }
+
+    /// Centers row `index` in the popover, or comes as near as the list's ends allow.
+    fn scroll_to(&self, opening: u64, index: usize) {
+        let this = self.clone();
+        let frames_left = std::cell::Cell::new(Self::MAX_FRAMES);
+        self.scroller.add_tick_callback(move |_, _| {
+            if this.opening.get() != opening {
+                return glib::ControlFlow::Break;
+            }
+            let Some(row) = this.list.row_at_index(index as i32) else { return glib::ControlFlow::Break };
+            let adjustment = this.scroller.vadjustment();
+            // A row not laid out yet still reports bounds (a pixel tall, at the top), so wait for
+            // its own allocation and for the scroller's to have sized the adjustment.
+            let laid_out = row.height() > 0 && adjustment.page_size() > 0.0;
+            match row.compute_bounds(&this.content).filter(|_| laid_out) {
+                Some(bounds) => {
+                    let middle = f64::from(bounds.y() + bounds.height() / 2.0);
+                    let max = (adjustment.upper() - adjustment.page_size()).max(adjustment.lower());
+                    adjustment.set_value((middle - adjustment.page_size() / 2.0).clamp(adjustment.lower(), max));
+                    this.scrolled_to.set(Some(adjustment.value()));
+                    glib::ControlFlow::Break
+                }
+                None => {
+                    frames_left.set(frames_left.get() - 1);
+                    if frames_left.get() == 0 { glib::ControlFlow::Break } else { glib::ControlFlow::Continue }
+                }
+            }
+        });
+    }
 }
 
 /// One row in the chapters sheet: title on the left, start time (plus a small offline glyph when
 /// `is_downloaded`) on the right, highlighted (via a css class) if `position` currently falls
 /// within this chapter's range.
 fn build_chapter_row(chapter: &ChapterInfo, position: f64, is_downloaded: bool) -> gtk4::ListBoxRow {
-    let is_current = chapter.start_seconds <= position && position < chapter.end_seconds;
+    let is_current = is_current_chapter(chapter, position);
 
     let title_label = gtk4::Label::builder().label(&chapter.title).xalign(0.0).hexpand(true).ellipsize(gtk4::pango::EllipsizeMode::End).build();
     let time_label = gtk4::Label::builder().label(format_hms(chapter.start_seconds)).css_classes(["dim-label"]).build();
@@ -1140,6 +1226,64 @@ pub(crate) mod tests {
             controller.snapshot().unwrap().position_seconds >= 4.0,
             "activating the second chapter's row should seek to its start"
         );
+
+        window.destroy();
+        controller.stop();
+    }
+
+    /// Not a `#[test]` itself — see `main.rs`'s `mod tests`. In a book with more chapters than
+    /// the popover shows at once, it opens scrolled to the one playing, not at the top.
+    pub(crate) fn run_chapters_sheet_opens_at_the_current_chapter(runtime: &tokio::runtime::Runtime) {
+        let titles: Vec<String> = (1..=40).map(|n| format!("Chapter {n}")).collect();
+        let chapters: Vec<(&str, f64, f64)> = titles.iter().enumerate().map(|(i, title)| (title.as_str(), i as f64, i as f64 + 1.0)).collect();
+        let mock_server = runtime.block_on(wiremock::MockServer::start());
+        runtime.block_on(crate::player::tests::mock_playable_item_with_chapters(&mock_server, "item-1", 40, &chapters));
+
+        let pool = runtime.block_on(crate::test_support::pool());
+        let (server, account) = runtime.block_on(account_and_server(&pool, &mock_server.uri()));
+        runtime.block_on(insert_synced_item(&pool, &server.id, "item-1", "Test Item"));
+
+        let controller = crate::player::PlayerController::new(pool.clone(), crate::test_support::test_paths(), test_backend(), |_| {});
+        controller.start(
+            abs_core::auth::Session::new(pool.clone(), &server, &account),
+            PlayRequest { item_id: "item-1".to_string(), title: "Long Book".to_string(), author: None },
+            1.0,
+        );
+        pump_until(|| controller.chapters().len() == 40, Duration::from_secs(10));
+        pump_until(|| controller.snapshot().unwrap().position_seconds > 0.0, Duration::from_secs(5));
+        // Paused, so the chapter playing can't move on while the popover is checked.
+        controller.pause();
+        controller.seek_to_seconds(30.5);
+        pump_until(|| (controller.snapshot().unwrap().position_seconds - 30.5).abs() < 0.2, Duration::from_secs(5));
+
+        let screen = build(pool.clone(), controller.clone(), test_download_manager(pool.clone()), || {}, || {});
+        let hooks = screen.test_hooks();
+        let window = gtk4::Window::builder().default_width(360).default_height(720).child(&screen.root).build();
+        window.present();
+        pump_until(|| window.is_mapped(), Duration::from_secs(5));
+
+        // Whether row `index` lies wholly inside the popover's visible area.
+        let row_in_view = |index: i32| {
+            let Some(row) = hooks.chapters_list.row_at_index(index) else { return false };
+            let Some(bounds) = row.compute_bounds(&hooks.chapters_scroller) else { return false };
+            bounds.height() > 0.0 && bounds.y() >= 0.0 && bounds.y() + bounds.height() <= hooks.chapters_scroller.height() as f32
+        };
+
+        hooks.chapters_popover.popup();
+        pump_until(|| hooks.chapters_scroller.vadjustment().value() > 0.0 && row_in_view(30), Duration::from_secs(3));
+        assert_eq!(row_title(&hooks.chapters_list.row_at_index(30).unwrap()), "Chapter 31");
+        let adjustment = hooks.chapters_scroller.vadjustment();
+        assert!(adjustment.upper() > adjustment.page_size(), "the list must be longer than the popover for this test to mean anything");
+        assert!(row_in_view(30), "the popover should open with the chapter playing in view");
+        assert!(!row_in_view(0), "…scrolled away from the top");
+
+        // Reopened at the start of the book, it's back at the top.
+        hooks.chapters_popover.popdown();
+        controller.seek_to_seconds(0.5);
+        pump_until(|| controller.snapshot().unwrap().position_seconds < 1.0, Duration::from_secs(5));
+        hooks.chapters_popover.popup();
+        pump_until(|| hooks.chapters_scroller.vadjustment().value() == 0.0 && row_in_view(0), Duration::from_secs(3));
+        assert!(row_in_view(0), "chapter 1 playing: the popover should open at the top");
 
         window.destroy();
         controller.stop();
