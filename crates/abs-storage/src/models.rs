@@ -129,6 +129,29 @@ pub struct Progress {
     pub needs_push: bool,
 }
 
+/// A stretch of listening to one book recorded on this device — see migration 0012 and
+/// `repo::listening_sessions`. Timestamps are this device's clock, in milliseconds.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, FromRow)]
+pub struct ListeningSession {
+    pub id: String,
+    pub account_id: String,
+    pub server_id: String,
+    pub item_id: String,
+    /// Audiobookshelf's `PlayMethod`: 0 streamed, 3 played from a downloaded file.
+    pub play_method: i64,
+    /// Book position the session started at, seconds.
+    pub start_position: f64,
+    /// Book position now, seconds.
+    pub current_position: f64,
+    pub time_listening: f64,
+    pub duration: f64,
+    pub started_at: i64,
+    pub updated_at: i64,
+    /// The `updated_at` the server last confirmed; the row needs sending while it differs.
+    pub sent_updated_at: Option<i64>,
+    pub closed: bool,
+}
+
 /// Cached per-item track metadata — mirrors `abs_core::streaming::StreamTrack`, persisted so
 /// downloads (and, later, offline-availability checks) don't need a network call to know what a
 /// book's tracks are. `size_bytes` is the server-reported file size, when known — what size

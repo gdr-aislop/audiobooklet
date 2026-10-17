@@ -341,6 +341,7 @@ pub fn build(
                 }
                 controller.sync_pending_progress();
                 push_unconfirmed_progress(pool.clone(), session.clone());
+                controller.network_back(&session);
             }));
             Some(watcher)
         }
@@ -394,7 +395,32 @@ pub fn build(
                 tracing::info!("offline mode off: catching up with the server");
                 controller.sync_pending_progress();
                 push_unconfirmed_progress(pool.clone(), session.clone());
+                controller.network_back(&session);
             }
+        }
+    });
+
+    // Listening sessions: tidy up what a previous run left (open sessions closed, long-sent ones
+    // pruned), send what's waiting, and send again whenever a library sync has just woken the
+    // radio anyway.
+    {
+        let controller = mini_bar.controller.clone();
+        let session = session.clone();
+        let pool = pool.clone();
+        glib::spawn_future_local(async move {
+            if let Err(err) = abs_core::listening_sessions::tidy_up(&pool).await {
+                tracing::warn!(%err, "couldn't tidy up the stored listening sessions");
+            }
+            controller.send_listening_sessions(&session, crate::listening::SendReason::Due);
+        });
+    }
+    crate::sync_coordinator::on_network_used(&server.id, session.account_id(), {
+        let controller = mini_bar.controller.downgrade();
+        let session = session.clone();
+        move || {
+            let Some(controller) = controller.upgrade() else { return false };
+            controller.send_listening_sessions(&session, crate::listening::SendReason::Opportunistic);
+            true
         }
     });
 
@@ -756,7 +782,7 @@ pub fn build(
     library_screen.follow_low_memory_mode(&low_memory_mode);
     stack.add_titled_with_icon(&home_screen.root, Some("home"), &tr("Home"), "go-home-symbolic");
     stack.add_titled_with_icon(&library_screen.root, Some("library"), &tr("Library"), crate::icons::LIBRARY);
-    let downloads_screen = screens::downloads::build(pool.clone(), paths.clone(), server, account, session, download_manager.clone(), window.clone(), Rc::new(on_open.clone()));
+    let downloads_screen = screens::downloads::build(pool.clone(), paths.clone(), server, account, session.clone(), download_manager.clone(), window.clone(), Rc::new(on_open.clone()));
     stack.add_titled_with_icon(&downloads_screen.root, Some("downloads"), &tr("Downloads"), "folder-download-symbolic");
 
     // A dot on the Downloads tab while anything is downloading, so "something is running in the
@@ -781,6 +807,24 @@ pub fn build(
                 glib::idle_add_local_once(move || {
                     let showing_downloads = stack.visible_child_name().as_deref() == Some("downloads");
                     stack.page(&downloads_root).set_needs_attention(download_manager.any_in_flight() && !showing_downloads);
+                });
+            }
+        });
+        // A download just finished: the radio is awake from it, so waiting listening sessions
+        // can go along. Deferred for the same reason as above.
+        download_manager.add_listener({
+            let controller = mini_bar.controller.downgrade();
+            let session = session.clone();
+            move |event| {
+                if !matches!(event, crate::downloads::DownloadEvent::ItemStateChanged { state: crate::downloads::ItemDownloadState::Complete, .. }) {
+                    return;
+                }
+                let controller = controller.clone();
+                let session = session.clone();
+                glib::idle_add_local_once(move || {
+                    if let Some(controller) = controller.upgrade() {
+                        controller.send_listening_sessions(&session, crate::listening::SendReason::Opportunistic);
+                    }
                 });
             }
         });
@@ -1121,35 +1165,44 @@ pub(crate) mod tests {
         runtime.block_on(insert_synced_item(&pool, &server.id, "item-1", "Test Item"));
 
         let controller = crate::player::PlayerController::new(pool.clone(), crate::test_support::test_paths(), test_backend(), |_| {});
-        controller.start(abs_core::auth::Session::new(pool.clone(), &server, &account), PlayRequest { item_id: "item-1".to_string(), title: "Test Book".to_string(), author: None }, 1.0);
+        let session = abs_core::auth::Session::new(pool.clone(), &server, &account);
+        controller.start(session.clone(), PlayRequest { item_id: "item-1".to_string(), title: "Test Book".to_string(), author: None }, 1.0);
         crate::test_support::pump_until(|| controller.snapshot().is_some_and(|s| s.is_playing), std::time::Duration::from_secs(10));
-        // Offline at the moment of pausing: that push fails, so the position is still pending.
+        crate::test_support::pump_until(|| false, std::time::Duration::from_millis(300));
+        // Unreachable at the moment of pausing: that send fails, so the session is still waiting.
         runtime.block_on(
-            wiremock::Mock::given(wiremock::matchers::method("PATCH"))
-                .and(wiremock::matchers::path("/api/me/progress/item-1"))
+            wiremock::Mock::given(wiremock::matchers::method("POST"))
+                .and(wiremock::matchers::path("/api/session/local-all"))
                 .respond_with(wiremock::ResponseTemplate::new(503))
                 .with_priority(1)
                 .up_to_n_times(1)
                 .mount(&mock_server),
         );
         controller.pause();
-        crate::test_support::pump_until(|| false, std::time::Duration::from_millis(300));
+        let session_sends = || {
+            runtime.block_on(mock_server.received_requests()).unwrap().into_iter().filter(|r| r.url.path() == "/api/session/local-all").count()
+        };
+        crate::test_support::pump_until(|| session_sends() == 1, std::time::Duration::from_secs(6));
 
         let requests_before = runtime.block_on(mock_server.received_requests()).unwrap().len();
 
+        // The connectivity watcher's callback, as `build_main_window` wires it.
         let on_connectivity_restored: Box<dyn Fn()> = {
             let controller = controller.clone();
-            Box::new(move || controller.sync_pending_progress())
+            let session = session.clone();
+            Box::new(move || {
+                controller.sync_pending_progress();
+                controller.network_back(&session);
+            })
         };
         on_connectivity_restored();
-        crate::test_support::pump_until(|| false, std::time::Duration::from_millis(500));
+        crate::test_support::pump_until(|| false, std::time::Duration::from_millis(1500));
 
         let requests_after = runtime.block_on(mock_server.received_requests()).unwrap();
-        let new_patches = requests_after[requests_before..]
-            .iter()
-            .filter(|r| r.method.as_str() == "PATCH" && r.url.path() == "/api/me/progress/item-1")
-            .count();
-        assert_eq!(new_patches, 1, "connectivity being restored should push exactly one pending progress update");
+        let new_requests = &requests_after[requests_before..];
+        let new_sends = new_requests.iter().filter(|r| r.url.path() == "/api/session/local-all").count();
+        assert_eq!(new_sends, 1, "connectivity being restored should send the waiting session exactly once");
+        assert_eq!(crate::player::tests::positions_sent(new_requests, "item-1").len(), 1);
         controller.stop();
     }
 

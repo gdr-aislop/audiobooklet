@@ -51,6 +51,8 @@ minidumper.workspace = true
 # portal inside Flatpak. Pure Rust, so no new system library for the AppImage. See
 # `password_keyring.rs`.
 oo7 = { version = "0.5", default-features = false, features = ["tokio", "native_crypto"] }
+# Listening sessions are dated on the local calendar (a pause past midnight starts a new one).
+chrono.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true
@@ -58,7 +60,6 @@ reqwest.workspace = true
 serde_json.workspace = true
 wiremock = "0.6"
 hound = "3"
-chrono.workspace = true
 # Crafting expired-JWT fixtures for the token-refresh tests (see home.rs's tests).
 base64 = "0.22"
 

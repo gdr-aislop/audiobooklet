@@ -115,14 +115,6 @@ const TICK_INTERVAL: Duration = Duration::from_millis(250);
 /// (a WAL-mode SQLite upsert, no network) and worth keeping frequent so "Continue Listening"
 /// never looks far behind.
 const LOCAL_PROGRESS_WRITE_INTERVAL: Duration = Duration::from_secs(5);
-/// How often that same periodic tick additionally pushes progress to the *server* while playing.
-/// Deliberately much coarser than the local write: syncing costs a real HTTP round trip (a radio
-/// wakeup on a phone, even with `Session::api_client`'s client cache removing the handshake), and
-/// every meaningful state change (pause, end-of-book, a sleep timer firing, switching items) has
-/// its own explicit `write_progress` call that syncs immediately regardless of this interval — see
-/// `write_progress_at`'s `force_server_sync`. 15s matches the interval Audiobookshelf's official
-/// clients use for the same "still playing" push.
-const SERVER_PROGRESS_SYNC_INTERVAL: Duration = Duration::from_secs(15);
 /// How long an issued seek may report a position away from its target before
 /// `Inner::observe_position` asks again.
 const SEEK_REISSUE_AFTER: Duration = Duration::from_secs(2);
@@ -513,6 +505,14 @@ struct ProgressWrite {
     write_local: bool,
     push: bool,
     on_progress_sync: Option<ProgressSyncListener>,
+    /// The listening session this write belongs to, saved with the progress row. A push of a
+    /// write with one goes out as the session (with every other waiting one) rather than as a
+    /// progress update.
+    listening: Option<abs_storage::models::ListeningSession>,
+    /// A deliberate edit of the position (Mark as finished, Reset, restarting a finished book):
+    /// pushed as a progress update, which the server applies as given, finished flag included —
+    /// a session can't un-finish a book.
+    deliberate: bool,
 }
 
 /// A progress value this device has written (or pushed) — see `ProgressWriter`.
@@ -524,7 +524,7 @@ struct WrittenProgress {
 }
 
 /// What the last push to the server did, so the log can say when that changes instead of every
-/// [`SERVER_PROGRESS_SYNC_INTERVAL`] while playing. A push that succeeds or is skipped for offline
+/// [`crate::listening::SESSION_SYNC_INTERVAL`] while playing. A push that succeeds or is skipped for offline
 /// mode used to log nothing at all, which left a log with no way to tell the two apart.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum PushState {
@@ -565,7 +565,17 @@ struct ProgressWriter {
     in_flight_push: Rc<RefCell<Option<WrittenProgress>>>,
     /// What the last push did, and for which item — see [`PushState`].
     last_push_state: Rc<RefCell<Option<(PushState, String)>>>,
+    /// Sends listening sessions, which carry the position of everything played (see
+    /// `crate::listening`).
+    sessions: crate::listening::SessionSender,
+    /// What the last session save held (id, position, time listened, closed), so saving the
+    /// same thing again — a reconnect's catch-up write of an unchanged position — doesn't stamp
+    /// it as changed, which would send it again.
+    last_saved_listening: Rc<RefCell<Option<SavedListening>>>,
 }
+
+/// What a saved session held: id, position, time listened, closed.
+type SavedListening = (String, f64, f64, bool);
 
 /// Puts `write` last in `queue`, replacing a queued write for the same item and keeping what
 /// that one was going to do.
@@ -578,6 +588,7 @@ fn coalesce_into(queue: &RefCell<std::collections::VecDeque<ProgressWrite>>, wri
         }
         write.write_local |= queued.write_local;
         write.push |= queued.push;
+        write.deliberate |= queued.deliberate;
         false
     });
     queue.push_back(write);
@@ -686,6 +697,10 @@ impl ProgressWriter {
                 let Some(next) = next else { break };
                 writer.run_push(next).await;
             }
+            // A push above may have handed its sessions to the sender, which runs on its own.
+            while writer.sessions.is_running() {
+                glib::timeout_future(Duration::from_millis(10)).await;
+            }
         }));
         if drained.is_err() {
             tracing::warn!("gave up waiting for the last progress push at shutdown; it will be pushed on the next launch");
@@ -702,11 +717,24 @@ impl ProgressWriter {
                 }
                 Err(err) => tracing::warn!(%err, "couldn't persist playback progress"),
             }
+            if let Some(listening) = &write.listening {
+                let content = (listening.id.clone(), listening.current_position, listening.time_listening, listening.closed);
+                if self.last_saved_listening.borrow().as_ref() != Some(&content) {
+                    crate::listening::save(&write.pool, listening).await;
+                    *self.last_saved_listening.borrow_mut() = Some(content);
+                }
+            }
         }
         self.enqueue_push(write);
     }
 
     async fn run_push(&self, write: ProgressWrite) {
+        if write.listening.is_some() && !write.is_finished && !write.deliberate {
+            // The session saved with this write carries the position; sending it sends every
+            // other waiting session too, in one request.
+            self.sessions.request(write.pool, write.session, crate::listening::SendReason::Due, write.on_progress_sync);
+            return;
+        }
         let ProgressWrite { pool, session, account_id, server_id, item_id, position, is_finished, duration_seconds, on_progress_sync, .. } = write;
         *self.in_flight_push.borrow_mut() = Some(WrittenProgress { item_id: item_id.clone(), position, is_finished });
         self.push(pool, session, account_id, server_id, item_id, position, is_finished, duration_seconds, on_progress_sync).await;
@@ -811,11 +839,16 @@ struct Inner {
     /// too); added once that publish is over.
     listeners_added_meanwhile: RefCell<Vec<SnapshotListener>>,
     full_update: Option<FullUpdateListener>,
+    /// Turns what's published into listening sessions (see `crate::listening`).
+    session_recorder: RefCell<crate::listening::SessionRecorder>,
+    /// Bumped by every pause and play: a pause's delayed send goes ahead only if nothing has
+    /// happened since.
+    pause_send_generation: u64,
     /// When the local progress row was last refreshed — the periodic tick's own throttle (see
     /// `LOCAL_PROGRESS_WRITE_INTERVAL`).
     last_progress_write: Instant,
     /// When progress was last actually pushed to the server — the periodic tick's separate,
-    /// coarser throttle (see `SERVER_PROGRESS_SYNC_INTERVAL`). Every explicit `write_progress`
+    /// coarser throttle (see `crate::listening::SESSION_SYNC_INTERVAL`). Every explicit `write_progress`
     /// call (pause, end-of-book, a sleep timer firing, ...) still syncs immediately and updates
     /// this too, so the tick never re-syncs something an explicit action just pushed a moment ago.
     last_server_sync: Instant,
@@ -1140,6 +1173,7 @@ impl Inner {
             self.pending_start.as_ref().map(|p| (p.server_id.as_str(), p.account_id.as_str(), p.item_id.as_str()))
         });
         crate::sync_coordinator::set_loaded_item(held);
+        self.observe_listening();
         let Some(snapshot) = self.snapshot() else { return };
         // A listener whose screen is gone says so and is dropped here — Item Detail builds a
         // mini bar per visit, and each used to stay registered (and keep its widgets alive) for
@@ -1150,6 +1184,29 @@ impl Inner {
         drop(added);
         if let Some(full_update) = &self.full_update {
             full_update(&snapshot);
+        }
+    }
+
+    /// Feeds the session recorder what the player is doing now; a session it ends (another book,
+    /// a long pause, nothing loaded) is saved closed.
+    fn observe_listening(&self) {
+        let playing = self.now_playing.as_ref().filter(|np| !np.tracks.is_empty()).map(|np| crate::listening::Playing {
+            account_id: np.account_id.clone(),
+            server_id: np.server_id.clone(),
+            item_id: np.item_id.clone(),
+            is_playing: np.is_playing && np.loading_track.is_none(),
+            position: self.book_position(),
+            duration: np.duration_seconds,
+            play_method: if np.current_source_is_local {
+                abs_core::listening_sessions::PLAY_METHOD_LOCAL
+            } else {
+                abs_core::listening_sessions::PLAY_METHOD_DIRECT_PLAY
+            },
+        });
+        let ended = self.session_recorder.borrow_mut().observe(crate::listening::Now::current(), playing.as_ref());
+        if let Some(ended) = ended {
+            let pool = self.pool.clone();
+            glib::spawn_future_local(async move { crate::listening::save(&pool, &ended).await });
         }
     }
 
@@ -1181,13 +1238,13 @@ impl Inner {
         } else {
             (self.book_position(), false)
         };
-        self.write_progress_at(position, is_finished, true);
+        self.write_progress_at(position, is_finished, true, false);
     }
 
     /// The shared implementation behind `write_progress` (backend's current position, always
     /// forcing a server sync), `PlayerController::mark_as_finished` (`duration_seconds`),
     /// `PlayerController::reset_progress` (`0.0`), and the periodic tick's own local-only refresh
-    /// (`force_server_sync: false`, throttled separately by `SERVER_PROGRESS_SYNC_INTERVAL`) —
+    /// (`force_server_sync: false`, throttled separately by `crate::listening::SESSION_SYNC_INTERVAL`) —
     /// same local-write-then-maybe-sync shape in every case, differing in which position gets
     /// written and whether the server push happens unconditionally. The write itself runs on
     /// `ProgressWriter`'s queue, since every call site is a synchronous GTK signal handler or the
@@ -1198,7 +1255,7 @@ impl Inner {
     /// drifting its server-side progress forward at that coarser cadence, even though every
     /// explicit action (pause, a sleep timer firing, ...) already resets that clock by calling
     /// `write_progress` with `true`.
-    fn write_progress_at(&mut self, position: f64, is_finished: bool, force_server_sync: bool) {
+    fn write_progress_at(&mut self, position: f64, is_finished: bool, force_server_sync: bool, deliberate: bool) {
         let Some(now_playing) = &self.now_playing else { return };
         // A start that failed before any track resolved never played anything of this item, so
         // it has no position of its own to record — writing one would overwrite the real one.
@@ -1206,7 +1263,10 @@ impl Inner {
             return;
         }
         self.last_progress_write = Instant::now();
-        let sync_due = force_server_sync || self.last_server_sync.elapsed() >= SERVER_PROGRESS_SYNC_INTERVAL;
+        // Measured from the last send of any kind: a pause or a burst just sent everything, so
+        // the periodic one can wait a whole interval again.
+        let since_sent = self.progress_writer.sessions.last_send().map_or(Duration::MAX, |at| at.elapsed());
+        let sync_due = force_server_sync || self.last_server_sync.elapsed().min(since_sent) >= crate::listening::SESSION_SYNC_INTERVAL;
         let write_local = !self.progress_writer.is_written_locally(&now_playing.item_id, position, is_finished);
         let push = sync_due && !self.progress_writer.is_pushed(&now_playing.item_id, position, is_finished);
         if sync_due {
@@ -1215,6 +1275,13 @@ impl Inner {
         if !write_local && !push {
             return;
         }
+        // At exactly the written position: the server's confirmation of the session is matched
+        // against the progress row to clear its "needs a push".
+        let listening = self
+            .session_recorder
+            .borrow()
+            .current(crate::listening::Now::current(), &now_playing.item_id)
+            .map(|session| abs_storage::models::ListeningSession { current_position: position, ..session });
         self.progress_writer.enqueue(ProgressWrite {
             pool: self.pool.clone(),
             session: now_playing.session.clone(),
@@ -1227,6 +1294,8 @@ impl Inner {
             write_local,
             push,
             on_progress_sync: self.on_progress_sync.clone(),
+            listening,
+            deliberate,
         });
     }
 
@@ -1624,6 +1693,7 @@ impl Inner {
 }
 
 /// See `PlayerController::downgrade`.
+#[derive(Clone)]
 pub struct WeakPlayerController {
     inner: std::rc::Weak<RefCell<Inner>>,
     tick_source: std::rc::Weak<RefCell<Option<glib::SourceId>>>,
@@ -1674,6 +1744,8 @@ impl PlayerController {
                 })]),
                 listeners_added_meanwhile: RefCell::new(Vec::new()),
                 full_update: None,
+                session_recorder: RefCell::default(),
+                pause_send_generation: 0,
                 last_progress_write: Instant::now(),
                 last_server_sync: Instant::now(),
                 // Overridden right after construction via `set_headphone_behavior` and
@@ -1899,7 +1971,7 @@ impl PlayerController {
         inner.paused_by_unplug = false;
         inner.paused_by_call = false;
         inner.publish();
-        inner.write_progress_at(duration_seconds, true, true);
+        inner.write_progress_at(duration_seconds, true, true, true);
         true
     }
 
@@ -1926,7 +1998,7 @@ impl PlayerController {
         self.seek_to_seconds(0.0);
         let mut inner = self.inner.borrow_mut();
         inner.publish();
-        inner.write_progress_at(0.0, false, true);
+        inner.write_progress_at(0.0, false, true, true);
         true
     }
 
@@ -2492,6 +2564,8 @@ impl PlayerController {
             let mut inner = self.inner.borrow_mut();
             inner.paused_by_unplug = false;
             inner.paused_by_call = false;
+            // Resumed before a pause's delayed send: nothing to send for it.
+            inner.pause_send_generation += 1;
         }
         // A book still resolving plays once it's loaded.
         {
@@ -2530,7 +2604,7 @@ impl PlayerController {
                 inner.paused_by_unplug = false;
                 inner.paused_by_call = false;
                 let generation = inner.prepare_track_load(0, 0.0);
-                inner.write_progress_at(0.0, false, true);
+                inner.write_progress_at(0.0, false, true, true);
                 inner.last_played_at = Instant::now();
                 inner.publish();
                 drop(inner);
@@ -2703,6 +2777,20 @@ impl PlayerController {
         self.inner.borrow_mut().on_position_adopted = Some(Rc::new(listener));
     }
 
+    /// Sends the listening sessions waiting on this device for `session`'s account — at app
+    /// start, and right after something else woke the radio (`SendReason::Opportunistic`).
+    pub fn send_listening_sessions(&self, session: &abs_core::auth::Session, reason: crate::listening::SendReason) {
+        let inner = self.inner.borrow();
+        inner.progress_writer.sessions.request(inner.pool.clone(), session.clone(), reason, inner.on_progress_sync.clone());
+    }
+
+    /// The network came back or offline mode was turned off: whatever made sends fail may be
+    /// gone, so the next one goes out without waiting out the backoff.
+    pub fn network_back(&self, session: &abs_core::auth::Session) {
+        self.inner.borrow().progress_writer.sessions.reset_backoff();
+        self.send_listening_sessions(session, crate::listening::SendReason::Due);
+    }
+
     /// Writes the current position now and pushes it even if the server already had it — for
     /// Undo after adopting another device's position.
     pub fn save_progress_now(&self) {
@@ -2751,6 +2839,11 @@ impl PlayerController {
     /// outlives any one shell.
     pub fn downgrade(&self) -> WeakPlayerController {
         WeakPlayerController { inner: Rc::downgrade(&self.inner), tick_source: Rc::downgrade(&self.tick_source) }
+    }
+
+    #[cfg(test)]
+    pub fn reset_session_backoff(&self) {
+        self.inner.borrow().progress_writer.sessions.reset_backoff();
     }
 
     #[cfg(test)]
@@ -2822,7 +2915,27 @@ impl PlayerController {
             }
         }
         inner.publish();
-        inner.write_progress();
+        // Saved on the device now, sent a moment later: a headset blip, an unplug, a call or a
+        // quick resume shouldn't each wake the radio. The device is kept awake until the send
+        // is out, so it still lands before the phone sleeps.
+        if inner.holding_writes_for_reconcile.is_none() && inner.now_playing.as_ref().is_some_and(|np| !np.ended) {
+            let position = inner.book_position();
+            inner.write_progress_at(position, false, false, false);
+        }
+        inner.pause_send_generation += 1;
+        let generation = inner.pause_send_generation;
+        let awake = inner.now_playing.as_ref().and_then(|np| np.session.keep_awake_for("Saving the listening position"));
+        drop(inner);
+        let weak = Rc::downgrade(&self.inner);
+        glib::timeout_add_local_once(crate::listening::PAUSE_SEND_DELAY, move || {
+            let _awake = awake;
+            let Some(inner) = weak.upgrade() else { return };
+            let mut inner = inner.borrow_mut();
+            let still_paused = inner.now_playing.as_ref().is_some_and(|np| !np.is_playing);
+            if inner.pause_send_generation == generation && still_paused {
+                inner.write_progress();
+            }
+        });
     }
 
     /// For when connectivity returns while paused/idle — the only place progress otherwise syncs
@@ -3430,6 +3543,18 @@ impl PlayerController {
             Some(event) => Some(event),
             None => inner.backend.poll_event(),
         };
+        // A streamed file just finished downloading: the radio is still awake from it, so
+        // sending what's waiting now costs almost nothing.
+        if inner.backend.take_burst_finished() {
+            if let Some(np) = &inner.now_playing {
+                inner.progress_writer.sessions.request(
+                    inner.pool.clone(),
+                    np.session.clone(),
+                    crate::listening::SendReason::Opportunistic,
+                    inner.on_progress_sync.clone(),
+                );
+            }
+        }
         if let Some(event) = event {
             let verdict = match event {
                 abs_player::PlayerEvent::EndOfStream => inner.judge_end_of_stream(),
@@ -3644,9 +3769,9 @@ impl PlayerController {
             // Not `write_progress`: this is the routine "still playing" heartbeat, not a
             // meaningful state change, so it must not force a server round trip on every firing —
             // `write_progress_at`'s own `force_server_sync: false` still syncs once
-            // `SERVER_PROGRESS_SYNC_INTERVAL` has actually elapsed.
+            // `crate::listening::SESSION_SYNC_INTERVAL` has actually elapsed.
             let position = inner.book_position();
-            inner.write_progress_at(position, false, false);
+            inner.write_progress_at(position, false, false, false);
         }
 
         // Computed *after* the sleep-timer check above (which may have just turned an armed
@@ -4164,6 +4289,46 @@ pub(crate) mod tests {
             .respond_with(ResponseTemplate::new(200))
             .mount(mock_server)
             .await;
+        mock_local_sessions(mock_server).await;
+    }
+
+    /// Answers `POST /api/session/local-all` the way the server does when it stores every
+    /// session and applies its position.
+    struct AcceptSessions;
+
+    impl wiremock::Respond for AcceptSessions {
+        fn respond(&self, request: &wiremock::Request) -> ResponseTemplate {
+            let body: serde_json::Value = request.body_json().unwrap_or_default();
+            let results: Vec<_> = body["sessions"]
+                .as_array()
+                .map(|sessions| sessions.iter().map(|s| serde_json::json!({ "id": s["id"], "success": true, "progressSynced": true })).collect())
+                .unwrap_or_default();
+            ResponseTemplate::new(200).set_body_json(serde_json::json!({ "results": results }))
+        }
+    }
+
+    /// Mounts [`AcceptSessions`] — once per server is enough (wiremock serves the first match).
+    pub(crate) async fn mock_local_sessions(mock_server: &MockServer) {
+        Mock::given(method("POST")).and(path("/api/session/local-all")).respond_with(AcceptSessions).mount(mock_server).await;
+    }
+
+    /// Every position the server was sent for `item_id`, oldest first: progress updates (`PATCH
+    /// /api/me/progress`) and listening sessions (`POST /api/session/local-all`) alike.
+    pub(crate) fn positions_sent(requests: &[wiremock::Request], item_id: &str) -> Vec<f64> {
+        let mut positions = Vec::new();
+        for request in requests {
+            let Ok(body) = request.body_json::<serde_json::Value>() else { continue };
+            if request.method.as_str() == "PATCH" && request.url.path() == format!("/api/me/progress/{item_id}") {
+                positions.extend(body["currentTime"].as_f64());
+            } else if request.method.as_str() == "POST" && request.url.path() == "/api/session/local-all" {
+                for session in body["sessions"].as_array().into_iter().flatten() {
+                    if session["libraryItemId"] == item_id {
+                        positions.extend(session["currentTime"].as_f64());
+                    }
+                }
+            }
+        }
+        positions
     }
 
     /// Like `mock_playable_item`, but the item detail response also carries a chapter list — for
@@ -4197,6 +4362,7 @@ pub(crate) mod tests {
             .respond_with(ResponseTemplate::new(200))
             .mount(mock_server)
             .await;
+        mock_local_sessions(mock_server).await;
     }
 
     pub(crate) async fn account_and_server(pool: &SqlitePool, server_url: &str) -> (abs_storage::models::Server, abs_storage::models::Account) {
@@ -4287,15 +4453,31 @@ pub(crate) mod tests {
         assert!(progress.is_some(), "pausing should persist playback progress");
         assert!(!progress.unwrap().is_finished, "pausing mid-book must not mark it finished");
 
-        // Progress isn't only local — it should also be pushed to the server, so it shows up in
-        // the official apps and survives a fresh install.
-        let synced_requests = runtime.block_on(mock_server.received_requests()).unwrap();
-        let progress_sync = synced_requests
-            .iter()
-            .find(|r| r.method.as_str() == "PATCH" && r.url.path() == "/api/me/progress/item-1")
-            .expect("pausing should also sync progress to the server");
-        let body: serde_json::Value = progress_sync.body_json().unwrap();
-        assert_eq!(body["isFinished"], false);
+        // Progress isn't only local — it should also reach the server, so it shows up in the
+        // official apps and survives a fresh install. It goes as a listening session, a moment
+        // after the pause (a quick resume would have cancelled it).
+        let sessions_sent = || {
+            runtime
+                .block_on(mock_server.received_requests())
+                .unwrap()
+                .into_iter()
+                .filter(|r| r.url.path() == "/api/session/local-all")
+                .collect::<Vec<_>>()
+        };
+        assert!(sessions_sent().is_empty(), "the pause is sent after a short delay, not at once");
+        pump_until(|| !sessions_sent().is_empty(), Duration::from_secs(6));
+        let sent = sessions_sent();
+        assert_eq!(sent.len(), 1, "one request for the pause");
+        let body: serde_json::Value = sent[0].body_json().unwrap();
+        let session = &body["sessions"][0];
+        assert_eq!(session["libraryItemId"], "item-1");
+        assert_eq!(session["playMethod"], abs_core::listening_sessions::PLAY_METHOD_DIRECT_PLAY, "streamed");
+        assert!(session["timeListening"].as_f64().unwrap() > 0.0, "the listening is recorded: {session}");
+        assert_eq!(body["deviceInfo"]["clientName"], "Audiobooklet");
+        assert!(
+            !runtime.block_on(mock_server.received_requests()).unwrap().iter().any(|r| r.method.as_str() == "PATCH"),
+            "the session carries the position: no separate progress update"
+        );
         // Once the server has it, the row no longer needs a push — otherwise every sync would
         // push it again.
         pump_until(
@@ -4335,13 +4517,13 @@ pub(crate) mod tests {
         pump_until(|| controller.snapshot().is_some_and(|s| s.is_playing), Duration::from_secs(10));
         outcomes.borrow_mut().clear();
 
-        // Each one-shot, higher-priority response overrides the item's default 200 for exactly
-        // one PATCH; `pause()` always forces a server push.
+        // Each one-shot, higher-priority response overrides the default answer for exactly one
+        // send; a pause sends what's waiting a moment later.
         let pause_with = |status: Option<u16>| {
             if let Some(status) = status {
                 runtime.block_on(
-                    Mock::given(method("PATCH"))
-                        .and(path("/api/me/progress/item-1"))
+                    Mock::given(method("POST"))
+                        .and(path("/api/session/local-all"))
                         .respond_with(ResponseTemplate::new(status))
                         .up_to_n_times(1)
                         .with_priority(1)
@@ -4350,13 +4532,17 @@ pub(crate) mod tests {
             }
             let seen = outcomes.borrow().len();
             controller.play();
+            pump_until(|| false, Duration::from_millis(300));
             controller.pause();
-            pump_until(|| outcomes.borrow().len() > seen, Duration::from_secs(5));
-            outcomes.borrow().last().copied()
+            pump_until(|| outcomes.borrow().len() > seen, Duration::from_secs(6));
+            (outcomes.borrow().len() > seen).then(|| *outcomes.borrow().last().unwrap())
         };
 
         assert_eq!(pause_with(Some(500)), Some(ProgressSyncOutcome::Failed), "a server error is a retryable failure");
+        assert_eq!(pause_with(None), None, "after a failure, sends back off instead of trying at every pause");
+        controller.reset_session_backoff();
         assert_eq!(pause_with(Some(401)), Some(ProgressSyncOutcome::SessionExpired), "a 401 means the session is gone");
+        controller.reset_session_backoff();
         assert_eq!(pause_with(None), Some(ProgressSyncOutcome::Synced), "a working server reports success");
         controller.stop();
     }
@@ -4441,7 +4627,7 @@ pub(crate) mod tests {
     /// is still actively playing used to lose whatever progress had accrued since the last
     /// periodic local write (the only other write paths are the tick and an explicit `pause()`,
     /// neither of which fires on a session switch). `start()` now flushes the outgoing item first,
-    /// and always forces a server sync regardless of `SERVER_PROGRESS_SYNC_INTERVAL`.
+    /// and always forces a server sync regardless of `crate::listening::SESSION_SYNC_INTERVAL`.
     pub(crate) fn run_starting_a_new_item_flushes_the_previous_items_progress(runtime: &tokio::runtime::Runtime) {
         let mock_server = runtime.block_on(MockServer::start());
         runtime.block_on(mock_playable_item(&mock_server, "item-1", 5));
@@ -4471,24 +4657,14 @@ pub(crate) mod tests {
         // The flush is a synchronous call inside `start()`, but the DB write/server sync it
         // spawns still needs a pump to land — waited for, not timed: a fixed 300 ms was sometimes
         // too short for the push.
-        let pushed = || {
-            runtime
-                .block_on(mock_server.received_requests())
-                .unwrap()
-                .iter()
-                .any(|r| r.method.as_str() == "PATCH" && r.url.path() == "/api/me/progress/item-1")
-        };
+        let pushed = || !positions_sent(&runtime.block_on(mock_server.received_requests()).unwrap(), "item-1").is_empty();
         pump_until(pushed, Duration::from_secs(5));
 
         let progress = runtime.block_on(abs_storage::repo::progress::get(&pool, &account.id, &server.id, "item-1")).unwrap();
         let progress = progress.expect("switching items should flush the outgoing item's progress locally");
         assert!(progress.current_time_seconds > 0.0, "the flushed position should reflect real elapsed playback, got {}", progress.current_time_seconds);
 
-        let requests = runtime.block_on(mock_server.received_requests()).unwrap();
-        assert!(
-            requests.iter().any(|r| r.method.as_str() == "PATCH" && r.url.path() == "/api/me/progress/item-1"),
-            "switching items should also sync the outgoing item's progress to the server"
-        );
+        assert!(pushed(), "switching items should also sync the outgoing item's progress to the server");
         controller.stop();
     }
 
@@ -4514,35 +4690,42 @@ pub(crate) mod tests {
         runtime.block_on(insert_synced_item(&pool, &server.id, "item-1", "Test Item"));
 
         let controller = PlayerController::new(pool.clone(), crate::test_support::test_paths(), test_backend(), |_| {});
+        let session = abs_core::auth::Session::new(pool.clone(), &server, &account);
         controller.start(
-            abs_core::auth::Session::new(pool.clone(), &server, &account),
+            session.clone(),
             PlayRequest { item_id: "item-1".to_string(), title: "Test Book".to_string(), author: None },
             1.0,
         );
         pump_until(|| controller.snapshot().is_some_and(|s| s.is_playing), Duration::from_secs(10));
-        // Offline at the moment of pausing: that push fails, so the position is still pending.
+        pump_until(|| false, Duration::from_millis(300));
+        // Unreachable at the moment of pausing: that send fails, so the session is still waiting.
         runtime.block_on(
-            Mock::given(method("PATCH"))
-                .and(path("/api/me/progress/item-1"))
+            Mock::given(method("POST"))
+                .and(path("/api/session/local-all"))
                 .respond_with(ResponseTemplate::new(503))
                 .with_priority(1)
                 .up_to_n_times(1)
                 .mount(&mock_server),
         );
         controller.pause();
-        pump_until(|| false, Duration::from_millis(300));
-
+        let session_sends = || {
+            runtime.block_on(mock_server.received_requests()).unwrap().into_iter().filter(|r| r.url.path() == "/api/session/local-all").count()
+        };
+        pump_until(|| session_sends() == 1, Duration::from_secs(6));
+        assert_eq!(session_sends(), 1, "the pause tried to send, and failed");
         let requests_before_reconnect = runtime.block_on(mock_server.received_requests()).unwrap().len();
 
+        // What the shell does when the network comes back.
         controller.sync_pending_progress();
-        pump_until(|| false, Duration::from_millis(500));
+        controller.network_back(&session);
+        pump_until(|| false, Duration::from_millis(1500));
 
         let requests_after = runtime.block_on(mock_server.received_requests()).unwrap();
-        let new_patches = requests_after[requests_before_reconnect..]
-            .iter()
-            .filter(|r| r.method.as_str() == "PATCH" && r.url.path() == "/api/me/progress/item-1")
-            .count();
-        assert_eq!(new_patches, 1, "reconnecting while paused should push exactly one pending progress update");
+        let new_requests = &requests_after[requests_before_reconnect..];
+        let new_sends = new_requests.iter().filter(|r| r.url.path() == "/api/session/local-all").count();
+        assert_eq!(new_sends, 1, "reconnecting while paused should send the waiting session exactly once");
+        assert_eq!(positions_sent(new_requests, "item-1").len(), 1);
+        assert!(!new_requests.iter().any(|r| r.method.as_str() == "PATCH"), "the session carries the position");
         controller.stop();
     }
 
@@ -5166,11 +5349,17 @@ pub(crate) mod tests {
         refuse_speed_until_prerolled: bool,
         /// When set, every `set_speed` is refused, prerolled or not.
         refuse_every_speed: bool,
+        /// Reported (once) by `take_burst_finished`, as if a streamed file just finished
+        /// downloading in burst mode.
+        burst_finished: bool,
     }
 
     struct ScriptedBackend(Rc<RefCell<ScriptedBackendState>>);
 
     impl abs_player::AudioBackend for ScriptedBackend {
+        fn take_burst_finished(&mut self) -> bool {
+            std::mem::take(&mut self.0.borrow_mut().burst_finished)
+        }
         fn load(&mut self, uri: &str) -> abs_player::Result<()> {
             let mut state = self.0.borrow_mut();
             state.load_calls.push(uri.to_string());
@@ -5518,14 +5707,11 @@ pub(crate) mod tests {
         controller.stop();
     }
 
+    /// Every position update the server received for `item_id`, oldest first, as `{currentTime}`
+    /// objects: progress updates and listening sessions alike (see [`positions_sent`]).
     fn progress_patches(runtime: &tokio::runtime::Runtime, mock_server: &MockServer, item_id: &str) -> Vec<serde_json::Value> {
-        runtime
-            .block_on(mock_server.received_requests())
-            .unwrap()
-            .iter()
-            .filter(|r| r.method.as_str() == "PATCH" && r.url.path() == format!("/api/me/progress/{item_id}"))
-            .map(|r| r.body_json().unwrap())
-            .collect()
+        let requests = runtime.block_on(mock_server.received_requests()).unwrap();
+        positions_sent(&requests, item_id).into_iter().map(|position| serde_json::json!({ "currentTime": position })).collect()
     }
 
     /// Not a `#[test]` itself — see `main.rs`'s `mod tests`. Pausing again without the position
@@ -5556,7 +5742,8 @@ pub(crate) mod tests {
 
         controller.pause();
         controller.pause();
-        pump_until(|| false, Duration::from_millis(500));
+        // Past the pause's send delay, so a send would have happened by now.
+        pump_until(|| false, crate::listening::PAUSE_SEND_DELAY + Duration::from_secs(1));
         assert_eq!(progress_patches(runtime, &mock_server, "item-1").len(), 1, "pausing again at the same position must not push again");
         controller.stop();
     }
@@ -6099,6 +6286,128 @@ pub(crate) mod tests {
                 .await;
         }
         Mock::given(method("PATCH")).and(path(format!("/api/me/progress/{item_id}"))).respond_with(ResponseTemplate::new(200)).mount(mock_server).await;
+        mock_local_sessions(mock_server).await;
+    }
+
+    /// Session sends a mock server received, in order.
+    fn session_sends(runtime: &tokio::runtime::Runtime, mock_server: &MockServer) -> Vec<wiremock::Request> {
+        runtime.block_on(mock_server.received_requests()).unwrap().into_iter().filter(|r| r.url.path() == "/api/session/local-all").collect()
+    }
+
+    /// Plays from `from` to `to` seconds (the scripted backend's position, moved in steps the
+    /// tick observes), leaving it playing.
+    fn listen(controller: &PlayerController, state: &Rc<RefCell<ScriptedBackendState>>, from: f64, to: f64) {
+        controller.play();
+        pump_until(|| controller.snapshot().is_some_and(|s| s.is_playing), Duration::from_secs(5));
+        let mut position = from;
+        while position < to {
+            position = (position + 0.25).min(to);
+            state.borrow_mut().position = Some(Duration::from_secs_f64(position));
+            pump_until(|| false, Duration::from_millis(250));
+        }
+    }
+
+    async fn stored_sessions(pool: &SqlitePool, account_id: &str) -> Vec<abs_storage::models::ListeningSession> {
+        sqlx::query_as("SELECT id, account_id, server_id, item_id, play_method, start_position, current_position, time_listening, duration, started_at, updated_at, sent_updated_at, closed FROM listening_sessions WHERE account_id = ?")
+            .bind(account_id)
+            .fetch_all(pool)
+            .await
+            .unwrap()
+    }
+
+    /// Not a `#[test]` itself — see `main.rs`'s `mod tests`. A pause, then play again within the
+    /// session window, continues the same listening session; a resume within the pause's send
+    /// delay sends nothing; each pause that stays sends once.
+    pub(crate) fn run_listening_sessions_continue_across_pauses_and_send_once_per_pause(runtime: &tokio::runtime::Runtime) {
+        let mock_server = runtime.block_on(MockServer::start());
+        runtime.block_on(mock_playable_item(&mock_server, "item-1", 60));
+        let pool = runtime.block_on(pool());
+        let (server, account) = runtime.block_on(account_and_server(&pool, &mock_server.uri()));
+        runtime.block_on(insert_synced_item(&pool, &server.id, "item-1", "Test Item"));
+        let (controller, state) = scripted_controller(&pool);
+        controller.start(abs_core::auth::Session::new(pool.clone(), &server, &account), request("item-1", "Book"), 1.0);
+        pump_until(|| controller.snapshot().is_some_and(|s| s.is_playing), Duration::from_secs(10));
+
+        listen(&controller, &state, 0.0, 2.0);
+        controller.pause();
+        pump_until(|| false, Duration::from_secs(1));
+        // Resumed within the delay: the pause is never sent.
+        listen(&controller, &state, 2.0, 4.0);
+        pump_until(|| false, Duration::from_secs(3));
+        assert!(session_sends(runtime, &mock_server).is_empty(), "a quick resume costs no request");
+
+        controller.pause();
+        pump_until(|| session_sends(runtime, &mock_server).len() == 1, Duration::from_secs(6));
+        pump_until(|| false, Duration::from_secs(1));
+        let sends = session_sends(runtime, &mock_server);
+        assert_eq!(sends.len(), 1, "one request for the pause that stayed");
+        let body: serde_json::Value = sends[0].body_json().unwrap();
+        assert_eq!(body["sessions"].as_array().unwrap().len(), 1, "both stretches are one session");
+        assert!((body["sessions"][0]["currentTime"].as_f64().unwrap() - 4.0).abs() < 0.5);
+
+        let stored = runtime.block_on(stored_sessions(&pool, &account.id));
+        assert_eq!(stored.len(), 1);
+        assert!(stored[0].time_listening >= 3.0 && stored[0].time_listening <= 5.0, "about 4 s listened: {}", stored[0].time_listening);
+        assert_eq!(stored[0].sent_updated_at, Some(stored[0].updated_at), "and the server has it");
+        controller.stop();
+    }
+
+    /// Not a `#[test]` itself — see `main.rs`'s `mod tests`. Listening with offline mode on sends
+    /// nothing; turning it off sends everything that piled up, in one request.
+    pub(crate) fn run_listening_sessions_kept_offline_go_in_one_request(runtime: &tokio::runtime::Runtime) {
+        let mock_server = runtime.block_on(MockServer::start());
+        runtime.block_on(mock_playable_item(&mock_server, "item-1", 60));
+        let pool = runtime.block_on(pool());
+        let (server, account) = runtime.block_on(account_and_server(&pool, &mock_server.uri()));
+        runtime.block_on(insert_synced_item(&pool, &server.id, "item-1", "Test Item"));
+        let (controller, state) = scripted_controller(&pool);
+        let session = abs_core::auth::Session::new(pool.clone(), &server, &account);
+        controller.start(session.clone(), request("item-1", "Book"), 1.0);
+        pump_until(|| controller.snapshot().is_some_and(|s| s.is_playing), Duration::from_secs(10));
+        session.set_offline(true);
+
+        for (from, to) in [(0.0, 1.5), (1.5, 3.0), (3.0, 4.5)] {
+            listen(&controller, &state, from, to);
+            controller.pause();
+            pump_until(|| false, Duration::from_millis(3500));
+        }
+        assert!(session_sends(runtime, &mock_server).is_empty(), "offline: nothing sent");
+
+        session.set_offline(false);
+        controller.network_back(&session);
+        pump_until(|| !session_sends(runtime, &mock_server).is_empty(), Duration::from_secs(5));
+        pump_until(|| false, Duration::from_secs(1));
+        let sends = session_sends(runtime, &mock_server);
+        assert_eq!(sends.len(), 1, "what piled up goes in one request");
+        assert_eq!(positions_sent(&sends, "item-1").len(), 1);
+        assert!((positions_sent(&sends, "item-1")[0] - 4.5).abs() < 0.5);
+        controller.stop();
+    }
+
+    /// Not a `#[test]` itself — see `main.rs`'s `mod tests`. A finished burst sends what's waiting
+    /// (the radio is awake anyway), but not twice within the opportunistic gap.
+    pub(crate) fn run_listening_sessions_go_along_with_a_finished_burst(runtime: &tokio::runtime::Runtime) {
+        let mock_server = runtime.block_on(MockServer::start());
+        runtime.block_on(mock_playable_item(&mock_server, "item-1", 60));
+        let pool = runtime.block_on(pool());
+        let (server, account) = runtime.block_on(account_and_server(&pool, &mock_server.uri()));
+        runtime.block_on(insert_synced_item(&pool, &server.id, "item-1", "Test Item"));
+        let (controller, state) = scripted_controller(&pool);
+        controller.start(abs_core::auth::Session::new(pool.clone(), &server, &account), request("item-1", "Book"), 1.0);
+        pump_until(|| controller.snapshot().is_some_and(|s| s.is_playing), Duration::from_secs(10));
+        // Long enough for the periodic local save to store the session.
+        listen(&controller, &state, 0.0, 6.0);
+        assert!(session_sends(runtime, &mock_server).is_empty(), "nothing sent while just playing");
+
+        state.borrow_mut().burst_finished = true;
+        pump_until(|| !session_sends(runtime, &mock_server).is_empty(), Duration::from_secs(3));
+        assert_eq!(session_sends(runtime, &mock_server).len(), 1, "a finished burst takes the waiting session along");
+
+        listen(&controller, &state, 6.0, 12.0);
+        state.borrow_mut().burst_finished = true;
+        pump_until(|| false, Duration::from_secs(1));
+        assert_eq!(session_sends(runtime, &mock_server).len(), 1, "another burst right after costs no request");
+        controller.stop();
     }
 
     fn scripted_controller(pool: &SqlitePool) -> (PlayerController, Rc<RefCell<ScriptedBackendState>>) {
@@ -6994,6 +7303,8 @@ pub(crate) mod tests {
             write_local: true,
             push: true,
             on_progress_sync: None,
+            listening: None,
+            deliberate: false,
         };
 
         let writer = ProgressWriter::default();

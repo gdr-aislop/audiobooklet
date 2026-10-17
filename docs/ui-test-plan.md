@@ -1356,6 +1356,18 @@ built (documented in `app/src/screens/downloads.rs`'s module doc).
       then restore the network and give the app a moment (or trigger Sync now).
       *Expected:* the position you reached offline appears on the server.
 
+- [ ] **DS-9 — Listening shows up in the server's history and stats.** Listen to a book for a few
+      minutes, pause, wait a few seconds, then check the server: Settings → Sessions, or `GET
+      /api/me/listening-sessions`.
+      *Expected:* a session from "Audiobooklet" with roughly the time listened, the device named
+      after the phone; Your Stats counts the minutes. Pausing and resuming within a few minutes
+      keeps it one session.
+
+- [ ] **DS-10 — Offline listening reaches the history in one go.** With offline mode on, listen to
+      a downloaded book in a few stretches; turn offline mode off.
+      *Expected:* the listening appears on the server shortly after, with one request in the log
+      ("sent listening sessions to the server … sent=N").
+
 ---
 
 ## 15. Settings (SE) — 🚧 partially implemented (Account, Servers, Playback, Appearance, Diagnostics, About)

@@ -160,6 +160,33 @@ progress endpoints (`GET /api/items/:id`, `POST /api/items/:id/play`, `PATCH /ap
 implemented. If upstream ever documents one of these in the OpenAPI spec, the generated method
 takes over and the hand-written one in `ext.rs` is deleted.
 
+## Listening sessions
+
+Playback progress goes to the server as **local listening sessions** — `POST
+/api/session/local-all` with `{deviceInfo, sessions:[…]}` (hand-written in `ext.rs`; the spec has
+no `/session` paths), the same way Audiobookshelf's own apps send downloaded-book listening. A
+session is what the server's listening history and stats are built from; `PATCH
+/api/me/progress/:id` moves the position and leaves no trace there. The server applies a
+session's position only when its stored progress isn't newer (`progressSynced: false` otherwise),
+so a stale device can't drag progress back. Checked against `PlaybackSessionManager.js`
+(`syncLocalSessionsRequest`, `syncLocalSession`) and `objects/DeviceInfo.js`.
+
+What the client does (`abs-core/src/listening_sessions.rs`, `app/src/listening.rs`):
+
+- sessions are recorded on the device (`listening_sessions` table, migration 0012) and sent in one
+  request, at most 50 per request;
+- a stable per-install `deviceId` goes with every request — without one the server adds a device
+  row for every request;
+- timestamps are moved onto the server's clock (estimated from the `Date` header), because the
+  server compares a session's `updatedAt` with its own time;
+- a server that answers 404/405 gets the newest position per book by `PATCH /api/me/progress`
+  instead; Mark as finished, Reset progress and restarting a finished book always use the PATCH,
+  since a session can't set `isFinished`;
+- sends happen every 180 s while playing, a few seconds after a pause, on stop, end of book,
+  switching books or accounts, quitting, app start, the network coming back, and right after
+  something else woke the radio (a burst-buffered download finishing, a library sync, a finished
+  download). Failures back off from 30 s to 15 min.
+
 ## Updating the client
 
 Bump `third_party/audiobookshelf-openapi/openapi.json` (see its own README for the update steps) and

@@ -648,6 +648,98 @@ fn cover_content_type(response: &reqwest::Response) -> String {
         .to_string()
 }
 
+/// Who is sending local sessions, as `POST /api/session/local-all` reads it from the body
+/// (`DeviceInfo.setData` in the server). The server keys its device records on `device_id`:
+/// without one it inserts a new device row for every request.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DeviceInfo {
+    pub device_id: String,
+    pub client_name: String,
+    pub client_version: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub manufacturer: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+}
+
+/// One listening session recorded on this device, in the shape the server's
+/// `PlaybackSessionManager.syncLocalSession` takes. Chapters and media metadata are left out on
+/// purpose: the server fills them in from the item for a new session, and they'd be most of the
+/// bytes. Times are milliseconds on the server's clock; positions and durations are seconds.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LocalSession {
+    pub id: String,
+    pub library_item_id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub library_id: Option<String>,
+    pub media_type: &'static str,
+    /// Audiobookshelf's `PlayMethod`: 0 direct play (streamed), 3 local (a downloaded file).
+    pub play_method: i64,
+    pub media_player: &'static str,
+    pub display_title: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub display_author: Option<String>,
+    pub duration: f64,
+    pub start_time: f64,
+    pub current_time: f64,
+    pub time_listening: f64,
+    pub started_at: i64,
+    pub updated_at: i64,
+}
+
+/// What the server did with one session of a `local-all` batch.
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LocalSessionResult {
+    pub id: String,
+    pub success: bool,
+    /// Whether the session's position became the book's progress. `false` when the server
+    /// already had progress updated after the session's `updatedAt` — from another device, or a
+    /// deliberate edit — and kept that instead.
+    #[serde(default)]
+    pub progress_synced: bool,
+    #[serde(default)]
+    pub error: Option<String>,
+}
+
+impl LocalSessionResult {
+    /// The server doesn't have the book (any more): the session can never be stored there. Only
+    /// the server's own "Media item not found" — its "Library not found" is a server-side
+    /// inconsistency that may clear up, not a missing book.
+    pub fn is_item_missing(&self) -> bool {
+        !self.success && self.error.as_deref().is_some_and(|error| error.eq_ignore_ascii_case("Media item not found"))
+    }
+}
+
+/// The answer to a `local-all` batch: one result per session sent, and the server's clock as of
+/// the reply (its `Date` header), for estimating how far this device's clock is off.
+#[derive(Debug, Clone, PartialEq)]
+pub struct LocalSessionsSync {
+    pub results: Vec<LocalSessionResult>,
+    pub server_date: Option<chrono::DateTime<chrono::Utc>>,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct LocalSessionsRequest<'a> {
+    device_info: &'a DeviceInfo,
+    sessions: &'a [LocalSession],
+}
+
+#[derive(Deserialize)]
+struct LocalSessionsResponseBody {
+    #[serde(default)]
+    results: Vec<LocalSessionResult>,
+}
+
+/// A response's `Date` header, the server's clock when it answered (one-second resolution).
+pub fn server_date(headers: &reqwest::header::HeaderMap) -> Option<chrono::DateTime<chrono::Utc>> {
+    let value = headers.get(reqwest::header::DATE)?.to_str().ok()?;
+    chrono::DateTime::parse_from_rfc2822(value).ok().map(|date| date.with_timezone(&chrono::Utc))
+}
+
 #[derive(Debug, Serialize)]
 struct UpdateProgressRequest {
     #[serde(rename = "currentTime")]
@@ -1070,6 +1162,37 @@ impl Client {
             )));
         }
         Ok(())
+    }
+
+    /// Sends listening sessions recorded on this device, in one request: `POST
+    /// /api/session/local-all` with `{deviceInfo, sessions}`, answered with one result per
+    /// session (`PlaybackSessionManager.syncLocalSessionsRequest`). Hand-written: the vendored
+    /// spec has no `/session` paths. A server too old for it (or a proxy that blocks it) answers
+    /// 404 or 405, reported as [`LibraryItemsError::NotFound`] so the caller can fall back to
+    /// [`Client::update_media_progress`].
+    pub async fn sync_local_sessions(&self, device_info: &DeviceInfo, sessions: &[LocalSession]) -> Result<LocalSessionsSync, LibraryItemsError> {
+        let response = self
+            .client()
+            .post(format!("{}/api/session/local-all", self.baseurl()))
+            .json(&LocalSessionsRequest { device_info, sessions })
+            .send()
+            .await?;
+
+        if is_auth_status(response.status()) {
+            return Err(LibraryItemsError::Unauthorized(response.status().as_u16()));
+        }
+        if response.status() == reqwest::StatusCode::NOT_FOUND || response.status() == reqwest::StatusCode::METHOD_NOT_ALLOWED {
+            return Err(LibraryItemsError::NotFound("POST /api/session/local-all".to_string()));
+        }
+        if !response.status().is_success() {
+            return Err(LibraryItemsError::UnexpectedResponse(format!(
+                "POST /api/session/local-all returned HTTP {}",
+                response.status()
+            )));
+        }
+        let server_date = server_date(response.headers());
+        let body: LocalSessionsResponseBody = response.json().await?;
+        Ok(LocalSessionsSync { results: body.results, server_date })
     }
 
     /// Fetch this item's progress as the server currently has it, for reconciling against what's
@@ -2249,6 +2372,112 @@ mod tests {
         let client = Client::new(&server.uri());
         let err = client.get_media_progress("item-1").await.unwrap_err();
         assert!(matches!(err, LibraryItemsError::UnexpectedResponse(_)));
+    }
+
+    fn device_info() -> DeviceInfo {
+        DeviceInfo {
+            device_id: "dev-1".to_string(),
+            client_name: "Audiobooklet".to_string(),
+            client_version: "1.0".to_string(),
+            manufacturer: Some("Purism".to_string()),
+            model: None,
+        }
+    }
+
+    fn local_session(id: &str) -> LocalSession {
+        LocalSession {
+            id: id.to_string(),
+            library_item_id: "item-1".to_string(),
+            library_id: Some("lib-1".to_string()),
+            media_type: "book",
+            play_method: 3,
+            media_player: "gstreamer",
+            display_title: "Book".to_string(),
+            display_author: None,
+            duration: 3600.0,
+            start_time: 100.0,
+            current_time: 160.0,
+            time_listening: 60.0,
+            started_at: 1_000,
+            updated_at: 61_000,
+        }
+    }
+
+    #[tokio::test]
+    async fn sync_local_sessions_sends_one_batch_and_reads_each_result_and_the_server_clock() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/api/session/local-all"))
+            .and(body_partial_json(serde_json::json!({
+                "deviceInfo": { "deviceId": "dev-1", "clientName": "Audiobooklet", "clientVersion": "1.0", "manufacturer": "Purism" },
+                "sessions": [
+                    { "id": "s-1", "libraryItemId": "item-1", "libraryId": "lib-1", "mediaType": "book", "playMethod": 3,
+                      "mediaPlayer": "gstreamer", "displayTitle": "Book", "duration": 3600.0, "startTime": 100.0,
+                      "currentTime": 160.0, "timeListening": 60.0, "startedAt": 1000, "updatedAt": 61000 },
+                    { "id": "s-2" },
+                ]
+            })))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .insert_header("date", "Wed, 14 Oct 2026 17:39:17 GMT")
+                    .set_body_json(serde_json::json!({ "results": [
+                        { "id": "s-1", "success": true, "progressSynced": true },
+                        { "id": "s-2", "success": false, "error": "Media item not found" },
+                    ]})),
+            )
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let sync = Client::new(&server.uri()).sync_local_sessions(&device_info(), &[local_session("s-1"), local_session("s-2")]).await.unwrap();
+        assert_eq!(sync.results.len(), 2);
+        assert!(sync.results[0].success && sync.results[0].progress_synced);
+        assert!(sync.results[1].is_item_missing());
+        assert!(!sync.results[0].is_item_missing());
+        assert_eq!(sync.server_date.unwrap().to_rfc3339(), "2026-10-14T17:39:17+00:00");
+    }
+
+    #[tokio::test]
+    async fn sync_local_sessions_leaves_unknown_fields_out_of_the_body() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/api/session/local-all"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({ "results": [] })))
+            .mount(&server)
+            .await;
+        let mut session = local_session("s-1");
+        session.library_id = None;
+        Client::new(&server.uri()).sync_local_sessions(&device_info(), &[session]).await.unwrap();
+
+        let body: serde_json::Value = server.received_requests().await.unwrap()[0].body_json().unwrap();
+        assert!(body["deviceInfo"].get("model").is_none(), "no model known: not sent at all");
+        assert!(body["sessions"][0].get("libraryId").is_none());
+        assert!(body["sessions"][0].get("displayAuthor").is_none());
+        assert!(body["sessions"][0].get("chapters").is_none(), "chapters are the server's to fill in");
+    }
+
+    #[tokio::test]
+    async fn sync_local_sessions_maps_a_missing_endpoint_and_rejected_credentials() {
+        for (status, expect_not_found) in [(404, true), (405, true), (401, false), (500, false)] {
+            let server = MockServer::start().await;
+            Mock::given(method("POST")).and(path("/api/session/local-all")).respond_with(ResponseTemplate::new(status)).mount(&server).await;
+            let err = Client::new(&server.uri()).sync_local_sessions(&device_info(), &[local_session("s-1")]).await.unwrap_err();
+            match status {
+                401 => assert!(matches!(err, LibraryItemsError::Unauthorized(401))),
+                500 => assert!(matches!(err, LibraryItemsError::UnexpectedResponse(_))),
+                _ => assert_eq!(matches!(err, LibraryItemsError::NotFound(_)), expect_not_found, "HTTP {status}"),
+            }
+        }
+    }
+
+    #[test]
+    fn server_date_reads_the_http_date_header_and_ignores_garbage() {
+        let mut headers = reqwest::header::HeaderMap::new();
+        assert!(server_date(&headers).is_none());
+        headers.insert(reqwest::header::DATE, "not a date".parse().unwrap());
+        assert!(server_date(&headers).is_none());
+        headers.insert(reqwest::header::DATE, "Thu, 15 Oct 2026 06:56:02 GMT".parse().unwrap());
+        assert_eq!(server_date(&headers).unwrap().timestamp(), 1_792_047_362);
     }
 
     #[tokio::test]
