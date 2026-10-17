@@ -238,7 +238,14 @@ impl Session {
     }
 
     fn keep_awake(&self) -> Option<Box<dyn Send>> {
-        self.inner.keep_awake.get().map(|keep_awake| keep_awake.hold(KEEP_AWAKE_REASON))
+        self.keep_awake_for(KEEP_AWAKE_REASON)
+    }
+
+    /// Keeps the device out of suspend until the returned value is dropped, telling the system
+    /// `reason` — for work that has to land before the phone sleeps. `None` when the app supplied
+    /// no way to (tests, or no logind).
+    pub fn keep_awake_for(&self, reason: &'static str) -> Option<Box<dyn Send>> {
+        self.inner.keep_awake.get().map(|keep_awake| keep_awake.hold(reason))
     }
 
     pub fn account_id(&self) -> &str {

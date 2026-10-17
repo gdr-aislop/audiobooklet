@@ -165,6 +165,13 @@ pub trait AudioBackend {
     /// for why this can't be changed on an already-loaded pipeline. Local files are unaffected
     /// either way.
     fn set_burst_buffering(&mut self, enabled: bool);
+    /// Whether a streamed file finished downloading ahead (in burst-buffering mode) since the
+    /// last call — the moment the radio is still awake from a burst, so a small request now
+    /// costs almost nothing. Fed by [`poll_event`](AudioBackend::poll_event)'s bus draining, so
+    /// it only updates while events are polled. Backends that don't burst never report one.
+    fn take_burst_finished(&mut self) -> bool {
+        false
+    }
     /// Releases whatever the pipeline currently holds — the audio device/stream and any open
     /// network connection — without expecting to resume from where it left off. A `set_state`
     /// call on a pipeline that has posted a bus `Error` never recovers it (GStreamer requires
@@ -191,6 +198,9 @@ pub struct GstBackend {
     /// this explicitly right after construction, same as `PlayerController`'s other
     /// settings-derived fields.
     burst_buffering: bool,
+    /// Set by `poll_event` when `playbin`'s download buffer reports a finished download; read
+    /// and cleared by `take_burst_finished`.
+    burst_finished: std::cell::Cell<bool>,
 }
 
 impl GstBackend {
@@ -229,7 +239,7 @@ impl GstBackend {
             // creates internally), not up front.
             None => apply_stream_role_when_sink_is_ready(&pipeline),
         }
-        Ok(Self { pipeline, current_speed: 1.0, connection_properties, burst_buffering: true })
+        Ok(Self { pipeline, current_speed: 1.0, connection_properties, burst_buffering: true, burst_finished: std::cell::Cell::new(false) })
     }
 
     fn bus(&self) -> gst::Bus {
@@ -379,9 +389,21 @@ impl AudioBackend for GstBackend {
                         debug: e.debug().map(|d| redact_tokens(&d)),
                     }));
                 }
+                // In download (burst) mode `playbin` fetches the file through a `downloadbuffer`,
+                // which posts this once the whole file is in. Its buffering messages are no use
+                // here: they reach 100% as soon as there's enough to play through, well before
+                // the download ends (checked against a throttled HTTP source).
+                gst::MessageView::Element(element) if element.structure().is_some_and(|s| s.name() == DOWNLOAD_COMPLETE_MESSAGE) => {
+                    self.burst_finished.set(true);
+                    continue;
+                }
                 _ => continue,
             }
         }
+    }
+
+    fn take_burst_finished(&mut self) -> bool {
+        self.burst_finished.replace(false)
     }
 
     fn set_burst_buffering(&mut self, enabled: bool) {
@@ -414,6 +436,10 @@ impl Drop for GstBackend {
 /// see `apply_burst_buffering`). Value from `playbin`'s own flag ordering: VIDEO, AUDIO, TEXT,
 /// VIS, SOFT_VOLUME, NATIVE_AUDIO, NATIVE_VIDEO, DOWNLOAD is the 8th (bit 7).
 const GST_PLAY_FLAG_DOWNLOAD: u32 = 1 << 7;
+
+/// The element message `downloadbuffer` (what `playbin` fetches through in download mode) posts
+/// when the whole file has been downloaded.
+const DOWNLOAD_COMPLETE_MESSAGE: &str = "GstCacheDownloadComplete";
 
 /// 64 MiB — generous for an audiobook chapter (typically a few MB to a few tens of MB at
 /// spoken-word bitrates), so download mode can fetch a whole file ahead and let the radio idle,
@@ -513,6 +539,73 @@ mod tests {
         ] {
             assert!(source.has_property(name, Some(ty)), "souphttpsrc has no `{name}` property of the expected type");
         }
+    }
+
+    /// Serves `bytes` over plain HTTP on a local port, slowly (about 1 MB/s), so a download
+    /// takes long enough to tell "enough buffered" from "fully downloaded". Returns the URL.
+    fn serve_slowly(bytes: Vec<u8>) -> String {
+        use std::io::{Read, Write};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        std::thread::spawn(move || {
+            for stream in listener.incoming() {
+                let Ok(mut stream) = stream else { return };
+                let mut request = [0u8; 4096];
+                let _ = stream.read(&mut request);
+                let head = format!("HTTP/1.1 200 OK\r\nContent-Type: audio/x-wav\r\nContent-Length: {}\r\nConnection: close\r\n\r\n", bytes.len());
+                if stream.write_all(head.as_bytes()).is_err() {
+                    continue;
+                }
+                for chunk in bytes.chunks(64 * 1024) {
+                    if stream.write_all(chunk).is_err() {
+                        break;
+                    }
+                    std::thread::sleep(std::time::Duration::from_millis(60));
+                }
+            }
+        });
+        format!("http://127.0.0.1:{port}/a.wav")
+    }
+
+    /// Polls events for up to `within`, returning whether a finished burst was reported.
+    fn burst_reported(player: &mut GstBackend, within: std::time::Duration) -> bool {
+        let started = std::time::Instant::now();
+        while started.elapsed() < within {
+            while player.poll_event().is_some() {}
+            if player.take_burst_finished() {
+                return true;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+        false
+    }
+
+    /// A streamed file reports a finished burst once it has fully downloaded — only in burst
+    /// mode, and only once.
+    #[test]
+    fn a_finished_download_is_reported_once_in_burst_mode_only() {
+        let tmp = tempfile::tempdir().unwrap();
+        let wav = std::fs::read(silent_wav_uri(&tmp, 60).trim_start_matches("file://")).unwrap();
+        let url = serve_slowly(wav);
+        init().expect("gstreamer should initialize in this environment");
+        if gst::ElementFactory::find("souphttpsrc").is_none() {
+            return;
+        }
+
+        let mut player = backend();
+        player.set_burst_buffering(true);
+        player.load(&url).unwrap();
+        player.play().unwrap();
+        assert!(burst_reported(&mut player, std::time::Duration::from_secs(15)), "the download should finish and be reported");
+        assert!(!player.take_burst_finished(), "reported once");
+        player.reset();
+
+        let mut player = backend();
+        player.set_burst_buffering(false);
+        player.load(&url).unwrap();
+        player.play().unwrap();
+        assert!(!burst_reported(&mut player, std::time::Duration::from_secs(3)), "streaming without bursts never reports one");
+        player.reset();
     }
 
     fn backend() -> GstBackend {

@@ -4,6 +4,7 @@ pub mod chapters;
 pub mod download_tracks;
 pub mod items;
 pub mod libraries;
+pub mod listening_sessions;
 pub mod progress;
 pub mod relocate;
 pub mod series_books;

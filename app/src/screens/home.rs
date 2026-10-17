@@ -887,6 +887,7 @@ fn spawn_sync_cycle(ctx: SyncCtx, widgets: HomeWidgets, manual: Option<crate::wi
         let (sync_result, data_after_sync, [sync_took, reconcile_took, reread_took]) = spawned_sync
             .await
             .expect("the Home sync task must not panic");
+        crate::sync_coordinator::network_used(&server_id, &account_id);
         steps.record("sync", sync_took);
         steps.record("reconcile", reconcile_took);
         steps.record("reread", reread_took);

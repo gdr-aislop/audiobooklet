@@ -174,6 +174,36 @@ pub(crate) fn notify_synced(server_id: &str, account_id: &str, from: Screen, out
     });
 }
 
+/// `(server_id, account_id, callback)`, see [`on_network_used`].
+type NetworkUsedListener = (String, String, Box<dyn Fn() -> bool>);
+
+thread_local! {
+    static NETWORK_USED_LISTENERS: RefCell<Vec<NetworkUsedListener>> = const { RefCell::new(Vec::new()) };
+}
+
+/// Registers `callback` for when a screen has just talked to `(server_id, account_id)`'s server
+/// (a library sync): the radio is awake, so small pending work can go along cheaply. The
+/// callback returns whether it is still wanted.
+pub(crate) fn on_network_used(server_id: &str, account_id: &str, callback: impl Fn() -> bool + 'static) {
+    NETWORK_USED_LISTENERS.with(|listeners| listeners.borrow_mut().push((server_id.to_string(), account_id.to_string(), Box::new(callback))));
+}
+
+/// Called by a screen right after a sync with `(server_id, account_id)`'s server, on the GTK
+/// thread.
+pub(crate) fn network_used(server_id: &str, account_id: &str) {
+    let listeners = NETWORK_USED_LISTENERS.with(|listeners| std::mem::take(&mut *listeners.borrow_mut()));
+    let kept: Vec<_> = listeners
+        .into_iter()
+        .filter(|(server, account, callback)| if server == server_id && account == account_id { callback() } else { true })
+        .collect();
+    NETWORK_USED_LISTENERS.with(|listeners| {
+        let mut listeners = listeners.borrow_mut();
+        let mut kept = kept;
+        kept.append(&mut listeners);
+        *listeners = kept;
+    });
+}
+
 /// The item the player has loaded (or is starting) — `(server_id, account_id, item_id)`. Home's
 /// and Library's progress reconcile leave that item's row to the player (see
 /// `abs_core::progress_sync::reconcile_all_progress`'s `skip_item`). A real `Mutex`, not a

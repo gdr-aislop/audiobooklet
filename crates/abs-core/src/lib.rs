@@ -11,6 +11,7 @@ pub mod covers;
 pub mod download_tracks;
 pub mod downloads;
 pub mod error;
+pub mod listening_sessions;
 pub mod media_type;
 pub mod passwords;
 pub mod playback;

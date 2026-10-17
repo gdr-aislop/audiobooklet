@@ -1182,6 +1182,7 @@ fn spawn_sync_cycle(ctx: SyncCtx, widgets: LibraryWidgets, manual: Option<crate:
             }
         });
         let (sync_result, sync_took, reconcile_took) = spawned_sync.await.expect("the Library sync task must not panic");
+        crate::sync_coordinator::network_used(&server_id, &account_id);
         steps.record("sync", sync_took);
         steps.record("reconcile", reconcile_took);
         // Offline mode switched on mid-sync cut it short; that's not a failure to show.

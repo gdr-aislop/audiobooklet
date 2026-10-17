@@ -18,6 +18,7 @@ serde_json.workspace = true
 image.workspace = true
 # JWT `exp` claims are base64url-encoded (see `auth::jwt_exp_seconds`); the only use in the crate.
 base64 = "0.22"
+uuid.workspace = true
 unicode-normalization.workspace = true
 
 [dev-dependencies]

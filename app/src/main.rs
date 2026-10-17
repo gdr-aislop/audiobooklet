@@ -6,6 +6,7 @@ mod external_apps;
 mod i18n;
 mod icons;
 mod keep_awake;
+mod listening;
 mod log_privacy;
 mod low_memory_mode;
 mod offline_mode;
@@ -367,6 +368,9 @@ mod tests {
         (connection_editor_persist_failures_show_inline, crate::screens::connection::tests::run_editor_persist_failures_show_inline),
         (playback_start_and_pause_persists_progress, crate::player::tests::run_start_and_pause_persists_progress),
         (playback_progress_sync_reports_each_outcome, crate::player::tests::run_progress_sync_reports_each_outcome),
+        (playback_listening_sessions_continue_across_pauses_and_send_once_per_pause, crate::player::tests::run_listening_sessions_continue_across_pauses_and_send_once_per_pause),
+        (playback_listening_sessions_kept_offline_go_in_one_request, crate::player::tests::run_listening_sessions_kept_offline_go_in_one_request),
+        (playback_listening_sessions_go_along_with_a_finished_burst, crate::player::tests::run_listening_sessions_go_along_with_a_finished_burst),
         (playback_start_with_no_working_audio_engine_still_opens_with_an_error, crate::player::tests::run_start_with_no_working_audio_engine_still_opens_with_an_error),
         (playback_start_with_an_expired_session_and_nothing_cached_shows_a_login_error, crate::player::tests::run_start_with_an_expired_session_and_nothing_cached_shows_a_login_error),
         (playback_downloaded_track_is_preferred_over_streaming, crate::player::tests::run_downloaded_track_is_preferred_over_streaming),
