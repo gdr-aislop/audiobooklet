@@ -113,6 +113,9 @@ fn main() -> adw::glib::ExitCode {
 
     let app = application::build_application(state);
     let exit_code = app.run();
+    // While thread-local storage is still intact: the shell's teardown (the player retiring)
+    // must not run inside `exit()`'s thread-local destructors.
+    application::release_main_window();
     log_handle.flush();
     exit_code
 }
