@@ -37,8 +37,10 @@ fn retain_main_window(new: screens::main_window::MainWindow) {
 }
 
 /// Retires the currently retained `MainWindow`, if any — for wherever the shell's content stops
-/// being a `MainWindow` at all (the Welcome/login screen).
-fn release_main_window() {
+/// being a `MainWindow` at all (the Welcome/login screen), and once the app has stopped running:
+/// left in its thread-local, the shell would be dropped by `exit()` while thread-local storage is
+/// torn down, and anything its retirement uses that keeps state in a thread-local would panic.
+pub(crate) fn release_main_window() {
     MAIN_WINDOW.with(|slot| *slot.borrow_mut() = None);
 }
 

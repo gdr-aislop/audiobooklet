@@ -66,9 +66,18 @@ pub struct Now {
 }
 
 impl Now {
+    /// The clock now. Uses no Rust thread-local storage (chrono's `Local` keeps its timezone in
+    /// one): this also runs while the app exits, when thread-locals are being torn down.
     pub fn current() -> Self {
-        let local = chrono::Local::now();
-        Self { instant: Instant::now(), ms: local.timestamp_millis(), date: local.date_naive() }
+        let ms = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |since| since.as_millis() as i64);
+        // GLib reads the local timezone in C, so it works whatever state Rust's thread-locals
+        // are in. Failing that (no timezone data at all), the UTC date.
+        let date = glib::DateTime::now_local()
+            .ok()
+            .and_then(|local| chrono::NaiveDate::from_ymd_opt(local.year(), local.month() as u32, local.day_of_month() as u32))
+            .or_else(|| chrono::DateTime::from_timestamp_millis(ms).map(|utc| utc.date_naive()))
+            .unwrap_or_default();
+        Self { instant: Instant::now(), ms, date }
     }
 }
 
@@ -341,6 +350,31 @@ mod tests {
             duration: 3600.0,
             play_method: 3,
         }
+    }
+
+    /// `Now::current()` runs while the app exits too — dropping the shell at the very end saves
+    /// a last position — and by then thread-local storage is being torn down. It must not use
+    /// any thread-local that may already be gone (chrono's timezone cache was: the 0.9.10 quit
+    /// panic). Reproduced on a thread, whose thread-locals are destroyed newest first, the same
+    /// as at process exit.
+    #[test]
+    fn now_works_while_thread_locals_are_being_destroyed() {
+        struct ReadsTheClockOnDrop;
+        impl Drop for ReadsTheClockOnDrop {
+            fn drop(&mut self) {
+                let _ = Now::current();
+            }
+        }
+        thread_local! {
+            static HELD: RefCell<Option<ReadsTheClockOnDrop>> = const { RefCell::new(None) };
+        }
+        let thread = std::thread::spawn(|| {
+            HELD.with(|held| *held.borrow_mut() = Some(ReadsTheClockOnDrop));
+            // Whatever `Now::current` keeps in thread-locals is set up after `HELD`, so it's
+            // destroyed before `HELD`'s value is dropped.
+            let _ = Now::current();
+        });
+        assert!(thread.join().is_ok(), "reading the clock while thread-locals are being destroyed must not panic");
     }
 
     #[test]
