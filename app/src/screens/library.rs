@@ -499,6 +499,9 @@ pub fn build(
     scroll_content.append(&list_box);
 
     let scroller = gtk4::ScrolledWindow::builder().hscrollbar_policy(gtk4::PolicyType::Never).vexpand(true).child(&scroll_content).build();
+    // The chip rows sit above the list, not in it: the mouse wheel over them scrolls the list.
+    crate::widgets::sideways_scroll::pass_vertical_scroll_to(&category_scroller, &scroller);
+    crate::widgets::sideways_scroll::pass_vertical_scroll_to(&genre_chip_scroller, &scroller);
 
     // Immediate feedback for any filter/search/sort/view-mode change (see `request_render`/
     // `apply_view_mode`): the rebuild that follows can take a couple of seconds on a large
@@ -3881,6 +3884,8 @@ pub(crate) mod tests {
         hooks.category_genre.set_active(true);
         pump_until(|| hooks.genre_chip_box.first_child().is_some(), Duration::from_secs(5));
         assert!(hooks.genre_chip_revealer.reveals_child(), "the genre row should reveal once the Genre chip is active");
+        let chips = hooks.genre_chip_box.ancestor(gtk4::ScrolledWindow::static_type()).and_downcast::<gtk4::ScrolledWindow>().unwrap();
+        assert!(crate::widgets::sideways_scroll::tests::passes_vertical_scroll_on(&chips), "the mouse wheel over the chips scrolls the list");
 
         let fantasy_chip = hooks
             .genre_chip_box

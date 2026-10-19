@@ -446,6 +446,7 @@ mod tests {
         (playback_offline_mode_starts_a_downloaded_book_without_contacting_the_server, crate::player::tests::run_offline_mode_starts_a_downloaded_book_without_contacting_the_server),
         (playback_a_book_whose_start_track_is_not_downloaded_still_waits_for_the_server, crate::player::tests::run_a_book_whose_start_track_is_not_downloaded_still_waits_for_the_server),
         (player_screen_renders, crate::screens::player::tests::run),
+        (sideways_rows_keep_every_touch_gesture, crate::widgets::sideways_scroll::tests::run_rows_keep_every_touch_gesture),
         (player_screen_playback_error_shows_the_banner, crate::screens::player::tests::run_playback_error_shows_the_banner),
         (player_screen_keyboard_actions, crate::screens::player::tests::run_keyboard_actions),
         (player_screen_chapters_sheet_lists_and_seeks, crate::screens::player::tests::run_chapters_sheet_lists_and_seeks),

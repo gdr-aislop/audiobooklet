@@ -14,6 +14,7 @@ pub mod download_scope_menu;
 pub mod item_card;
 pub mod item_options_menu;
 pub mod pull_to_refresh;
+pub mod sideways_scroll;
 
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
