@@ -470,6 +470,19 @@ injection beyond what's noted inline. These are gaps in *pass coverage*, not kno
       `edge-overshot` signal), `home_sync_now_toasts_failure` (unreachable server → "Sync
       failed" toast, empty state unchanged).
 
+- [ ] **HT-11 — Sideways rows on a touchscreen (phone).** Swipe each Home shelf sideways; start a
+      vertical swipe on a shelf; tap a cover. Same on Library's category and genre chip rows.
+      *Expected:* shelves and chips swipe sideways with their usual glide, a vertical swipe that
+      starts on a row scrolls the page, taps open the book — exactly as before the mouse-wheel
+      change below. *Automated (structure only):* `sideways_rows_keep_every_touch_gesture` — a
+      row keeps every GTK controller, touch-only gestures included, and gains one scroll
+      controller; real touch input can't be simulated in CI.
+
+- [ ] **HT-12 — Mouse wheel over sideways rows (computer).** Pointer over a Home shelf: wheel;
+      Shift+wheel. Pointer over Library's chips: wheel.
+      *Expected:* the wheel scrolls the page (Home) or the book list (Library); Shift+wheel, a tilt
+      wheel or a sideways touchpad swipe scrolls the row itself.
+
 ---
 
 ## 4. Library picker (LP) — 🚧 not yet built

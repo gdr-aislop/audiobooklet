@@ -1167,7 +1167,7 @@ fn shelf_row() -> gtk4::Box {
 }
 
 fn shelf_scroller(row: &gtk4::Box) -> gtk4::ScrolledWindow {
-    gtk4::ScrolledWindow::builder()
+    let scroller = gtk4::ScrolledWindow::builder()
         .hscrollbar_policy(gtk4::PolicyType::Automatic)
         .vscrollbar_policy(gtk4::PolicyType::Never)
         // Without this, a `GtkScrolledWindow` with vertical scrolling disabled still only
@@ -1176,7 +1176,10 @@ fn shelf_scroller(row: &gtk4::Box) -> gtk4::ScrolledWindow {
         // at the bottom of the shelf rather than being fully shown. This tells it to size to fit.
         .propagate_natural_height(true)
         .child(row)
-        .build()
+        .build();
+    // The mouse wheel over a shelf scrolls Home, not nothing.
+    crate::widgets::sideways_scroll::pass_vertical_scroll_to_page(&scroller);
+    scroller
 }
 
 fn library_row(library: &Library) -> adw::ActionRow {
@@ -1268,6 +1271,11 @@ pub(crate) mod tests {
         // waiting on its *hiding* can't distinguish "sync hasn't run yet" from "sync ran and
         // found nothing" — wait on the actual data landing instead.
         pump_until(|| hooks.libraries_list.row_at_index(0).is_some(), Duration::from_secs(10));
+        // Both shelves pass the mouse wheel on to the page (see `widgets::sideways_scroll`).
+        for row in [&hooks.continue_row, &hooks.recent_row] {
+            let shelf = row.ancestor(gtk4::ScrolledWindow::static_type()).and_downcast::<gtk4::ScrolledWindow>().unwrap();
+            assert!(crate::widgets::sideways_scroll::tests::passes_vertical_scroll_on(&shelf));
+        }
 
         assert!(!hooks.empty_state.root.is_visible(), "should have left the empty state once a library synced");
         assert!(hooks.libraries_list.row_at_index(0).is_some(), "the synced library should have a row");
