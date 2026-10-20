@@ -67,8 +67,10 @@ pub fn build(
 
     let back_button = gtk4::Button::builder()
         .icon_name("go-previous-symbolic")
+        .tooltip_text(tr("Back"))
         .css_classes(["flat"])
         .build();
+    crate::a11y::name(&back_button, &tr("Back"));
     back_button.connect_clicked({
         let window = window.clone();
         let shell_root = shell_root.clone();
@@ -76,7 +78,9 @@ pub fn build(
     });
 
     let header = adw::HeaderBar::new();
-    header.set_title_widget(Some(&adw::WindowTitle::new(&tr("Connection"), "")));
+    let connection_title = adw::WindowTitle::new(&tr("Connection"), "");
+    crate::a11y::landing(&connection_title, &tr("Connection"));
+    header.set_title_widget(Some(&connection_title));
     header.pack_start(&back_button);
 
     let page = adw::PreferencesPage::new();
@@ -88,9 +92,11 @@ pub fn build(
 
     let info_button = gtk4::MenuButton::builder()
         .icon_name("dialog-information-symbolic")
+        .tooltip_text(tr("About this connection"))
         .css_classes(["flat"])
         .valign(gtk4::Align::Center)
         .build();
+    crate::a11y::name(&info_button, &tr("About this connection"));
     let info_label = gtk4::Label::builder()
         .label(tr("This connection is used for syncing, streaming and downloads — every call the app makes to the server goes through it."))
         .wrap(true)
@@ -182,6 +188,7 @@ pub fn build(
     });
     ssl_row.add_suffix(&ssl_switch);
     ssl_row.set_activatable_widget(Some(&ssl_switch));
+    crate::a11y::switch_row(&ssl_row, &ssl_switch);
     advanced_group.add(&ssl_row);
 
     let local_address_row = adw::ActionRow::builder()
@@ -395,6 +402,7 @@ pub fn build(
     content.append(&page);
     content.append(&disconnect_button);
     toast_overlay.set_child(Some(&content));
+    crate::a11y::focus_landing(&connection_title, &toast_overlay);
 
     ConnectionScreen {
         root: toast_overlay.clone().upcast(),

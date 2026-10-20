@@ -66,6 +66,22 @@ pub(crate) fn combo_row(title: &str, subtitle: &str, options: &[String]) -> adw:
     }
     let row = adw::ComboRow::builder().title(title).subtitle(subtitle).model(&model).build();
     row.set_expression(Some(gtk4::StringObject::this_expression("string")));
+    // A screen reader hears the row's title and subtitle but not its trailing value, so the
+    // value leads the description: "Default speed combo box. 1.0×. Speed every book starts at."
+    // libadwaita describes the row by its subtitle label, which GTK 4.14 prefers to a
+    // description set here (4.8 does the opposite); dropping that relation makes this the
+    // description on both.
+    row.reset_relation(gtk4::AccessibleRelation::DescribedBy);
+    let describe = {
+        let subtitle = subtitle.to_string();
+        move |row: &adw::ComboRow| {
+            let selected = row.selected_item().and_downcast::<gtk4::StringObject>().map(|option| option.string().to_string()).unwrap_or_default();
+            let spoken = if subtitle.is_empty() { selected } else { format!("{selected}. {subtitle}") };
+            crate::a11y::describe_if_changed(row, &spoken);
+        }
+    };
+    describe(&row);
+    row.connect_selected_item_notify(describe);
     row
 }
 

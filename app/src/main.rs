@@ -1,3 +1,4 @@
+mod a11y;
 mod application;
 mod crash_reporting;
 mod downloads;
@@ -15,13 +16,13 @@ mod perf;
 mod player;
 mod rich_text;
 mod screens;
+mod startup;
 mod sync_coordinator;
 #[cfg(test)]
 mod test_support;
 mod widgets;
 
 use adw::prelude::*;
-use application::AppState;
 
 fn main() -> adw::glib::ExitCode {
     // Checked before *everything* else, including `--version` — a real user never passes this
@@ -49,11 +50,19 @@ fn main() -> adw::glib::ExitCode {
     // can also catch failures during the async setup that follows. `ensure_early_dirs` covers
     // only what's needed for that; `setup()`'s own `ensure_dirs()` call still creates every
     // directory (redundantly but harmlessly for these two).
-    let paths = abs_storage::AppPaths::resolve().expect("resolve XDG application directories");
+    let Some(paths) = abs_storage::AppPaths::resolve() else {
+        // No home folder to keep anything in: nothing to log to either, but the user still gets
+        // a window saying so instead of nothing.
+        eprintln!("audiobooklet: couldn't find the home folder (is HOME set?)");
+        i18n::init(i18n::SYSTEM);
+        let problem = startup::StartupProblem::new(startup::ProblemKind::Other, "couldn't find the home folder (is HOME set?)", None);
+        return application::build_problem_application(problem, None).run();
+    };
     // The app was called abs-app up to 0.9.5: move its directories over before anything creates
     // the new ones (logging, just below, would). Logged once logging is up.
     let legacy_moves = paths.migrate_legacy_dirs();
-    paths.ensure_early_dirs().expect("create the logging/crash-dump directories");
+    // A failure is shown once the window can be (logging falls back to a temporary folder).
+    let early_dirs = paths.ensure_early_dirs();
 
     let log_handle = crash_reporting::init_logging(&paths);
     // One of the very first lines in every log, on purpose: a user's pasted log snippet should
@@ -105,90 +114,30 @@ fn main() -> adw::glib::ExitCode {
     // exercises this file's setup.
     let runtime = tokio::runtime::Runtime::new().expect("build the Tokio runtime");
     let _runtime_guard = runtime.enter();
-    let state = runtime.block_on(setup(paths));
+    // Every failure opening the app's data is shown in a window (`startup`), not a silent exit.
+    let opened = match early_dirs {
+        Err(err) => Err(startup::StartupProblem::from_io(&err, &paths.logs_dir())),
+        Ok(()) => runtime.block_on(startup::open(paths.clone())),
+    };
 
     if let Err(err) = abs_player::init() {
         tracing::warn!(%err, "GStreamer failed to initialize; playback will be unavailable");
     }
 
-    let app = application::build_application(state);
+    let app = match opened {
+        Ok(state) => application::build_application(state),
+        Err(problem) => {
+            // The language setting lives in the database that couldn't be opened.
+            i18n::init(i18n::SYSTEM);
+            application::build_problem_application(problem, Some(paths))
+        }
+    };
     let exit_code = app.run();
     // While thread-local storage is still intact: the shell's teardown (the player retiring)
     // must not run inside `exit()`'s thread-local destructors.
     application::release_main_window();
     log_handle.flush();
     exit_code
-}
-
-async fn setup(paths: abs_storage::AppPaths) -> AppState {
-    paths.ensure_dirs().await.expect("create application directories");
-
-    let pool = abs_storage::connect_and_migrate(&paths.db_path())
-        .await
-        .expect("open and migrate the local database");
-
-    // Low memory mode decides how the database itself is opened (fewer connections, a small page
-    // cache), so it is read first, with the default pool, and the pool reopened if it is on. The
-    // cover widgets get the flag before any window exists.
-    let low_memory_mode = abs_core::settings::load_low_memory_mode(&pool).await.unwrap_or(false);
-    tracing::info!(low_memory_mode, "loaded the low memory mode setting");
-    let pool = if low_memory_mode {
-        pool.close().await;
-        tracing::info!("low memory mode: opening the database with fewer connections and a small page cache");
-        abs_storage::connect_and_migrate_with(&paths.db_path(), abs_storage::DbProfile::LowMemory)
-            .await
-            .expect("open the local database in low memory mode")
-    } else {
-        pool
-    };
-    widgets::cover_image::set_low_memory_mode(low_memory_mode);
-
-    // Stored download and cover paths still point into the old name's directories after they
-    // moved (see `migrate_legacy_dirs` in `main`). Cheap and idempotent, so it runs on every start:
-    // a crash between the move and this can't leave files the database no longer finds.
-    for (from, to) in paths.legacy_pairs() {
-        match abs_storage::repo::relocate::rebase_paths(&pool, &from, &to).await {
-            Ok(0) => {}
-            Ok(rows) => tracing::info!(rows, from = %from.display(), to = %to.display(), "pointed stored file paths at the moved data"),
-            Err(err) => tracing::error!(%err, from = %from.display(), "couldn't update stored file paths after the move; downloads there may look missing"),
-        }
-    }
-
-    // The language comes from the database, so it is applied here rather than at the top of
-    // `main`: after the database is open, but before GTK starts (GTK reads the same locale) and
-    // before any UI string is built. Never fails — the worst case is an English UI.
-    let language = abs_core::settings::load_language(&pool).await.unwrap_or_else(|_| i18n::SYSTEM.to_string());
-    i18n::init(&language);
-
-    // Log anonymization is on from process start (see `log_privacy`); this applies the stored
-    // choice and teaches the scrubber the addresses/usernames already in the database.
-    let anonymize_logs = abs_core::settings::load_anonymize_logs(&pool).await.unwrap_or(true);
-    log_privacy::refresh_from_db(&pool).await;
-    log_privacy::global().set_enabled(anonymize_logs);
-    tracing::info!(anonymize_logs, "loaded the log anonymization setting");
-
-    let playback_settings = abs_core::settings::load_playback_settings(&pool)
-        .await
-        .expect("load playback settings");
-    tracing::info!(?playback_settings, "loaded playback settings");
-    let theme = abs_core::settings::load_theme(&pool).await.expect("load theme");
-
-    // A database left with accounts but none active (signing out of the active account used to
-    // do that) starts on the most recently used one instead of the first-run screen.
-    if let Err(err) = abs_core::accounts::ensure_active(&pool).await {
-        tracing::warn!(%err, "couldn't pick an account to start with");
-    }
-    let active_account = abs_storage::repo::accounts::get_active(&pool)
-        .await
-        .expect("check for an active account");
-    tracing::info!(
-        has_active_account = active_account.is_some(),
-        "resolved startup screen"
-    );
-    // Token freshness is handled lazily by `abs_core::auth::Session` — screens ask it for a
-    // token at call time, and its first use refreshes an expired one (server v2.26.0+ JWTs).
-
-    AppState { pool, paths, active_account, playback_settings, theme }
 }
 
 /// Every GTK-touching test across `screens::*` funnels through this module. `gtk4::init()` binds
@@ -249,16 +198,20 @@ mod tests {
     }
 
     gtk_scenarios! {
+        (a11y_helpers, crate::a11y::tests::run_helpers),
         (application_single_key_shortcuts_defer_to_the_focused_widget, crate::application::tests::run_single_key_shortcuts_defer_to_the_focused_widget),
         (application_activating_again_presents_the_open_window, crate::application::tests::run_activating_again_presents_the_open_window),
         (error_reporting_shows_one_toast, crate::error_reporting::tests::run_report_background_error_shows_one_toast),
         (icons_every_icon_the_app_uses_is_in_the_theme, crate::icons::tests::run_every_icon_the_app_uses_is_in_the_theme),
         (welcome_connect, crate::screens::welcome::tests::run),
+        (startup_problem_each_problem_offers_what_can_help, crate::screens::startup_problem::tests::run_each_problem_offers_what_can_help),
+        (welcome_screen_reader_support, crate::screens::welcome::tests::run_screen_reader_support),
         (welcome_relogin_flow, crate::screens::welcome::tests::run_relogin_flow),
         (welcome_api_key_and_advanced, crate::screens::welcome::tests::run_api_key_and_advanced),
         (home_renders_synced_library_and_recently_added_item, crate::screens::home::tests::run_renders_synced_library_and_recently_added_item),
         (home_finished_books_dont_show_under_continue_listening, crate::screens::home::tests::run_finished_books_dont_show_under_continue_listening),
         (home_shelf_headers_invoke_on_open_shelf, crate::screens::home::tests::run_shelf_headers_invoke_on_open_shelf),
+        (home_a_shelf_is_one_tab_stop, crate::screens::home::tests::run_a_shelf_is_one_tab_stop),
         (home_shows_empty_state_when_the_server_has_no_libraries, crate::screens::home::tests::run_shows_empty_state_when_the_server_has_no_libraries),
         (home_shows_a_retryable_error_when_the_first_sync_fails, crate::screens::home::tests::run_shows_a_retryable_error_when_the_first_sync_fails),
         (home_offline_mode_toggle_filters_recently_added, crate::screens::home::tests::run_offline_mode_toggle_filters_recently_added),
@@ -304,6 +257,7 @@ mod tests {
         (library_hide_finished_switch_filters_finished_items, crate::screens::library::tests::run_hide_finished_switch_filters_finished_items),
         (library_author_category_chip_groups_items_with_headers, crate::screens::library::tests::run_author_category_chip_groups_items_with_headers),
         (library_series_grouping_sorts_named_groups_before_the_fallback_bucket, crate::screens::library::tests::run_series_grouping_sorts_named_groups_before_the_fallback_bucket),
+        (library_chips_cards_and_search_speak_for_screen_readers, crate::screens::library::tests::run_chips_cards_and_search_speak_for_screen_readers),
         (library_apply_series_filter_shows_only_that_series, crate::screens::library::tests::run_apply_series_filter_shows_only_that_series),
         (library_author_grouping_sorts_named_authors_before_unknown_author_bucket, crate::screens::library::tests::run_author_grouping_sorts_named_authors_before_unknown_author_bucket),
         (library_sort_by_combo_persists_and_is_honored_on_rebuild, crate::screens::library::tests::run_sort_by_combo_persists_and_is_honored_on_rebuild),
@@ -313,6 +267,7 @@ mod tests {
         (library_application_settings_row_calls_on_open_settings, crate::screens::library::tests::run_application_settings_row_calls_on_open_settings),
         (library_sync_now_and_pull_to_refresh, crate::screens::library::tests::run_sync_now_and_pull_to_refresh),
         (item_detail_metadata_renders_from_cache_and_play_for_unstarted, crate::screens::item_detail::tests::run_metadata_renders_from_cache_and_play_for_unstarted),
+        (item_detail_tab_walks_from_the_header_through_the_page, crate::screens::item_detail::tests::run_tab_walks_from_the_header_through_the_page),
         (item_detail_empty_narrator_falls_back_to_author_only, crate::screens::item_detail::tests::run_empty_narrator_falls_back_to_author_only),
         (item_detail_partially_listened_book_shows_resume_and_progress, crate::screens::item_detail::tests::run_partially_listened_book_shows_resume_and_progress),
         (item_detail_description_truncation_and_more_toggle, crate::screens::item_detail::tests::run_description_truncation_and_more_toggle),
@@ -347,6 +302,7 @@ mod tests {
         (main_window_playback_error_toasts_once_with_a_details_action, crate::screens::main_window::tests::run_playback_error_toasts_once_with_a_details_action),
         (main_window_tapping_the_series_button_opens_library_filtered_to_that_series, crate::screens::main_window::tests::run_tapping_the_series_button_opens_library_filtered_to_that_series),
         (main_window_download_started_toast_view_action_opens_downloads, crate::screens::main_window::tests::run_download_started_toast_view_action_opens_downloads),
+        (main_window_each_screen_focuses_its_heading_for_screen_readers, crate::screens::main_window::tests::run_each_screen_focuses_its_heading_for_screen_readers),
         (main_window_mini_bar_open_player_swaps_to_the_full_player_screen, crate::screens::main_window::tests::run_mini_bar_open_player_swaps_to_the_full_player_screen),
         (main_window_mini_bar_screenshots, crate::screens::main_window::tests::run_mini_bar_screenshots),
         (banner_fits_a_phone_and_hides_an_empty_bottom_row, crate::widgets::banner::tests::run_the_banner_fits_a_phone_and_hides_an_empty_bottom_row),
@@ -454,6 +410,7 @@ mod tests {
         (player_screen_chapter_buttons_jump_between_chapters, crate::screens::player::tests::run_chapter_buttons_jump_between_chapters),
         (player_screen_chapter_buttons_hide_for_a_book_without_chapters, crate::screens::player::tests::run_chapter_buttons_hide_for_a_book_without_chapters),
         (player_screen_scrubber_tracks_the_current_chapter, crate::screens::player::tests::run_scrubber_tracks_the_current_chapter),
+        (player_screen_controls_are_named_for_screen_readers, crate::screens::player::tests::run_controls_are_named_for_screen_readers),
         (player_screen_download_button_starts_a_download_and_reflects_state, crate::screens::player::tests::run_download_button_starts_a_download_and_reflects_state),
         (player_screen_download_progress_strip_reveals_while_downloading, crate::screens::player::tests::run_download_progress_strip_reveals_while_downloading),
 

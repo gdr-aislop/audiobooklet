@@ -16,6 +16,21 @@ msgstr ""
 "|| n%100>=20) ? 1 : 2);\n"
 
 #: app/src/application.rs
+msgid "Start over?"
+msgstr ""
+
+#: app/src/application.rs
+msgid ""
+"The damaged database is kept next to the new one, renamed. You'll sign in "
+"again; downloaded books stay on the device but need downloading again to "
+"appear."
+msgstr ""
+
+#: app/src/application.rs
+msgid "Start Over"
+msgstr ""
+
+#: app/src/application.rs
 msgid "General"
 msgstr "Ogólne"
 
@@ -23,7 +38,7 @@ msgstr "Ogólne"
 msgid "Show shortcuts"
 msgstr "Pokaż skróty"
 
-#: app/src/application.rs
+#: app/src/application.rs app/src/screens/startup_problem.rs
 msgid "Quit"
 msgstr "Zakończ"
 
@@ -91,7 +106,7 @@ msgstr "Otwórz rozdziały"
 msgid "Open sleep timer"
 msgstr "Otwórz timer"
 
-#: app/src/application.rs
+#: app/src/application.rs app/src/screens/player.rs
 msgid "Collapse player"
 msgstr "Zwiń odtwarzacz"
 
@@ -138,6 +153,35 @@ msgstr "Audiobooklet — hasło do serwera"
 msgid "Playback error — tap for details"
 msgstr "Błąd odtwarzania — dotknij, aby zobaczyć szczegóły"
 
+#: app/src/player.rs app/src/screens/item_detail.rs
+#, fuzzy
+msgid "Progress"
+msgstr "Usunięto postęp słuchania"
+
+#. TRANSLATORS: Screen-reader name of the mini player's card; {title} is the book, {author} its author.
+#: app/src/player.rs
+msgid "Now playing: {title}, {author}"
+msgstr ""
+
+#. TRANSLATORS: Screen-reader name of the mini player's card for a book without an author; {title} is the book.
+#: app/src/player.rs
+#, fuzzy
+msgid "Now playing: {title}"
+msgstr "Teraz odtwarzane"
+
+#: app/src/player.rs app/src/screens/player.rs
+msgid "Pause"
+msgstr ""
+
+#: app/src/player.rs app/src/screens/item_detail.rs app/src/screens/player.rs
+msgid "Play"
+msgstr "Odtwórz"
+
+#: app/src/screens/connection.rs app/src/screens/item_detail.rs
+#: app/src/screens/settings.rs
+msgid "Back"
+msgstr ""
+
 #: app/src/screens/connection.rs
 msgid "Connection"
 msgstr "Połączenie"
@@ -145,6 +189,11 @@ msgstr "Połączenie"
 #: app/src/screens/connection.rs
 msgid "Server connection"
 msgstr "Połączenie z serwerem"
+
+#: app/src/screens/connection.rs
+#, fuzzy
+msgid "About this connection"
+msgstr "Rozłączanie"
 
 #: app/src/screens/connection.rs
 msgid ""
@@ -299,7 +348,7 @@ msgstr "Usuń"
 msgid "Removing the download"
 msgstr "Usuwanie pobranego pliku"
 
-#: app/src/screens/downloads.rs
+#: app/src/screens/downloads.rs app/src/widgets/download_scope_menu.rs
 msgid "{count} chapter"
 msgid_plural "{count} chapters"
 msgstr[0] "{count} rozdział"
@@ -316,7 +365,8 @@ msgstr "{finished}/{total} rozdziałów"
 msgid "{speed}/s"
 msgstr "{speed}/s"
 
-#: app/src/screens/home.rs app/src/widgets/banner.rs
+#: app/src/screens/home.rs app/src/screens/startup_problem.rs
+#: app/src/widgets/banner.rs
 msgid "Details"
 msgstr "Szczegóły"
 
@@ -324,7 +374,7 @@ msgstr "Szczegóły"
 msgid "Hide details"
 msgstr "Ukryj szczegóły"
 
-#: app/src/screens/home.rs
+#: app/src/screens/home.rs app/src/screens/startup_problem.rs
 msgid "Try again"
 msgstr "Spróbuj ponownie"
 
@@ -464,10 +514,6 @@ msgid "Podcasts aren't supported yet"
 msgstr "Podcasty nie są jeszcze obsługiwane"
 
 #: app/src/screens/item_detail.rs
-msgid "Play"
-msgstr "Odtwórz"
-
-#: app/src/screens/item_detail.rs
 msgid "more"
 msgstr "więcej"
 
@@ -529,6 +575,7 @@ msgid "Starting…"
 msgstr "Uruchamianie…"
 
 #: app/src/screens/item_detail.rs app/src/screens/player.rs
+#: app/src/widgets/download_scope_menu.rs app/src/widgets/item_card.rs
 msgid "Downloaded"
 msgstr "Pobrane"
 
@@ -566,6 +613,10 @@ msgstr "Pokaż wszystko"
 #: app/src/screens/library.rs
 msgid "Grid view"
 msgstr "Widok siatki"
+
+#: app/src/screens/library.rs
+msgid "List view"
+msgstr "Widok listy"
 
 #: app/src/screens/library.rs
 msgid "Downloaded only"
@@ -635,6 +686,10 @@ msgstr "Seria"
 msgid "Genre"
 msgstr "Gatunek"
 
+#: app/src/screens/library.rs app/src/screens/main_window.rs
+msgid "Library"
+msgstr "Biblioteka"
+
 #: app/src/screens/library.rs
 msgid "No items yet"
 msgstr "Brak pozycji"
@@ -661,8 +716,12 @@ msgid "Saving view options"
 msgstr "Zapisywanie opcji widoku"
 
 #: app/src/screens/library.rs
-msgid "List view"
-msgstr "Widok listy"
+#, fuzzy
+msgid "{count} book"
+msgid_plural "{count} books"
+msgstr[0] "{count} s"
+msgstr[1] "{count} s"
+msgstr[2] "{count} s"
 
 #: app/src/screens/library.rs
 msgid "Download books to listen to them offline."
@@ -706,10 +765,6 @@ msgstr "Zapisywanie trybu niskiej pamięci"
 msgid "View"
 msgstr "Zobacz"
 
-#: app/src/screens/main_window.rs
-msgid "Library"
-msgstr "Biblioteka"
-
 #: app/src/screens/main_window.rs app/src/screens/settings.rs
 msgid "Settings"
 msgstr "Ustawienia"
@@ -725,6 +780,11 @@ msgstr "Nie udało się zsynchronizować postępu — spróbuję ponownie"
 #: app/src/screens/player.rs
 msgid "Now Playing"
 msgstr "Teraz odtwarzane"
+
+#: app/src/screens/player.rs
+#, fuzzy
+msgid "Position"
+msgstr "Opis"
 
 #: app/src/screens/player.rs
 msgid "Previous chapter"
@@ -762,9 +822,57 @@ msgid "{title} · {number} of {total}"
 msgstr "{title} · {number} z {total}"
 
 #. TRANSLATORS: {time} is the time left in the whole book, e.g. "1:05:09".
+#. TRANSLATORS: {time} is a duration in words, e.g. "2 hours 5 minutes".
 #: app/src/screens/player.rs
 msgid "{time} left in book"
 msgstr "{time} do końca książki"
+
+#. TRANSLATORS: Screen-reader name of the speed button; {speed} is e.g. "1.5×".
+#: app/src/screens/player.rs
+#, fuzzy
+msgid "Playback speed: {speed}"
+msgstr "Prędkość odtwarzania"
+
+#: app/src/screens/player.rs
+msgid "On"
+msgstr ""
+
+#. TRANSLATORS: Screen-reader name of a chapter row; {title} is the chapter's name, {start} the time it starts at, e.g. "2:47".
+#: app/src/screens/player.rs
+msgid "{title}, {start}"
+msgstr ""
+
+#. TRANSLATORS: Screen-reader name of the skip-back button; {seconds} is the configured interval.
+#: app/src/screens/player.rs
+msgid "Skip back {seconds} seconds"
+msgstr ""
+
+#. TRANSLATORS: Screen-reader name of the skip-forward button; {seconds} is the configured interval.
+#: app/src/screens/player.rs
+msgid "Skip forward {seconds} seconds"
+msgstr ""
+
+#: app/src/screens/player.rs
+#, fuzzy
+msgid "{count} hour"
+msgid_plural "{count} hours"
+msgstr[0] "{count} nagłówek"
+msgstr[1] "{count} nagłówki"
+msgstr[2] "{count} nagłówków"
+
+#: app/src/screens/player.rs
+#, fuzzy
+msgid "{count} second"
+msgid_plural "{count} seconds"
+msgstr[0] "{count} s"
+msgstr[1] "{count} s"
+msgstr[2] "{count} s"
+
+#. TRANSLATORS: Screen-reader text for the position slider; {elapsed} and {total} are durations in words.
+#: app/src/screens/player.rs
+#, fuzzy
+msgid "{elapsed} of {total}"
+msgstr "{title} · {number} z {total}"
 
 #: app/src/screens/player.rs
 msgid "Can't play this file"
@@ -946,6 +1054,11 @@ msgstr "Wyloguj"
 #: app/src/screens/settings.rs
 msgid "Remove Server"
 msgstr "Usuń serwer"
+
+#: app/src/screens/settings.rs
+#, fuzzy
+msgid "Server options"
+msgstr "Połączenie z serwerem"
 
 #: app/src/screens/settings.rs
 msgid "Switching accounts"
@@ -1212,6 +1325,25 @@ msgstr "Zapisywanie ustawień odtwarzania"
 msgid "Connect"
 msgstr "Połącz"
 
+#: app/src/screens/startup_problem.rs
+msgid "Get the latest version"
+msgstr ""
+
+#: app/src/screens/startup_problem.rs
+#, fuzzy
+msgid "Start over…"
+msgstr "Uruchamianie…"
+
+#. TRANSLATORS: {path} is the folder holding the app's log files.
+#: app/src/screens/startup_problem.rs
+msgid "Logs: {path}"
+msgstr ""
+
+#: app/src/screens/startup_problem.rs
+#, fuzzy
+msgid "Copy details"
+msgstr "Szczegóły książki"
+
 #: app/src/screens/welcome.rs
 msgid "Connect to your Audiobookshelf server"
 msgstr "Połącz się z serwerem Audiobookshelf"
@@ -1227,6 +1359,11 @@ msgstr "Hasło"
 #: app/src/screens/welcome.rs
 msgid "API Key"
 msgstr "Klucz API"
+
+#: app/src/screens/welcome.rs
+#, fuzzy
+msgid "Sign-in method"
+msgstr "Wylogowywanie"
 
 #: app/src/screens/welcome.rs
 msgid "Server URL"
@@ -1391,6 +1528,98 @@ msgstr "Spróbuj ponownie."
 msgid "Something went wrong"
 msgstr "Coś poszło nie tak"
 
+#: app/src/startup.rs
+msgid "This version of Audiobooklet is too old for your library"
+msgstr ""
+
+#: app/src/startup.rs
+#, fuzzy
+msgid "Couldn't update your library to this version"
+msgstr "Nie udało się zaktualizować biblioteki"
+
+#: app/src/startup.rs
+msgid "Your device is out of storage space"
+msgstr ""
+
+#: app/src/startup.rs
+msgid "Audiobooklet can't write to its data folder"
+msgstr ""
+
+#: app/src/startup.rs
+msgid "Audiobooklet's library is in use"
+msgstr ""
+
+#: app/src/startup.rs
+msgid "Audiobooklet's library is damaged"
+msgstr ""
+
+#: app/src/startup.rs
+#, fuzzy
+msgid "Audiobooklet couldn't start"
+msgstr "Audiobooklet"
+
+#: app/src/startup.rs
+msgid ""
+"A newer version of Audiobooklet on this device — an AppImage next to the "
+"installed app, for example — last opened your library and changed it in a "
+"way this version doesn't understand. Update Audiobooklet to the latest "
+"version to keep using it; nothing has been lost."
+msgstr ""
+
+#: app/src/startup.rs
+msgid "Download the latest AppImage and run it instead of this one."
+msgstr ""
+
+#: app/src/startup.rs
+msgid "Update it from your software center, or run “flatpak update”."
+msgstr ""
+
+#: app/src/startup.rs
+msgid ""
+"Update it from your software center or package manager, or download the "
+"latest release."
+msgstr ""
+
+#: app/src/startup.rs
+msgid ""
+"Something went wrong while bringing your library up to this version of the "
+"app. Your library hasn't been deleted. Try again; if it keeps happening, "
+"please report the details below."
+msgstr ""
+
+#: app/src/startup.rs
+msgid ""
+"Audiobooklet needs a little free space to open its library. Free up some "
+"space on the device, then try again."
+msgstr ""
+
+#. TRANSLATORS: {path} is a folder or file on the device, e.g. "/home/user/.local/share/…".
+#: app/src/startup.rs
+msgid ""
+"Audiobooklet needs to write to {path}. Check that it belongs to you and "
+"isn't read-only, then try again."
+msgstr ""
+
+#: app/src/startup.rs
+msgid ""
+"Another copy of Audiobooklet may be running — possibly a different version "
+"of it. Close it, then try again."
+msgstr ""
+
+#. TRANSLATORS: {path} is the database file on the device.
+#: app/src/startup.rs
+msgid ""
+"Its local database, {path}, can't be read. You can start over: the damaged "
+"file is kept next to it, and you sign in again. Downloaded books stay on the "
+"device but need downloading again to appear."
+msgstr ""
+
+#: app/src/startup.rs
+msgid ""
+"Something went wrong while opening the app's local data. Try again; if it "
+"keeps happening, please report the details below."
+msgstr ""
+
 #: app/src/widgets/banner.rs
 msgid "Showing what's saved on this device. Log in again to update it."
 msgstr ""
@@ -1515,6 +1744,11 @@ msgid "Download"
 msgstr "Pobierz"
 
 #: app/src/widgets/download_scope_menu.rs
+#, fuzzy
+msgid "Downloading"
+msgstr "Pobierz"
+
+#: app/src/widgets/download_scope_menu.rs
 msgid "Offline mode is on — turn it off to download"
 msgstr "Tryb offline jest włączony — wyłącz go, aby móc pobierać"
 
@@ -1556,6 +1790,16 @@ msgid "Next chapters"
 msgstr "Następne rozdziały"
 
 #: app/src/widgets/download_scope_menu.rs
+#, fuzzy
+msgid "Fewer chapters"
+msgstr "Otwórz rozdziały"
+
+#: app/src/widgets/download_scope_menu.rs
+#, fuzzy
+msgid "More chapters"
+msgstr "Otwórz rozdziały"
+
+#: app/src/widgets/download_scope_menu.rs
 msgid "Remaining chapters"
 msgstr "Pozostałe rozdziały"
 
@@ -1574,6 +1818,12 @@ msgstr "Wyczyszczono pobrane rozdziały"
 #: app/src/widgets/download_scope_menu.rs
 msgid "Clearing downloaded chapters"
 msgstr "Czyszczenie pobranych rozdziałów"
+
+#. TRANSLATORS: Screen-reader text for a book card's progress bar; {percent} is 0-100.
+#: app/src/widgets/item_card.rs
+#, fuzzy, c-format
+msgid "{percent}% listened"
+msgstr "{percent}%"
 
 #: app/src/widgets/item_card.rs
 msgid "{percent}%"

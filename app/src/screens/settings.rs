@@ -96,7 +96,9 @@ pub fn build(
     let toast_overlay = adw::ToastOverlay::new();
 
     let header = adw::HeaderBar::new();
-    header.set_title_widget(Some(&adw::WindowTitle::new(&tr("Settings"), "")));
+    let settings_title = adw::WindowTitle::new(&tr("Settings"), "");
+    crate::a11y::landing(&settings_title, &tr("Settings"));
+    header.set_title_widget(Some(&settings_title));
 
     let page = adw::PreferencesPage::new();
 
@@ -200,11 +202,13 @@ pub fn build(
 
         let menu_button = gtk4::MenuButton::builder()
             .icon_name("open-menu-symbolic")
+            .tooltip_text(tr("Server options"))
             .css_classes(["flat"])
             .width_request(44)
             .height_request(44)
             .valign(gtk4::Align::Center)
             .build();
+        crate::a11y::name(&menu_button, &tr("Server options"));
         menu_button.set_popover(Some(&gtk4::Popover::builder().child(&menu_box).build()));
         row.add_suffix(&menu_button);
 
@@ -408,6 +412,7 @@ pub fn build(
         .build();
     pause_row.add_suffix(&pause_on_unplug_switch);
     pause_row.set_activatable_widget(Some(&pause_on_unplug_switch));
+    crate::a11y::switch_row(&pause_row, &pause_on_unplug_switch);
     playback_group.add(&pause_row);
 
     let resume_on_replug_switch = gtk4::Switch::new();
@@ -421,6 +426,7 @@ pub fn build(
         .build();
     resume_row.add_suffix(&resume_on_replug_switch);
     resume_row.set_activatable_widget(Some(&resume_on_replug_switch));
+    crate::a11y::switch_row(&resume_row, &resume_on_replug_switch);
     playback_group.add(&resume_row);
 
     // A replug can only ever lift an unplug pause, so with pause-on-unplug off, resume has
@@ -480,6 +486,7 @@ pub fn build(
         .build();
     wifi_only_row.add_suffix(&wifi_only_switch);
     wifi_only_row.set_activatable_widget(Some(&wifi_only_switch));
+    crate::a11y::switch_row(&wifi_only_row, &wifi_only_switch);
     playback_group.add(&wifi_only_row);
 
     let burst_buffering_switch = gtk4::Switch::new();
@@ -489,6 +496,7 @@ pub fn build(
     let burst_buffering_row = adw::ActionRow::builder().title(tr("Buffer streams in bursts")).subtitle(tr(BURST_BUFFERING_SUBTITLE)).build();
     burst_buffering_row.add_suffix(&burst_buffering_switch);
     burst_buffering_row.set_activatable_widget(Some(&burst_buffering_switch));
+    crate::a11y::switch_row(&burst_buffering_row, &burst_buffering_switch);
     playback_group.add(&burst_buffering_row);
 
     // "Low memory mode" lives next to it: the two interact (burst buffering buffers up to 64 MB),
@@ -503,6 +511,7 @@ pub fn build(
         .build();
     low_memory_row.add_suffix(&low_memory_switch);
     low_memory_row.set_activatable_widget(Some(&low_memory_switch));
+    crate::a11y::switch_row(&low_memory_row, &low_memory_switch);
     playback_group.add(&low_memory_row);
     let refresh_burst_hint = {
         let burst_buffering_row = burst_buffering_row.clone();
@@ -676,6 +685,7 @@ pub fn build(
         .build();
     anonymize_logs_row.add_suffix(&anonymize_logs_switch);
     anonymize_logs_row.set_activatable_widget(Some(&anonymize_logs_switch));
+    crate::a11y::switch_row(&anonymize_logs_row, &anonymize_logs_switch);
     diagnostics_group.add(&anonymize_logs_row);
     anonymize_logs_switch.connect_state_set({
         let pool = pool.clone();
@@ -737,6 +747,7 @@ pub fn build(
     content.append(&header);
     content.append(&page);
     toast_overlay.set_child(Some(&content));
+    crate::a11y::focus_landing(&settings_title, &toast_overlay);
 
     SettingsScreen {
         root: toast_overlay.clone().upcast(),
@@ -818,7 +829,8 @@ pub(crate) fn push_about(window: &adw::ApplicationWindow) {
 
     let toast_overlay = adw::ToastOverlay::new();
 
-    let back_button = gtk4::Button::builder().icon_name("go-previous-symbolic").css_classes(["flat"]).build();
+    let back_button = gtk4::Button::builder().icon_name("go-previous-symbolic").tooltip_text(tr("Back")).css_classes(["flat"]).build();
+    crate::a11y::name(&back_button, &tr("Back"));
     back_button.connect_clicked({
         let window = window.clone();
         let shell_root = shell_root.clone();
@@ -826,7 +838,9 @@ pub(crate) fn push_about(window: &adw::ApplicationWindow) {
     });
 
     let header = adw::HeaderBar::new();
-    header.set_title_widget(Some(&adw::WindowTitle::new(&tr("About Audiobooklet"), "")));
+    let about_title = adw::WindowTitle::new(&tr("About Audiobooklet"), "");
+    crate::a11y::landing(&about_title, &tr("About Audiobooklet"));
+    header.set_title_widget(Some(&about_title));
     header.pack_start(&back_button);
 
     let page = adw::PreferencesPage::new();
@@ -867,6 +881,7 @@ pub(crate) fn push_about(window: &adw::ApplicationWindow) {
     content.append(&header);
     content.append(&page);
     toast_overlay.set_child(Some(&content));
+    crate::a11y::focus_landing(&about_title, &toast_overlay);
 
     crate::widgets::swap_content(window, &toast_overlay);
 }

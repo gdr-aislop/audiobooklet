@@ -9,7 +9,7 @@ use std::rc::Rc;
 
 use abs_storage::models::Item;
 
-use crate::i18n::tr_args;
+use crate::i18n::{tr, tr_args};
 use crate::player::PlayRequest;
 use crate::widgets::cover_image::CoverImage;
 
@@ -62,6 +62,7 @@ pub fn build_deferred(size: i32, item: &Item, subtitle: &str, on_open: &Rc<dyn F
         .margin_end(4)
         .visible(is_downloaded)
         .build();
+    crate::a11y::name(&downloaded_badge, &tr("Downloaded"));
     cover_overlay.add_overlay(&downloaded_badge);
 
     // `max_width_chars(1)` matters regardless of `wrap_title` — it caps the label's own *natural
@@ -127,6 +128,18 @@ pub fn build_deferred(size: i32, item: &Item, subtitle: &str, on_open: &Rc<dyn F
     // its container. Confirmed live: without this, a single-column Library grid rendered every
     // card's cover as a wide, squashed rectangle instead of a `size`x`size` square.
     let button = gtk4::Button::builder().css_classes(["flat"]).hexpand(false).halign(gtk4::Align::Center).child(&card).build();
+    // A screen reader reads the title as the card's name and the rest after it; GTK 4.8 takes
+    // nothing from the labels inside a button by itself.
+    crate::a11y::name(&button, &item.title);
+    let mut details = vec![subtitle.to_string()];
+    if let Some(fraction) = progress {
+        // TRANSLATORS: Screen-reader text for a book card's progress bar; {percent} is 0-100.
+        details.push(tr_args("{percent}% listened", &[("percent", &format!("{:.0}", fraction.clamp(0.0, 1.0) * 100.0))]));
+    }
+    if is_downloaded {
+        details.push(tr("Downloaded"));
+    }
+    crate::a11y::describe(&button, &details.join(". "));
     let request = PlayRequest { item_id: item.id.clone(), title: item.title.clone(), author: item.author.clone() };
     let on_open = on_open.clone();
     button.connect_clicked(move |_| on_open(request.clone()));

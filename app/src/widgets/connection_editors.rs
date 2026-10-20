@@ -110,6 +110,10 @@ pub(crate) fn show_headers_editor(window: &adw::ApplicationWindow, initial_text:
     });
     let content = add_dialog_content(&dialog, &tr("Specify headers for server connections — one \"Name: Value\" pair per line. They're attached to every request to this server."));
     let text_view = gtk4::TextView::builder().wrap_mode(gtk4::WrapMode::WordChar).height_request(120).monospace(true).build();
+    // The instructions above the text are its name for a screen reader.
+    if let Some(instructions) = crate::widgets::find_descendant::<gtk4::Label>(content.upcast_ref()) {
+        crate::a11y::labelled_by(&text_view, &instructions);
+    }
     text_view.buffer().set_text(initial_text);
     content.append(&gtk4::ScrolledWindow::builder().child(&text_view).hexpand(true).vexpand(true).build());
     content.append(&error_label);

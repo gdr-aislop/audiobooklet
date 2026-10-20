@@ -26,7 +26,7 @@ use sqlx::SqlitePool;
 use abs_core::streaming::locate_track;
 use abs_storage::AppPaths;
 
-use crate::i18n::tr;
+use crate::i18n::{tr, tr_args};
 use crate::widgets::cover_image::CoverImage;
 
 /// The URL/URI to actually load for a track: a local `file://` path when it's been verifiably
@@ -3786,17 +3786,33 @@ impl PlayerController {
     }
 }
 
+/// The mini bar's "open the full player" callback slot — see `MiniPlayerBar::set_on_open`.
+type OpenPlayerSlot = std::rc::Rc<std::cell::RefCell<Option<std::rc::Rc<dyn Fn()>>>>;
+
 pub struct MiniPlayerBar {
     pub root: gtk4::Widget,
     pub controller: PlayerController,
+    /// What Enter or space on the focused card runs — the same "open the full player" the tap
+    /// and swipe-up gesture trigger, set by whoever installs that gesture (`set_on_open`).
+    on_open: OpenPlayerSlot,
     #[cfg(test)]
     pub hooks: MiniPlayerHooks,
+}
+
+impl MiniPlayerBar {
+    /// Makes Enter or space on the focused card do what tapping it does. A keyboard user has no
+    /// other way back to the full player.
+    pub fn set_on_open(&self, open: impl Fn() + 'static) {
+        *self.on_open.borrow_mut() = Some(std::rc::Rc::new(open));
+    }
 }
 
 #[cfg(test)]
 pub struct MiniPlayerHooks {
     pub bar: gtk4::Box,
     pub card: gtk4::Box,
+    /// The keyboard's and a screen reader's card: the focusable wrapper around `card`.
+    pub focus_card: gtk4::Overlay,
     pub cover_picture: gtk4::Picture,
     pub title_label: gtk4::Label,
     pub author_label: gtk4::Label,
@@ -3813,6 +3829,7 @@ struct MiniBarWidgets {
     bar: gtk4::Box,
     #[cfg(test)]
     card: gtk4::Box,
+    focus_card: gtk4::Overlay,
     cover: CoverImage,
     title_label: gtk4::Label,
     author_label: gtk4::Label,
@@ -3874,6 +3891,7 @@ fn build_mini_bar_widgets() -> MiniBarWidgets {
     // glance to know something needs attention, with "tap to open the full player" (already the
     // mini bar's own established gesture) as the way to actually see why.
     let error_icon = gtk4::Image::builder().icon_name("dialog-warning-symbolic").tooltip_text(tr("Playback error — tap for details")).visible(false).build();
+    crate::a11y::name(&error_icon, &tr("Playback error — tap for details"));
 
     let content_row = gtk4::Box::builder()
         .orientation(gtk4::Orientation::Horizontal)
@@ -3901,14 +3919,22 @@ fn build_mini_bar_widgets() -> MiniBarWidgets {
         .build();
     card.append(&content_row);
     card.append(&progress);
+    crate::a11y::name(&progress, &tr("Progress"));
+    // For the keyboard and a screen reader the card is a button ("Now playing: …", see the
+    // applier below) that Enter opens the player from. A `GtkBox` hands Tab straight to its
+    // children, so the Tab stop is this plain wrapper around it (a `GtkOverlay` draws nothing
+    // and takes focus before its children). A tap still goes through the gesture the owner
+    // installs on `bar`; neither widget takes focus on a tap.
+    let focus_card = gtk4::Overlay::builder().child(&card).accessible_role(gtk4::AccessibleRole::Button).focusable(true).build();
 
     let bar = gtk4::Box::builder().orientation(gtk4::Orientation::Vertical).css_classes(["mini-player"]).visible(false).build();
-    bar.append(&card);
+    bar.append(&focus_card);
 
     MiniBarWidgets {
         bar,
         #[cfg(test)]
         card,
+        focus_card,
         cover,
         title_label,
         author_label,
@@ -3934,18 +3960,25 @@ fn mini_bar_snapshot_applier(widgets: &MiniBarWidgets) -> impl Fn(&PlayerSnapsho
     let progress = widgets.progress.clone();
     let cover = widgets.cover.clone();
     let error_icon = widgets.error_icon.clone();
+    let play_button = widgets.play_button.clone();
+    let card = widgets.focus_card.clone();
     move |snapshot: &PlayerSnapshot| {
         let Some(bar) = bar.upgrade() else { return false };
         bar.set_visible(true);
         title_label.set_label(&snapshot.title);
+        let spoken = match &snapshot.author {
+            // TRANSLATORS: Screen-reader name of the mini player's card; {title} is the book, {author} its author.
+            Some(author) => tr_args("Now playing: {title}, {author}", &[("title", &snapshot.title), ("author", author)]),
+            // TRANSLATORS: Screen-reader name of the mini player's card for a book without an author; {title} is the book.
+            None => tr_args("Now playing: {title}", &[("title", &snapshot.title)]),
+        };
+        crate::a11y::name_if_changed(&card, &spoken);
         author_label.set_label(snapshot.author.as_deref().unwrap_or(""));
         author_label.set_visible(snapshot.author.is_some());
         cover.set_path(snapshot.cover_path.as_deref());
-        play_icon.set_icon_name(Some(if snapshot.shows_pause_button() {
-            "media-playback-pause-symbolic"
-        } else {
-            "media-playback-start-symbolic"
-        }));
+        let shows_pause = snapshot.shows_pause_button();
+        play_icon.set_icon_name(Some(if shows_pause { "media-playback-pause-symbolic" } else { "media-playback-start-symbolic" }));
+        crate::a11y::name_if_changed(&play_button, &if shows_pause { tr("Pause") } else { tr("Play") });
         error_icon.set_visible(snapshot.last_error.is_some());
         let fraction = if snapshot.duration_seconds > 0.0 {
             (snapshot.position_seconds / snapshot.duration_seconds).clamp(0.0, 1.0)
@@ -3962,14 +3995,26 @@ fn mini_bar_from_widgets(widgets: MiniBarWidgets, controller: PlayerController) 
         let controller = controller.clone();
         move |_| controller.toggle_play_pause()
     });
+    let on_open: OpenPlayerSlot = Default::default();
+    crate::a11y::activate_on_enter(&widgets.focus_card, {
+        let on_open = on_open.clone();
+        move || {
+            let open = on_open.borrow().clone();
+            if let Some(open) = open {
+                open();
+            }
+        }
+    });
 
     MiniPlayerBar {
         root: widgets.bar.clone().upcast(),
         controller,
+        on_open,
         #[cfg(test)]
         hooks: MiniPlayerHooks {
             bar: widgets.bar,
             card: widgets.card,
+            focus_card: widgets.focus_card,
             cover_picture: widgets.cover.picture().clone(),
             title_label: widgets.title_label,
             author_label: widgets.author_label,
@@ -6977,17 +7022,18 @@ pub(crate) mod tests {
         let hooks = screen.test_hooks();
         let seeks = state.borrow().seek_calls.len();
 
-        for fraction in [0.1, 0.15, 0.2, 0.25, 0.3] {
-            hooks.scrubber.set_value(fraction);
+        // The knob's value is seconds into the book (see the screen's scrubber).
+        for seconds in [10.0, 15.0, 20.0, 25.0, 30.0] {
+            hooks.scrubber.set_value(seconds);
         }
         assert_eq!(hooks.elapsed_label.label(), "0:30", "the time follows the knob while it moves");
         pump_until(|| false, Duration::from_millis(600));
         let sought: Vec<Duration> = state.borrow().seek_calls[seeks..].to_vec();
         assert_eq!(sought.len(), 1, "one seek per drag: {sought:?}");
         assert!((sought[0].as_secs_f64() - 30.0).abs() < 0.01, "to where the knob settled: {sought:?}");
-        assert!((hooks.scrubber.value() - 0.3).abs() < 0.02, "the knob stays where it was left, got {}", hooks.scrubber.value());
+        assert!((hooks.scrubber.value() - 30.0).abs() < 2.0, "the knob stays where it was left, got {}", hooks.scrubber.value());
 
-        hooks.scrubber.set_value(1.0);
+        hooks.scrubber.set_value(100.0);
         pump_until(|| false, Duration::from_millis(600));
         let snapshot = controller.snapshot().unwrap();
         assert!((snapshot.position_seconds - 99.0).abs() < 0.5, "a seek to the end stops short of it, got {}", snapshot.position_seconds);

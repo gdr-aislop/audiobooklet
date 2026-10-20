@@ -114,13 +114,18 @@ pub fn build(
     let on_open_downloads: Rc<dyn Fn()> = Rc::new(on_open_downloads);
 
     let header = adw::HeaderBar::new();
-    let back_button = gtk4::Button::from_icon_name("go-previous-symbolic");
+    let back_button = gtk4::Button::builder().icon_name("go-previous-symbolic").tooltip_text(tr("Back")).build();
+    crate::a11y::name(&back_button, &tr("Back"));
     back_button.connect_clicked({
         let on_back = on_back.clone();
         move |_| on_back()
     });
     header.pack_start(&back_button);
-    header.set_title_widget(Some(&adw::WindowTitle::new("", "")));
+    // Visually empty; for a screen reader it's the landing heading, named after the book (with
+    // its author, length and series as the description) once the metadata loads below.
+    let window_title = adw::WindowTitle::new("", "");
+    crate::a11y::landing(&window_title, ""); // i18n: ignore — the book's title, set below
+    header.set_title_widget(Some(&window_title));
 
     // Set below, once `toast_overlay`/`options_menu` exist — `header.pack_end` doesn't care when
     // it's called relative to `header`'s own construction, only that it happens before `build`
@@ -161,9 +166,12 @@ pub fn build(
     let title_label = gtk4::Label::builder().wrap(true).max_width_chars(1).justify(gtk4::Justification::Center).css_classes(["title-2"]).margin_top(18).selectable(true).build();
     // Selectable so the title can be copied (long-press or drag, then Copy), but never focusable:
     // a selectable label is focusable by default, and the first focusable label in a freshly
-    // shown page gets its whole text selected — the title would open highlighted. Must come after
-    // `selectable`, which turns focusability back on.
+    // shown page gets its whole text selected — the title would open highlighted. `can_focus`,
+    // not `focusable`: GTK 4.8's `gtk_label_focus` grabs focus (which fails on an unfocusable
+    // label) and still returns TRUE, so with only `focusable(false)` Tab stopped dead on the
+    // header's last button — `can_focus(false)` keeps GTK from asking the label at all.
     title_label.set_focusable(false);
+    title_label.set_can_focus(false);
     let author_label = gtk4::Label::builder().wrap(true).max_width_chars(1).justify(gtk4::Justification::Center).css_classes(["dim-label"]).margin_top(4).visible(false).build();
     // One widget, whose *text* changes in place from the plain series name (Pass 1, local) to
     // "Name, N/M" (Pass 2, once the network call resolves) — never swapped for a different widget
@@ -176,6 +184,7 @@ pub fn build(
     let duration_label = gtk4::Label::builder().css_classes(["caption", "dim-label"]).margin_top(4).build();
 
     let progress_bar = gtk4::ProgressBar::builder().margin_top(10).visible(false).build();
+    crate::a11y::name(&progress_bar, &tr("Progress"));
 
     // Invisible (but holding its place, so nothing shifts) and untappable until Pass 1 below has
     // read this book's progress: shown straight away it read "Play" for a frame or two before
@@ -209,8 +218,11 @@ pub fn build(
         .margin_top(4)
         .build();
     let more_button = gtk4::Button::builder().label(tr("more")).css_classes(["flat"]).halign(gtk4::Align::Start).visible(false).build();
+    crate::a11y::expanded(&more_button, false);
     let description_section = gtk4::Box::builder().orientation(gtk4::Orientation::Vertical).margin_top(16).visible(false).build();
-    description_section.append(&gtk4::Label::builder().label(tr("Description")).xalign(0.0).css_classes(["heading"]).build());
+    let description_heading = gtk4::Label::builder().label(tr("Description")).xalign(0.0).css_classes(["heading"]).build();
+    crate::a11y::heading(&description_heading, 2);
+    description_section.append(&description_heading);
     description_section.append(&description_label);
     description_section.append(&more_button);
 
@@ -222,6 +234,7 @@ pub fn build(
         move |_| {
             let now_expanded = !expanded.get();
             expanded.set(now_expanded);
+            crate::a11y::expanded(&more_button, now_expanded);
             if now_expanded {
                 description_label.set_lines(-1);
                 description_label.set_ellipsize(gtk4::pango::EllipsizeMode::None);
@@ -241,8 +254,12 @@ pub fn build(
     chapters_legend.append(&gtk4::Image::builder().icon_name("object-select-symbolic").css_classes(["dim-label"]).build());
     chapters_legend.append(&gtk4::Label::builder().label(tr("downloaded")).css_classes(["caption", "dim-label"]).build());
     let chapters_list = gtk4::ListBox::builder().selection_mode(gtk4::SelectionMode::None).css_classes(["boxed-list"]).build();
+    // One Tab stop for the whole list (a long book has dozens of chapters); Up/Down move inside.
+    crate::a11y::focus_group(&chapters_list);
     let chapters_section = gtk4::Box::builder().orientation(gtk4::Orientation::Vertical).margin_top(16).visible(false).build();
-    chapters_section.append(&gtk4::Label::builder().label(tr("Chapters")).xalign(0.0).css_classes(["heading"]).margin_bottom(4).build());
+    let chapters_heading = gtk4::Label::builder().label(tr("Chapters")).xalign(0.0).css_classes(["heading"]).margin_bottom(4).build();
+    crate::a11y::heading(&chapters_heading, 2);
+    chapters_section.append(&chapters_heading);
     chapters_section.append(&chapters_legend);
     chapters_section.append(&chapters_list);
 
@@ -264,8 +281,13 @@ pub fn build(
     // swipe-up opens the full player, reusing the shell's own gesture decision exactly.
     let mini_bar = crate::player::build_mini_bar_for(controller.clone());
     let mini_bar_gesture = gtk4::GestureDrag::new();
+    let on_open_player = Rc::new(on_open_player);
+    mini_bar.set_on_open({
+        let on_open_player = on_open_player.clone();
+        move || on_open_player()
+    });
     mini_bar_gesture.connect_drag_end({
-        let on_open_player = Rc::new(on_open_player);
+        let on_open_player = on_open_player.clone();
         move |gesture, _, _| {
             if let Some((offset_x, offset_y)) = gesture.offset() {
                 if crate::screens::main_window::mini_bar_gesture_should_open(offset_x, offset_y) {
@@ -281,6 +303,7 @@ pub fn build(
     root.append(&scroller);
     root.append(&mini_bar.root);
     toast_overlay.set_child(Some(&root));
+    crate::a11y::focus_landing(&window_title, &toast_overlay);
 
     // The download menu is built right away (synchronously, below), not once chapters resolve —
     // `download_scope_menu::build` asks its `chapter_ranges`/`current_chapter_index` fresh on
@@ -459,6 +482,7 @@ pub fn build(
         let progress_seconds_cell = progress_seconds_cell.clone();
         let download_menu = download_menu.clone();
         let cover = cover.clone();
+        let window_title = window_title.clone();
         async move {
             let server_id = server.id.clone();
             let account_id = account.id.clone();
@@ -469,6 +493,7 @@ pub fn build(
             // its item is synced), rather than leaving the page blank.
             let item = abs_storage::repo::items::get(&pool, &server_id, &item_id).await.ok();
             title_label.set_label(item.as_ref().map(|i| i.title.as_str()).unwrap_or(&item_id));
+            crate::a11y::name(&window_title, item.as_ref().map(|i| i.title.as_str()).unwrap_or(&item_id));
             if let Some(item) = &item {
                 if let Some(author) = &item.author {
                     let subtitle = match item.narrator.as_deref().filter(|n| !n.is_empty()) {
@@ -495,6 +520,11 @@ pub fn build(
                     });
                 }
                 duration_label.set_label(&format_duration(item.duration_seconds));
+                let about: Vec<String> = [author_label.label().to_string(), series_button_label.label().to_string(), format_duration(item.duration_seconds)]
+                    .into_iter()
+                    .filter(|part| !part.is_empty())
+                    .collect();
+                crate::a11y::describe(&window_title, &about.join(" · "));
                 cover.set_path(item.cover_cache_path.as_deref().map(std::path::Path::new));
                 *cover_title.borrow_mut() = item.title.clone();
                 if let Some(description) = item.description.as_deref().filter(|d| !d.is_empty()) {
@@ -729,6 +759,7 @@ fn refresh_chapter_rows(
         if is_current {
             row.add_css_class("heading");
         }
+        crate::a11y::selected(&row, is_current);
         if is_downloaded {
             row.add_suffix(&gtk4::Image::builder().icon_name("object-select-symbolic").css_classes(["dim-label"]).tooltip_text(tr("Downloaded")).build());
         }
@@ -1046,6 +1077,55 @@ pub(crate) mod tests {
             )
             .mount(mock_server)
             .await;
+    }
+
+    /// Not a `#[test]` itself — see `main.rs`'s `mod tests`. The Tab order for a keyboard user:
+    /// from the header into the page (the selectable title used to trap it: Tab from the More
+    /// button did nothing), one stop for the whole chapter list, and the landing heading named
+    /// after the book with its author and length as the description.
+    pub(crate) fn run_tab_walks_from_the_header_through_the_page(runtime: &tokio::runtime::Runtime) {
+        use crate::a11y::tests::{description_of, focused_name, press_tab};
+        let mock_server = runtime.block_on(MockServer::start());
+        runtime.block_on(mock_item_with_chapters(&mock_server, "item-1", 3600.0, &[("Intro", 0.0, 60.0), ("Chapter One", 60.0, 1800.0), ("Chapter Two", 1800.0, 3600.0)]));
+
+        let pool = runtime.block_on(crate::test_support::pool());
+        let (server, account) = runtime.block_on(account_and_server(&pool, &mock_server.uri()));
+        runtime.block_on(insert_synced_item(&pool, &server.id, "item-1", "Project Hail Mary", Some("Andy Weir"), Some("Ray Porter"), Some("A lone astronaut."), 3600.0));
+
+        let session = abs_core::auth::Session::new(pool.clone(), &server, &account);
+        let screen = build(pool.clone(), server, account, session, test_download_manager(pool.clone()), test_controller(pool.clone()), "item-1".to_string(), |_, _| {}, || {}, || {}, |_| {}, || {});
+        let hooks = screen.test_hooks();
+        let window = gtk4::Window::builder().child(&screen.root).default_width(360).default_height(720).build();
+        window.present();
+        pump_until(|| hooks.play_button.opacity() == 1.0 && hooks.chapters_list.row_at_index(2).is_some(), Duration::from_secs(10));
+        pump_until(|| focused_name(&window) == "Project Hail Mary", Duration::from_secs(5));
+        assert_eq!(focused_name(&window), "Project Hail Mary", "lands on the heading named after the book");
+        let landing = GtkWindowExt::focus(&window).unwrap();
+        assert_eq!(description_of(&landing).as_deref(), Some("Andy Weir · Narrated by Ray Porter · 1.0h"));
+
+        hooks.back_button.grab_focus();
+        let mut walk = vec![focused_name(&window)];
+        for _ in 0..8 {
+            window.child_focus(gtk4::DirectionType::TabForward);
+            walk.push(focused_name(&window));
+        }
+        let position = |name: &str| walk.iter().position(|stop| stop == name).unwrap_or_else(|| panic!("{name} is a Tab stop: {walk:?}"));
+        assert!(position("Back") < position("Project Hail Mary") && position("Project Hail Mary") < position("More"), "{walk:?}");
+        assert!(position("More") < position("Play") && position("Play") < position("Download"), "Tab leaves the header for the page: {walk:?}");
+        assert!(!walk.iter().any(|stop| stop == "GtkLabel"), "the title label is never focused: {walk:?}");
+        assert!(walk.iter().any(|stop| stop == "Intro"), "the chapter list is reached: {walk:?}");
+
+        // Inside the list, Tab leaves it in one press; Shift+Tab too.
+        hooks.chapters_list.row_at_index(0).unwrap().grab_focus();
+        assert_eq!(focused_name(&window), "Intro");
+        assert!(press_tab(&hooks.chapters_list, false), "handled");
+        let after = GtkWindowExt::focus(&window).unwrap();
+        assert!(!after.is_ancestor(&hooks.chapters_list), "one Tab leaves the list, got {}", focused_name(&window));
+        hooks.chapters_list.row_at_index(1).unwrap().grab_focus();
+        assert!(press_tab(&hooks.chapters_list, true));
+        let before = GtkWindowExt::focus(&window).unwrap();
+        assert!(!before.is_ancestor(&hooks.chapters_list), "one Shift+Tab leaves the list, got {}", focused_name(&window));
+        window.close();
     }
 
     /// Not a `#[test]` itself — see `main.rs`'s `mod tests`. Metadata renders from the local cache

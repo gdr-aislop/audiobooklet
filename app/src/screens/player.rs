@@ -41,6 +41,8 @@ pub struct TestHooks {
     pub author_label: gtk4::Label,
     pub chapter_label: gtk4::Label,
     pub play_button: gtk4::Button,
+    pub skip_back_button: gtk4::Button,
+    pub skip_forward_button: gtk4::Button,
     pub previous_chapter_button: gtk4::Button,
     pub next_chapter_button: gtk4::Button,
     pub collapse_button: gtk4::Button,
@@ -94,7 +96,8 @@ pub fn build(
         }
     });
     let header = adw::HeaderBar::new();
-    let collapse_button = gtk4::Button::from_icon_name("go-down-symbolic");
+    let collapse_button = gtk4::Button::builder().icon_name("go-down-symbolic").tooltip_text(tr("Collapse player")).build();
+    crate::a11y::name(&collapse_button, &tr("Collapse player"));
     collapse_button.connect_clicked({
         let controller = controller.clone();
         let on_collapse = on_collapse.clone();
@@ -162,6 +165,11 @@ pub fn build(
     let scrubber = gtk4::Scale::builder().orientation(gtk4::Orientation::Horizontal).hexpand(true).build();
     scrubber.set_range(0.0, 1.0);
     scrubber.set_draw_value(false);
+    // The knob's value is seconds into the span it covers (`scrub_range`): a screen reader then
+    // reads whole seconds, and the arrow keys seek 15 s, Page Up/Down a minute (with no
+    // increments set, as before, the keys did nothing at all).
+    scrubber.set_increments(15.0, 60.0);
+    crate::a11y::name(&scrubber, &tr("Position"));
     let elapsed_label = gtk4::Label::builder().xalign(0.0).css_classes(["caption", "dim-label"]).build();
     let remaining_label = gtk4::Label::builder().xalign(1.0).css_classes(["caption", "dim-label"]).build();
     // With chapters, the scrubber and the two labels above cover the current chapter, so the
@@ -223,6 +231,12 @@ pub fn build(
     for button in [&previous_chapter, &skip_back, &skip_forward, &next_chapter] {
         button.set_valign(gtk4::Align::Center);
     }
+    // Icon-only buttons have no name for a screen reader (see `a11y`); the skip pair's names
+    // carry the configured intervals (the screen is rebuilt whenever it opens, so a Settings
+    // change reaches them).
+    crate::a11y::name(&previous_chapter, &tr("Previous chapter"));
+    crate::a11y::name(&next_chapter, &tr("Next chapter"));
+    name_skip_buttons(&skip_back, &skip_forward, controller.skip_intervals());
 
     // Secondary row: speed, sleep timer, chapters. `AdwBottomSheet`/popover-menu widgets from
     // libadwaita 1.4+ are unavailable at this crate's v1.2 ceiling, so every one of these is a
@@ -234,8 +248,12 @@ pub fn build(
     let speed_popover_box = gtk4::Box::builder().orientation(gtk4::Orientation::Vertical).build();
     let speed_popover = gtk4::Popover::builder().child(&speed_popover_box).build();
     let speed_button = gtk4::MenuButton::builder().child(&speed_label).tooltip_text(tr("Playback speed")).popover(&speed_popover).build();
+    crate::a11y::name(&speed_button, &tr("Playback speed"));
+    let mut speed_buttons: Vec<(f64, gtk4::Button)> = Vec::new();
     for speed in SPEED_PRESETS {
         let button = gtk4::Button::builder().label(format_speed(speed)).css_classes(["flat"]).build();
+        // One choice of several: a radio button, the current one checked (see `update`).
+        crate::a11y::radio_option(&button);
         button.connect_clicked({
             let controller = controller.clone();
             let speed_popover = speed_popover.clone();
@@ -245,6 +263,7 @@ pub fn build(
             }
         });
         speed_popover_box.append(&button);
+        speed_buttons.push((speed, button));
     }
 
     let sleep_timer_popover_box = gtk4::Box::builder().orientation(gtk4::Orientation::Vertical).build();
@@ -254,6 +273,7 @@ pub fn build(
         .tooltip_text(tr("Sleep timer"))
         .popover(&sleep_timer_popover)
         .build();
+    crate::a11y::name(&sleep_timer_button, &tr("Sleep timer"));
     type SleepTimerAction = Box<dyn Fn(&PlayerController)>;
     let sleep_timer_options: [(String, SleepTimerAction); 5] = [
         (tr("Off"), Box::new(|c: &PlayerController| c.cancel_sleep_timer())),
@@ -262,17 +282,25 @@ pub fn build(
         (ntr("{count} minute", "{count} minutes", 45), Box::new(|c: &PlayerController| c.set_sleep_timer_minutes(45))),
         (tr("End of chapter"), Box::new(|c: &PlayerController| c.set_sleep_timer_end_of_chapter())),
     ];
-    for (label, apply) in sleep_timer_options {
-        let button = gtk4::Button::builder().label(label).css_classes(["flat"]).build();
+    // Which option was chosen last, for the screen reader: the snapshot only says whether a
+    // timer runs, and this names it on the button and checks it in the list. Index 0 is "Off".
+    let sleep_timer_choice: Rc<std::cell::Cell<Option<usize>>> = Rc::new(std::cell::Cell::new(None));
+    let mut sleep_timer_buttons: Vec<(String, gtk4::Button)> = Vec::new();
+    for (index, (label, apply)) in sleep_timer_options.into_iter().enumerate() {
+        let button = gtk4::Button::builder().label(&label).css_classes(["flat"]).build();
+        crate::a11y::radio_option(&button);
         button.connect_clicked({
             let controller = controller.clone();
             let sleep_timer_popover = sleep_timer_popover.clone();
+            let sleep_timer_choice = sleep_timer_choice.clone();
             move |_| {
+                sleep_timer_choice.set(Some(index));
                 apply(&controller);
                 sleep_timer_popover.popdown();
             }
         });
         sleep_timer_popover_box.append(&button);
+        sleep_timer_buttons.push((label, button));
     }
 
     let chapters_list = gtk4::ListBox::builder().selection_mode(gtk4::SelectionMode::None).css_classes(["boxed-list"]).build();
@@ -293,12 +321,15 @@ pub fn build(
         .width_request(260)
         .child(&chapters_box)
         .build();
+    // The list, not the scrolled window around it, is what a keyboard lands on.
+    chapters_scroller.set_focusable(false);
     let chapters_popover = gtk4::Popover::builder().child(&chapters_scroller).build();
     let chapters_button = gtk4::MenuButton::builder()
         .icon_name("view-list-symbolic")
         .tooltip_text(tr("Chapters"))
         .popover(&chapters_popover)
         .build();
+    crate::a11y::name(&chapters_button, &tr("Chapters"));
 
     let secondary_row = gtk4::Box::builder().orientation(gtk4::Orientation::Horizontal).spacing(18).halign(gtk4::Align::Center).margin_top(10).build();
     secondary_row.append(&speed_button);
@@ -332,6 +363,8 @@ pub fn build(
     root.append(&header);
     root.append(error_banner.widget());
     root.append(&content_scroller);
+    // A screen reader arrives on play/pause, which says the state and the chapter.
+    crate::a11y::focus_landing(&play_button, &root);
 
     // Swipe-down-to-collapse — the counterpart to the mini bar's own swipe-up-to-open gesture
     // (see `main_window`'s `mini_bar_gesture_should_open`). Added directly on `root`, the same
@@ -528,6 +561,7 @@ pub fn build(
             let opening = chapter_scroll.begin();
             if let Some(current) = rebuild_chapters_list(&chapters_list, &chapters, position, &[]) {
                 chapter_scroll.scroll_to(opening, current);
+                focus_chapter_row(&chapters_list, current);
             }
 
             // Offline markers need an async DB read (`complete_inos_for_item`), unlike everything
@@ -548,12 +582,16 @@ pub fn build(
                     let markers = abs_core::download_tracks::chapter_offline_markers_for_item(&pool, &server_id, &item_id, &chapter_ranges).await.unwrap_or_default();
                     let position = controller.snapshot().map(|s| s.position_seconds).unwrap_or(0.0);
                     // New rows again: put the current one back in view, unless the list has been
-                    // scrolled by hand since (the lookup can take a while on a phone).
+                    // scrolled by hand since (the lookup can take a while on a phone). Keyboard
+                    // focus goes back to the row it was on, wherever that was.
                     let left_alone = chapter_scroll.left_alone(opening);
+                    let focused = chapters_list.focus_child().and_downcast::<gtk4::ListBoxRow>().map(|row| row.index());
                     if let Some(current) = rebuild_chapters_list(&chapters_list, &chapters, position, &markers) {
                         if left_alone {
                             chapter_scroll.scroll_to(opening, current);
                         }
+                        // (Or to the chapter playing, when the lookup beat the first focus.)
+                        focus_chapter_row(&chapters_list, focused.map_or(current, |index| index as usize));
                     }
                 });
             }
@@ -596,12 +634,13 @@ pub fn build(
             if updating_from_snapshot.get() {
                 return;
             }
-            let fraction = scale.value();
             let (start, end) = scrub_span.get();
             if end <= start {
                 return;
             }
-            set_time_labels(&elapsed_label, &remaining_label, fraction * (end - start), end - start);
+            let into = scale.value().clamp(0.0, end - start);
+            set_time_labels(&elapsed_label, &remaining_label, into, end - start);
+            crate::a11y::describe_if_changed(scale, &spoken_position(into, end - start, None));
             if let Some(source) = pending_scrub.borrow_mut().take() {
                 source.remove();
             }
@@ -611,8 +650,8 @@ pub fn build(
                 move || {
                     // Fired: the source is gone, so nothing may `remove()` it any more.
                     pending_scrub.borrow_mut().take();
-                    tracing::info!(fraction, start, end, "scrub: seeking");
-                    controller.seek_to_seconds(start + fraction * (end - start));
+                    tracing::info!(into, start, end, "scrub: seeking");
+                    controller.seek_to_seconds(start + into);
                 }
             });
             *pending_scrub.borrow_mut() = Some(source);
@@ -639,6 +678,12 @@ pub fn build(
         let speed_button = speed_button.clone();
         let cover = cover.clone();
         let error_banner = error_banner.clone();
+        let play_button = play_button.clone();
+        let speed_buttons = speed_buttons.clone();
+        let last_speed = std::cell::Cell::new(f64::NAN);
+        let sleep_timer_choice = sleep_timer_choice.clone();
+        let sleep_timer_buttons = sleep_timer_buttons.clone();
+        let last_sleep_timer = std::cell::Cell::new(None::<Option<usize>>);
         move |snapshot: &PlayerSnapshot| {
             // `update` runs 4 times a second, so only touch the subtitle when it changes — which
             // also makes it follow offline mode being switched, with no listener of its own.
@@ -661,27 +706,35 @@ pub fn build(
                         chapter_label.set_label(&text);
                     }
                     chapter_label.set_visible(true);
+                    // On the play/pause button, where a screen-reader user rests, so a chapter
+                    // change is spoken (there are no live regions in GTK 4.8).
+                    crate::a11y::describe_if_changed(&play_button, &text);
                 }
-                None => chapter_label.set_visible(false),
+                None => {
+                    chapter_label.set_visible(false);
+                    crate::a11y::describe_if_changed(&play_button, ""); // i18n: ignore — clears the description
+                }
             }
             cover.set_path(snapshot.cover_path.as_deref());
-            play_icon.set_icon_name(Some(if snapshot.shows_pause_button() {
-                "media-playback-pause-symbolic"
-            } else {
-                "media-playback-start-symbolic"
-            }));
+            let shows_pause = snapshot.shows_pause_button();
+            play_icon.set_icon_name(Some(if shows_pause { "media-playback-pause-symbolic" } else { "media-playback-start-symbolic" }));
+            crate::a11y::name_if_changed(&play_button, &if shows_pause { tr("Pause") } else { tr("Play") });
 
             // While the listener is still moving the knob, it, its span and the time labels are
             // theirs.
             if pending_scrub.borrow().is_none() {
                 let (start, end) = scrub_range(snapshot);
                 scrub_span.set((start, end));
-                let fraction = if end > start { ((snapshot.position_seconds - start) / (end - start)).clamp(0.0, 1.0) } else { 0.0 };
+                let span = (end - start).max(0.0);
+                let into = (snapshot.position_seconds - start).clamp(0.0, span);
                 updating_from_snapshot.set(true);
-                scrubber.set_value(fraction);
+                // `set_range` clamps the value and may emit `value-changed`, hence inside the guard.
+                scrubber.set_range(0.0, span.max(1.0));
+                scrubber.set_value(into);
                 updating_from_snapshot.set(false);
-                let into = (snapshot.position_seconds - start).clamp(0.0, (end - start).max(0.0));
                 set_time_labels(&elapsed_label, &remaining_label, into, end - start);
+                let book_left = snapshot.chapter.as_ref().map(|_| (snapshot.duration_seconds - snapshot.position_seconds).max(0.0));
+                crate::a11y::describe_if_changed(&scrubber, &spoken_position(into, span, book_left));
             }
             // A book that hasn't loaded (or failed to start) has no length yet: "0:00 / -0:00"
             // would just be noise. Hidden by opacity, so the row keeps its height.
@@ -714,10 +767,26 @@ pub fn build(
             sleep_timer_button.set_sensitive(!snapshot.is_loading);
 
             speed_label.set_label(&format_speed(snapshot.speed));
+            // TRANSLATORS: Screen-reader name of the speed button; {speed} is e.g. "1.5×".
+            crate::a11y::name_if_changed(&speed_button, &tr_args("Playback speed: {speed}", &[("speed", &format_speed(snapshot.speed))]));
+            if last_speed.replace(snapshot.speed) != snapshot.speed {
+                for (preset, button) in &speed_buttons {
+                    crate::a11y::set_option_checked(button, (preset - snapshot.speed).abs() < 1e-6);
+                }
+            }
             if snapshot.sleep_timer_active {
                 sleep_timer_button.add_css_class("accent");
             } else {
                 sleep_timer_button.remove_css_class("accent");
+            }
+            // A timer set from the keyboard shortcut has no chosen option: "On" and nothing checked.
+            let choice = if snapshot.sleep_timer_active { sleep_timer_choice.get().filter(|&index| index != 0) } else { Some(0) };
+            if last_sleep_timer.replace(Some(choice)) != Some(choice) {
+                for (index, (_, button)) in sleep_timer_buttons.iter().enumerate() {
+                    crate::a11y::set_option_checked(button, Some(index) == choice);
+                }
+                let state = choice.map_or_else(|| tr("On"), |index| sleep_timer_buttons[index].0.clone());
+                crate::a11y::describe_if_changed(&sleep_timer_button, &state);
             }
 
             match &snapshot.last_error {
@@ -751,6 +820,8 @@ pub fn build(
             author_label,
             chapter_label,
             play_button,
+            skip_back_button: skip_back,
+            skip_forward_button: skip_forward,
             previous_chapter_button: previous_chapter,
             next_chapter_button: next_chapter,
             collapse_button,
@@ -900,7 +971,21 @@ fn build_chapter_row(chapter: &ChapterInfo, position: f64, is_downloaded: bool) 
         title_label.add_css_class("heading");
     }
 
-    gtk4::ListBoxRow::builder().child(&row_box).build()
+    let row = gtk4::ListBoxRow::builder().child(&row_box).build();
+    // TRANSLATORS: Screen-reader name of a chapter row; {title} is the chapter's name, {start} the time it starts at, e.g. "2:47".
+    crate::a11y::name(&row, &tr_args("{title}, {start}", &[("title", &chapter.title), ("start", &format_hms(chapter.start_seconds))]));
+    if is_downloaded {
+        crate::a11y::describe(&row, &tr("Downloaded"));
+    }
+    crate::a11y::selected(&row, is_current);
+    row
+}
+
+/// Puts keyboard focus on the current chapter's row once the popover has finished taking its
+/// own, so a screen reader opens the list on the chapter playing.
+fn focus_chapter_row(chapters_list: &gtk4::ListBox, current: usize) {
+    let Some(row) = chapters_list.row_at_index(current as i32) else { return };
+    glib::idle_add_local_once(move || crate::a11y::focus_now(&row));
 }
 
 /// Formats a playback speed for the speed button/popover — trims a trailing `.0` (`"1×"` reads
@@ -933,6 +1018,45 @@ fn undo_position_toast(controller: &crate::player::PlayerController, title: &str
         controller.save_progress_now();
     });
     toast
+}
+
+/// The skip buttons' accessible names: "Skip back 15 seconds", from the configured intervals.
+fn name_skip_buttons(skip_back: &gtk4::Button, skip_forward: &gtk4::Button, (back, forward): (f64, f64)) {
+    // TRANSLATORS: Screen-reader name of the skip-back button; {seconds} is the configured interval.
+    crate::a11y::name_if_changed(skip_back, &tr_args("Skip back {seconds} seconds", &[("seconds", &format!("{back:.0}"))]));
+    // TRANSLATORS: Screen-reader name of the skip-forward button; {seconds} is the configured interval.
+    crate::a11y::name_if_changed(skip_forward, &tr_args("Skip forward {seconds} seconds", &[("seconds", &format!("{forward:.0}"))]));
+}
+
+/// A duration in words, for a screen reader: "1 hour 4 minutes", "45 seconds". Seconds only
+/// show under a minute, so the text changes once a minute while playing.
+pub(crate) fn format_spoken_duration(total_seconds: f64) -> String {
+    let total = total_seconds.max(0.0).round() as u32;
+    let (hours, minutes, seconds) = (total / 3600, (total % 3600) / 60, total % 60);
+    let mut parts = Vec::new();
+    if hours > 0 {
+        parts.push(ntr("{count} hour", "{count} hours", hours));
+    }
+    if minutes > 0 {
+        parts.push(ntr("{count} minute", "{count} minutes", minutes));
+    }
+    if parts.is_empty() {
+        parts.push(ntr("{count} second", "{count} seconds", seconds));
+    }
+    parts.join(" ")
+}
+
+/// What the scrubber says: "1 hour 4 minutes of 7 hours 2 minutes", plus the time left in the
+/// book when the scrubber covers a chapter of it.
+fn spoken_position(into: f64, span: f64, book_left: Option<f64>) -> String {
+    // TRANSLATORS: Screen-reader text for the position slider; {elapsed} and {total} are durations in words.
+    let mut text = tr_args("{elapsed} of {total}", &[("elapsed", &format_spoken_duration(into)), ("total", &format_spoken_duration(span))]);
+    if let Some(left) = book_left {
+        text.push_str(". ");
+        // TRANSLATORS: {time} is a duration in words, e.g. "2 hours 5 minutes".
+        text.push_str(&tr_args("{time} left in book", &[("time", &format_spoken_duration(left))]));
+    }
+    text
 }
 
 pub(crate) fn format_hms(total_seconds: f64) -> String {
@@ -1420,14 +1544,108 @@ pub(crate) mod tests {
         pump_until(|| position() >= 4.0 && hooks.elapsed_label.label() == "0:00", Duration::from_secs(5));
         assert_eq!(hooks.elapsed_label.label(), "0:00", "the time counts from the chapter's start");
         assert_eq!(hooks.remaining_label.label(), "-0:06", "and down to the chapter's end");
-        assert!(hooks.scrubber.value() < 0.05, "the knob starts again at the left, got {}", hooks.scrubber.value());
+        assert!(hooks.scrubber.value() < 0.3, "the knob starts again at the left, got {}", hooks.scrubber.value());
         assert!(hooks.book_left_label.is_visible());
         assert_eq!(hooks.book_left_label.label(), "0:06 left in book");
 
-        hooks.scrubber.set_value(0.5);
+        hooks.scrubber.set_value(3.0);
         assert_eq!(hooks.elapsed_label.label(), "0:03", "the time follows the knob within the chapter");
         pump_until(|| (position() - 7.0).abs() < 0.5, Duration::from_secs(5));
         assert!((position() - 7.0).abs() < 0.5, "halfway along the bar is halfway through Chapter One (7s), got {}", position());
+
+        controller.stop();
+    }
+
+    /// Not a `#[test]` itself — see `main.rs`'s `mod tests`. What a screen reader gets from the
+    /// player: named transport buttons, a play/pause name that follows the state with the
+    /// chapter line as its description, a position slider in seconds that says its time in
+    /// words, the speed on its button with the current preset checked, the sleep timer's state,
+    /// and the chapters list opening on the current chapter.
+    pub(crate) fn run_controls_are_named_for_screen_readers(runtime: &tokio::runtime::Runtime) {
+        use crate::a11y::tests::{description_of, is_checked, label_of, role_of};
+        let mock_server = runtime.block_on(wiremock::MockServer::start());
+        runtime.block_on(crate::player::tests::mock_playable_item_with_chapters(
+            &mock_server,
+            "item-1",
+            10,
+            &[("Intro", 0.0, 4.0), ("Chapter One", 4.0, 10.0)],
+        ));
+
+        let pool = runtime.block_on(crate::test_support::pool());
+        let (server, account) = runtime.block_on(account_and_server(&pool, &mock_server.uri()));
+        runtime.block_on(insert_synced_item(&pool, &server.id, "item-1", "Test Item"));
+
+        let controller = crate::player::PlayerController::new(pool.clone(), crate::test_support::test_paths(), test_backend(), |_| {});
+        controller.start(
+            abs_core::auth::Session::new(pool.clone(), &server, &account),
+            PlayRequest { item_id: "item-1".to_string(), title: "Chaptered Book".to_string(), author: None },
+            1.0,
+        );
+        pump_until(|| !controller.chapters().is_empty(), Duration::from_secs(10));
+        pump_until(|| controller.snapshot().unwrap().position_seconds > 0.0, Duration::from_secs(5));
+
+        let screen = build(pool.clone(), controller.clone(), test_download_manager(pool.clone()), || {}, || {});
+        let hooks = screen.test_hooks();
+        let window = gtk4::Window::builder().default_width(360).default_height(720).child(&screen.root).build();
+        window.present();
+        pump_until(|| window.is_mapped(), Duration::from_secs(5));
+
+        assert_eq!(label_of(&hooks.collapse_button).as_deref(), Some("Collapse player"));
+        assert_eq!(label_of(&hooks.skip_back_button).as_deref(), Some("Skip back 15 seconds"));
+        assert_eq!(label_of(&hooks.skip_forward_button).as_deref(), Some("Skip forward 30 seconds"));
+        assert_eq!(label_of(&hooks.previous_chapter_button).as_deref(), Some("Previous chapter"));
+        assert_eq!(label_of(&hooks.next_chapter_button).as_deref(), Some("Next chapter"));
+        assert_eq!(label_of(&hooks.chapters_button).as_deref(), Some("Chapters"));
+
+        pump_until(|| label_of(&hooks.play_button).as_deref() == Some("Pause"), Duration::from_secs(5));
+        assert_eq!(description_of(&hooks.play_button).as_deref(), Some("Intro · 1 of 2"), "the chapter line rides on play/pause");
+        controller.pause();
+        pump_until(|| label_of(&hooks.play_button).as_deref() == Some("Play"), Duration::from_secs(5));
+
+        assert_eq!(label_of(&hooks.scrubber).as_deref(), Some("Position"));
+        let adjustment = hooks.scrubber.adjustment();
+        assert_eq!((adjustment.step_increment(), adjustment.page_increment()), (15.0, 60.0), "arrow keys seek 15 s");
+        assert_eq!(adjustment.upper(), 4.0, "the slider covers the chapter, in seconds");
+        let spoken = description_of(&hooks.scrubber).unwrap_or_default();
+        assert!(spoken.ends_with("of 4 seconds. 9 seconds left in book") || spoken.ends_with("of 4 seconds. 10 seconds left in book"), "{spoken}");
+        hooks.scrubber.set_value(3.0);
+        assert_eq!(description_of(&hooks.scrubber).as_deref(), Some("3 seconds of 4 seconds"), "the knob's own moves are spoken at once");
+        // The knob's move seeks once it has settled; let that land before seeking elsewhere.
+        pump_until(|| (controller.snapshot().unwrap().position_seconds - 3.0).abs() < 0.2, Duration::from_secs(5));
+
+        assert_eq!(label_of(&hooks.speed_button).as_deref(), Some("Playback speed: 1.0×"));
+        let preset = |text: &str| crate::test_support::find_button_with_label(hooks.speed_popover_box.upcast_ref(), text).unwrap();
+        assert_eq!(role_of(&preset("1.5×")), gtk4::AccessibleRole::Radio);
+        assert!(is_checked(&preset("1.0×")) && !is_checked(&preset("1.5×")));
+        controller.set_speed(1.5);
+        pump_until(|| label_of(&hooks.speed_button).as_deref() == Some("Playback speed: 1.5×"), Duration::from_secs(5));
+        assert!(!is_checked(&preset("1.0×")) && is_checked(&preset("1.5×")));
+
+        assert_eq!(label_of(&hooks.sleep_timer_button).as_deref(), Some("Sleep timer"));
+        assert_eq!(description_of(&hooks.sleep_timer_button).as_deref(), Some("Off"));
+        let option = |text: &str| crate::test_support::find_button_with_label(hooks.sleep_timer_popover_box.upcast_ref(), text).unwrap();
+        assert!(is_checked(&option("Off")));
+        option("15 minutes").emit_clicked();
+        pump_until(|| description_of(&hooks.sleep_timer_button).as_deref() == Some("15 minutes"), Duration::from_secs(5));
+        assert!(is_checked(&option("15 minutes")) && !is_checked(&option("Off")));
+
+        controller.seek_to_seconds(5.0);
+        pump_until(|| (controller.snapshot().unwrap().position_seconds - 5.0).abs() < 0.2, Duration::from_secs(5));
+        assert!(!hooks.chapters_scroller.is_focusable(), "the popover opens on the list, not on a scroll pane");
+        hooks.chapters_popover.popup();
+        pump_until(|| hooks.chapters_list.row_at_index(1).is_some_and(|row| row.has_focus()), Duration::from_secs(3));
+        let current = hooks.chapters_list.row_at_index(1).unwrap();
+        assert!(
+            current.has_focus(),
+            "the chapter playing has keyboard focus; focus is on {} (list focus child: {:?}, popover visible: {}, position {:?})",
+            crate::a11y::tests::focused_name(&window),
+            hooks.chapters_list.focus_child().and_downcast::<gtk4::ListBoxRow>().map(|row| row.index()),
+            hooks.chapters_popover.is_visible(),
+            controller.snapshot().map(|s| (s.position_seconds, s.is_playing, s.is_loading))
+        );
+        assert_eq!(label_of(&current).as_deref(), Some("Chapter One, 0:04"));
+        assert!(!window.gets_focus_visible(), "no focus ring for a sighted user");
+        hooks.chapters_popover.popdown();
 
         controller.stop();
     }

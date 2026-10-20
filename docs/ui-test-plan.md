@@ -1634,6 +1634,110 @@ button restoring the shell.
 
 ---
 
+## 18. Accessibility with a screen reader (AX) — ✅ implemented
+
+Orca 46 (the GNOME screen reader) plus a keyboard, on a desktop or a phone with a keyboard
+attached. "Orca says" below is what the speech log (`orca --debug`, lines marked
+`SPEECH OUTPUT`) shows; approximate wording is fine, missing names and silence are not. Run the
+touch checks at the end on the phone: none of this may change what a sighted user sees or does.
+Design: `docs/design/ui-spec.md` §7.
+
+- [ ] **AX-1 — Sign-in fields.** Cold start, then Tab through the sign-in form.
+      *Expected:* on start Orca says "Connect to your Audiobookshelf server heading", nothing
+      else; Tab reaches "Password radio button selected" / "API Key radio button"; the three
+      fields say "Server URL text", "Username text", "Password text" when entered; "Remember
+      password check box checked" is one stop; "Advanced" says expanded/collapsed as it opens.
+      (Typed password characters are still echoed — a toolkit limit, see §7.)
+- [ ] **AX-2 — Sign-in failure.** Enter a wrong password and press Enter.
+      *Expected:* "Connecting…" is spoken, then the alert "Unable to sign in. Check your
+      username and password and try again" takes focus and is read; Tab back to Username reads
+      "invalid entry". A right password lands on "Home heading".
+- [ ] **AX-3 — Home.** Tab through Home.
+      *Expected:* "Offline mode check box not checked", "More button", then "Continue
+      Listening button" / "Recently Added button" with their descriptions, one stop per shelf
+      whose cards read "{title}, {author} · {length}" (Left/Right move between covers, Tab
+      leaves the shelf), then "Your Libraries". The avatar is not a stop. Toggling offline mode
+      says "checked".
+- [ ] **AX-4 — Library.** Alt+2, then Tab.
+      *Expected:* "Library heading" on arrival (not the search entry); the chips read "All radio
+      button selected, 1 of 4" and the row is one stop; in grid view each card is one stop named
+      after its book; "List view check box checked" for the toggle. Ctrl+F, type a word: the
+      count "N books" is spoken as the results change.
+- [ ] **AX-5 — Book Details.** Open a book, then Tab from the top.
+      *Expected:* arrival reads the book's title as a heading with author, length and series;
+      Tab goes Back → title → More → Play → Download → "more" → the chapter list, which is one
+      stop (Up/Down move between chapters, the current one "selected"); Shift+Tab goes back the
+      same way. The title text is never a stop and never selected.
+- [ ] **AX-6 — Player transport.** Play a chaptered book.
+      *Expected:* arrival reads "Pause button, {chapter} · N of M"; Space (or Enter on it) flips
+      it to "Play"; "Skip back 15 seconds", "Skip forward 30 seconds", "Previous chapter", "Next
+      chapter", "Collapse player" are all named; a chapter change is spoken while resting on
+      play/pause.
+- [ ] **AX-7 — Seek slider.** Tab to the slider, press Right and Page Down.
+      *Expected:* "Position slider" with the seconds, then "N minutes of M minutes. T left in
+      book"; Right moves 15 s, Page Down a minute, each spoken.
+- [ ] **AX-8 — Speed, sleep timer, chapters.** Open each popover from the keyboard.
+      *Expected:* "Playback speed: 1.0× button"; presets are radio buttons with the current one
+      selected and the button's name follows a choice; "Sleep timer button, Off", then "15
+      minutes" after choosing it; the chapters list opens with focus on the chapter playing
+      ("{title}, {start} selected"), not on a scroll pane.
+- [ ] **AX-9 — Download options.** Open the Download popover.
+      *Expected:* "Current chapter button, ≈ size", "Next chapters button", "Fewer chapters" /
+      "More chapters" buttons describing "N chapters" as they step, "Remaining chapters",
+      "Entire book"; the Download button reads Downloading / Downloaded as its state changes.
+- [ ] **AX-10 — Mini player.** Collapse the player (Esc), Tab to the bottom bar.
+      *Expected:* "Now playing: {title}, {author} button" and "Pause"/"Play button"; Enter on
+      the card reopens the player (arrives on play/pause); back on the shell the tab's heading
+      is read again.
+- [ ] **AX-11 — Settings and Connection.** Alt+4, Tab through; open the account row.
+      *Expected:* "Settings heading" on arrival; each switch row is one stop reading its state;
+      "Default speed combo box. 1.0×. Speed every book starts at." (the value before the
+      subtitle); "Server options button"; on the Connection page "Connection heading", "Back
+      button", "About this connection button"; in Custom Headers the text view is named by
+      its instructions.
+- [ ] **AX-12 — Touch unchanged (phone).** With no screen reader: tap and swipe the mini bar,
+      drag the scrubber, swipe the shelves and chip rows sideways, long-press the Book Details
+      title to copy it, tap tabs, open every popover.
+      *Expected:* identical to before; no focus ring appears anywhere on launch, on opening the
+      player or on a tab tap; the on-screen keyboard opens only when a text field is tapped.
+
+**Pass summary (2026-10-20, Orca 46.1 under Xvfb/openbox, GTK 4.14.5, debug build against a
+local server):** AX-1 to AX-11 pass, with these notes. Typed password characters are echoed
+(AX-1, expected). "Connecting…" is heard when Connect itself is activated; after Enter in a
+field the request usually fails or succeeds before Orca gets to it (AX-2). The current chapter
+row reads "not selected" in the chapters list even though it has focus (AX-8; the list's own
+selection state wins on GTK 4.14). While playing, the focused slider also speaks GTK's numeric
+value every second (AX-7). AX-12 is the phone check, still to be done on the Librem 5.
+
+## 19. Startup problems and quitting (ST) — ✅ implemented
+
+Design: `docs/design/ui-spec.md` §5 "Startup problems". Each case starts the app on a prepared
+profile; the expected page replaces what used to be a silent exit.
+
+- [ ] **ST-1 — Library from a newer version.** In a working profile, add a row to the
+      database's migrations table (`INSERT INTO _sqlx_migrations (version, description, success,
+      checksum, execution_time) VALUES (99, 'newer', 1, x'00', 0)`) — or run an older release on
+      a profile a newer one has used — and start the app.
+      *Expected:* "This version of Audiobooklet is too old for your library", update advice
+      matching how it's installed, "Get the latest version" opens the releases page, no "Try
+      again" and no "Start over". The library is untouched (remove the row: the app opens).
+- [ ] **ST-2 — Library in use.** Hold the database with another process (`sqlite3 db.sqlite3`,
+      `BEGIN EXCLUSIVE;`) and start the app; wait ~15 s.
+      *Expected:* "Audiobooklet's library is in use". End the other process, tap "Try again":
+      the app opens in the same window.
+- [ ] **ST-3 — Damaged library.** Overwrite the database with random bytes and start the app.
+      *Expected:* "Audiobooklet's library is damaged" with "Start over…"; confirming moves the
+      file to `db.sqlite3.damaged-<time>` (and its `-wal`/`-shm`), and the app opens on sign-in.
+- [ ] **ST-4 — Quitting while playing.** Play a book, then quit by the close button, Ctrl+Q,
+      Ctrl+C in the terminal and `kill` (SIGTERM).
+      *Expected:* exit code 0 each time and no "panic" line in the log (0.9.10 and earlier
+      panicked here with "cannot access a Thread Local Storage value during or after
+      destruction").
+
+**Pass summary (2026-10-20, debug build under Xvfb/openbox, local server):** ST-1 to ST-4 pass.
+For ST-4, the build without the exit fix panicked on the close button and on Ctrl+Q with the
+same message as the field report; the fixed build exits with code 0 all four ways.
+
 ## Regression quick-pass (15 minutes)
 
 When touching the player or sync code, at minimum re-run: WT-6, NT-2, HT-3, MP-1–MP-5, FP-2,

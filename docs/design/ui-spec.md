@@ -619,6 +619,26 @@ in the mockup itself as OS-rendered, not app UI, since there's nothing here for 
   when it is switched on plays to its end (its connection is already open). The login and
   add-server screens aren't affected.
 
+- **Startup problems:** when the app's local data can't be opened, a page says why instead of
+  the app exiting silently (`app/src/startup.rs`, `screens/startup_problem.rs`): a warning
+  `AdwStatusPage` with a title, what to do, the buttons below, and "Details" (the raw error and
+  the log folder, selectable, with "Copy details"). It is an alert a screen reader lands on.
+
+  | Problem | Recognised by | Says | Offers |
+  |---|---|---|---|
+  | Too old for the library | a migration in the database this build doesn't have (a newer copy — e.g. an AppImage next to the installed package — opened it) | update; how depends on AppImage / Flatpak / package | "Get the latest version" (releases page), Quit |
+  | Upgrade failed | any other migration failure | your library isn't deleted; try again, report if it repeats | Try again, Quit |
+  | Out of space | `SQLITE_FULL`, `StorageFull` | free up space | Try again, Quit |
+  | Can't write | `SQLITE_PERM`/`READONLY`/`CANTOPEN`, permission denied, read-only filesystem | the folder must be yours and writable | Try again, Quit |
+  | In use | `SQLITE_BUSY`/`LOCKED`, a pool timeout | close the other copy | Try again, Quit |
+  | Damaged | `SQLITE_CORRUPT`/`NOTADB`, **and** a separate read-only `quick_check` failing | the file can't be read | Try again, Start over… (confirmed; the file is kept, renamed `.damaged-<time>`), Quit |
+  | Other | anything else | try again, report if it repeats | Try again, Quit |
+
+  A database that is newer than the app, or whose upgrade failed, is never called damaged and is
+  never offered "Start over": its data is fine. "Try again" reopens everything and opens the app
+  in the same window once it works. The same page replaces the app when a database read fails
+  while the main window is (re)built.
+
 ## 6. Keyboard shortcuts
 
 This is a phone-first app, but it runs on desktop GNOME and on phones with attached keyboards
@@ -674,3 +694,68 @@ Rules, each of which constrains future changes to this table:
   player screen is about menu *buttons* (plain `GtkMenuButton`/`GtkButton` there), not about
   accelerators, which in GTK only target actions — so this is an idiom extension, not a
   contradiction.
+
+## 7. Accessibility (screen readers)
+
+The app is used with Orca (the GNOME screen reader) and a keyboard — on a desktop, or on a
+phone with a keyboard attached. Everything in this section is invisible to a sighted touch
+user: accessible names, roles and states change only what Orca says, keyboard focus moves
+without a focus ring (GTK draws one only after a key press), and nothing here changes a
+widget's look, size or touch behaviour. `app/src/a11y.rs` holds the helpers; its module doc
+explains the mechanics.
+
+The crate builds against GTK 4.8 (PureOS Crimson's), which sets what's possible: there are no
+live regions and no `announce`, so the only way to speak a change is on the control that has
+focus, and a `GtkToggleButton` has no toggle role, so toggles are exposed as radio buttons or
+switches instead.
+
+Rules, each of which constrains future changes:
+
+- **Every icon-only control has a name — the same text as its tooltip.** GTK 4.8 takes no name
+  from an icon, so a tooltip alone reads as "GtkImage push button". `a11y::name` sets both
+  sides of that; a new icon button without it is a bug.
+- **A composite control is named after its content.** A book card is named after the title,
+  with author, length, progress and "Downloaded" as its description; a download option after
+  its label; a list row after its text. GTK 4.8 takes nothing from the labels inside a button.
+- **Feedback goes on the control the user rests on.** Orca speaks a changed accessible name or
+  description only for the focused widget, so: play/pause is named "Play" or "Pause" as it
+  flips, with the chapter line as its description (a chapter change is spoken there); the
+  position slider's value is seconds into the chapter and its description says the time in
+  words; the speed button names the current speed; the sleep-timer button describes its state;
+  the search entry describes the number of books found; a combo row describes its value. Only
+  real changes are set (`name_if_changed`), never every tick.
+- **Exclusive choices are radio buttons, standalone toggles are switches.** Category chips, the
+  sign-in method, speed presets and sleep-timer options are radio buttons with the current one
+  checked ("Author radio button selected, 2 of 4"); offline mode and grid/list are switches
+  ("Offline mode check box checked"). A row holding a `GtkSwitch` is itself the switch and the
+  only Tab stop (`a11y::switch_row`); an expander exposes its expanded state.
+- **Every screen has a landing.** When a screen or tab appears, focus moves to a heading named
+  for it (`a11y::landing` + `focus_landing`): "Home", "Library", "Downloads", "Settings", the
+  book's title on Book Details (its author, length and series as the description), "Connect to
+  your Audiobookshelf server" on sign-in, and play/pause on the player. The landing never
+  overrides a text entry the user is already typing in (Ctrl+F's search focus is kept), and
+  **no screen or tab change ever focuses a text entry by itself**: on Phosh that opens the
+  on-screen keyboard.
+- **Failures take focus.** The error banner is an alert named by its headline and description;
+  a failed sign-in moves focus to it, and marks the wrong fields invalid with the banner as
+  their error message. "Connecting…" is spoken as the Connect button's name changes, before it
+  goes insensitive.
+- **Fewer Tab stops, same reach.** A cover shelf, a chip row and a chapter list are one Tab stop
+  each (`a11y::focus_group`): Tab and Shift+Tab leave them, the arrow keys move inside. A grid
+  card is one stop (the flow box's own cell around it is skipped). The mini player's card is a
+  focusable button named "Now playing: {title}, {author}" that Enter or space opens the player
+  from — the only keyboard way back to it; its tap and swipe gesture is untouched.
+- **Entry rows name their text.** `adw::EntryRow`'s inner `GtkText` has no accessible role in
+  GTK 4.8, so focus entering it is silent; `a11y::text_field` gives it the row's title.
+- **Keyboard-only mechanics never run on touch.** Focus groups and Enter-to-activate are key
+  controllers; a `GtkBox` made focusable never takes focus on a tap.
+
+Known limits of the toolkit, not fixed here: Orca still echoes the characters typed into the
+password row (only a real `GtkPasswordEntry` gets the password role; Orca's key echo can be
+turned off); a combo row's popup opens on its first option rather than the current one
+(libadwaita 1.2); the position slider speaks its numeric value (seconds) before the time in
+words, since GTK ≤ 4.14 never exports a slider's value text; toasts aren't spoken.
+
+How to check: `docs/ui-test-plan.md` §18 walks every screen with Orca; the GTK scenarios named
+`*_for_screen_readers`, `*_tab_walks_*`, `*_one_tab_stop` and `a11y_helpers` assert the names,
+roles, states and Tab order without a screen reader.

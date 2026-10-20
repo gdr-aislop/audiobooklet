@@ -18,6 +18,8 @@ use crate::i18n::tr;
 #[derive(Clone)]
 pub struct ErrorBanner {
     revealer: gtk4::Revealer,
+    /// The card inside the revealer: the alert a screen reader is moved to.
+    content: gtk4::Box,
     label: gtk4::Label,
     description: gtk4::Label,
     bottom_row: gtk4::Box,
@@ -103,6 +105,7 @@ impl ErrorBanner {
             move |toggle| {
                 details_revealer.set_reveal_child(toggle.is_active());
                 toggle.set_label(&if toggle.is_active() { tr("Hide details") } else { tr("Details") });
+                crate::a11y::expanded(toggle, toggle.is_active());
             }
         });
 
@@ -116,6 +119,8 @@ impl ErrorBanner {
         text.append(&bottom_row);
         text.append(&details_revealer);
 
+        // For a screen reader the whole card is one alert, named by its headline and
+        // description, that `focus` can move to (there are no live regions in GTK 4.8).
         let content = gtk4::Box::builder()
             .orientation(gtk4::Orientation::Horizontal)
             .spacing(10)
@@ -124,9 +129,12 @@ impl ErrorBanner {
             .margin_start(12)
             .margin_end(12)
             .css_classes(["app-banner"])
+            .accessible_role(gtk4::AccessibleRole::Alert)
+            .focusable(true)
             .build();
         content.append(&icon);
         content.append(&text);
+        crate::a11y::expanded(&details_toggle, false);
 
         let revealer = gtk4::Revealer::builder()
             .transition_type(gtk4::RevealerTransitionType::SlideDown)
@@ -134,7 +142,7 @@ impl ErrorBanner {
             .reveal_child(false)
             .build();
 
-        Self { revealer, label, description, bottom_row, details_toggle, details_label, action_button, offers_login: Default::default() }
+        Self { revealer, content, label, description, bottom_row, details_toggle, details_label, action_button, offers_login: Default::default() }
     }
 
     /// The bottom row only takes space when it has something in it. `get_visible` (the
@@ -150,12 +158,42 @@ impl ErrorBanner {
     /// The short, bold headline — what happened, in a few words.
     pub fn set_title(&self, text: &str) {
         self.label.set_label(text);
+        self.refresh_name();
+    }
+
+    /// The alert's accessible name: headline and description in one, what Orca reads when
+    /// [`focus`](Self::focus) lands here.
+    fn refresh_name(&self) {
+        let mut spoken = self.label.label().to_string();
+        if self.description.is_visible() {
+            spoken.push_str(". ");
+            spoken.push_str(&self.description.label());
+        }
+        crate::a11y::name(&self.content, &spoken);
+    }
+
+    /// Moves keyboard focus to the banner so a screen reader speaks it — once the revealer has
+    /// shown it, hence the idle. A sighted user sees no focus ring.
+    pub fn focus(&self) {
+        let content = self.content.clone();
+        adw::glib::idle_add_local_once(move || crate::a11y::focus_now(&content));
     }
 
     /// The optional dimmed line under the headline — what still works, or what to do.
     pub fn set_description(&self, text: Option<&str>) {
         self.description.set_label(text.unwrap_or(""));
         self.description.set_visible(text.is_some_and(|t| !t.is_empty()));
+        self.refresh_name();
+    }
+
+    #[cfg(test)]
+    pub fn has_focus(&self) -> bool {
+        self.content.has_focus()
+    }
+
+    #[cfg(test)]
+    pub fn accessible_name(&self) -> Option<String> {
+        crate::a11y::tests::label_of(&self.content)
     }
 
     #[cfg(test)]

@@ -6,4 +6,5 @@ pub mod library;
 pub mod main_window;
 pub mod player;
 pub mod settings;
+pub mod startup_problem;
 pub mod welcome;
