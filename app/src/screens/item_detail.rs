@@ -170,6 +170,7 @@ pub fn build(
     // not `focusable`: GTK 4.8's `gtk_label_focus` grabs focus (which fails on an unfocusable
     // label) and still returns TRUE, so with only `focusable(false)` Tab stopped dead on the
     // header's last button — `can_focus(false)` keeps GTK from asking the label at all.
+    title_label.set_focusable(false);
     title_label.set_can_focus(false);
     let author_label = gtk4::Label::builder().wrap(true).max_width_chars(1).justify(gtk4::Justification::Center).css_classes(["dim-label"]).margin_top(4).visible(false).build();
     // One widget, whose *text* changes in place from the plain series name (Pass 1, local) to
