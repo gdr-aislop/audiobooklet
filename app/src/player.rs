@@ -26,7 +26,7 @@ use sqlx::SqlitePool;
 use abs_core::streaming::locate_track;
 use abs_storage::AppPaths;
 
-use crate::i18n::tr;
+use crate::i18n::{tr, tr_args};
 use crate::widgets::cover_image::CoverImage;
 
 /// The URL/URI to actually load for a track: a local `file://` path when it's been verifiably
@@ -3786,11 +3786,25 @@ impl PlayerController {
     }
 }
 
+/// The mini bar's "open the full player" callback slot — see `MiniPlayerBar::set_on_open`.
+type OpenPlayerSlot = std::rc::Rc<std::cell::RefCell<Option<std::rc::Rc<dyn Fn()>>>>;
+
 pub struct MiniPlayerBar {
     pub root: gtk4::Widget,
     pub controller: PlayerController,
+    /// What Enter or space on the focused card runs — the same "open the full player" the tap
+    /// and swipe-up gesture trigger, set by whoever installs that gesture (`set_on_open`).
+    on_open: OpenPlayerSlot,
     #[cfg(test)]
     pub hooks: MiniPlayerHooks,
+}
+
+impl MiniPlayerBar {
+    /// Makes Enter or space on the focused card do what tapping it does. A keyboard user has no
+    /// other way back to the full player.
+    pub fn set_on_open(&self, open: impl Fn() + 'static) {
+        *self.on_open.borrow_mut() = Some(std::rc::Rc::new(open));
+    }
 }
 
 #[cfg(test)]
@@ -3811,7 +3825,6 @@ pub struct MiniPlayerHooks {
 /// `PlayerController::add_listener`) is identical between the two.
 struct MiniBarWidgets {
     bar: gtk4::Box,
-    #[cfg(test)]
     card: gtk4::Box,
     cover: CoverImage,
     title_label: gtk4::Label,
@@ -3892,6 +3905,9 @@ fn build_mini_bar_widgets() -> MiniBarWidgets {
     let progress = gtk4::ProgressBar::builder().margin_start(10).margin_end(10).margin_top(8).margin_bottom(10).build();
 
     // The margins leave room for the card's shadow, which would otherwise be clipped.
+    // For the keyboard and a screen reader the card is a button ("Now playing: …", see the
+    // applier below) that Enter opens the player from; a tap still goes through the gesture its
+    // owner installs on `bar`, and a `GtkBox` never takes focus on a tap.
     let card = gtk4::Box::builder()
         .orientation(gtk4::Orientation::Vertical)
         .css_classes(["card"])
@@ -3899,16 +3915,18 @@ fn build_mini_bar_widgets() -> MiniBarWidgets {
         .margin_end(6)
         .margin_top(6)
         .margin_bottom(6)
+        .accessible_role(gtk4::AccessibleRole::Button)
+        .focusable(true)
         .build();
     card.append(&content_row);
     card.append(&progress);
+    crate::a11y::name(&progress, &tr("Progress"));
 
     let bar = gtk4::Box::builder().orientation(gtk4::Orientation::Vertical).css_classes(["mini-player"]).visible(false).build();
     bar.append(&card);
 
     MiniBarWidgets {
         bar,
-        #[cfg(test)]
         card,
         cover,
         title_label,
@@ -3936,10 +3954,18 @@ fn mini_bar_snapshot_applier(widgets: &MiniBarWidgets) -> impl Fn(&PlayerSnapsho
     let cover = widgets.cover.clone();
     let error_icon = widgets.error_icon.clone();
     let play_button = widgets.play_button.clone();
+    let card = widgets.card.clone();
     move |snapshot: &PlayerSnapshot| {
         let Some(bar) = bar.upgrade() else { return false };
         bar.set_visible(true);
         title_label.set_label(&snapshot.title);
+        let spoken = match &snapshot.author {
+            // TRANSLATORS: Screen-reader name of the mini player's card; {title} is the book, {author} its author.
+            Some(author) => tr_args("Now playing: {title}, {author}", &[("title", &snapshot.title), ("author", author)]),
+            // TRANSLATORS: Screen-reader name of the mini player's card for a book without an author; {title} is the book.
+            None => tr_args("Now playing: {title}", &[("title", &snapshot.title)]),
+        };
+        crate::a11y::name_if_changed(&card, &spoken);
         author_label.set_label(snapshot.author.as_deref().unwrap_or(""));
         author_label.set_visible(snapshot.author.is_some());
         cover.set_path(snapshot.cover_path.as_deref());
@@ -3962,10 +3988,21 @@ fn mini_bar_from_widgets(widgets: MiniBarWidgets, controller: PlayerController) 
         let controller = controller.clone();
         move |_| controller.toggle_play_pause()
     });
+    let on_open: OpenPlayerSlot = Default::default();
+    crate::a11y::activate_on_enter(&widgets.card, {
+        let on_open = on_open.clone();
+        move || {
+            let open = on_open.borrow().clone();
+            if let Some(open) = open {
+                open();
+            }
+        }
+    });
 
     MiniPlayerBar {
         root: widgets.bar.clone().upcast(),
         controller,
+        on_open,
         #[cfg(test)]
         hooks: MiniPlayerHooks {
             bar: widgets.bar,
@@ -6977,17 +7014,18 @@ pub(crate) mod tests {
         let hooks = screen.test_hooks();
         let seeks = state.borrow().seek_calls.len();
 
-        for fraction in [0.1, 0.15, 0.2, 0.25, 0.3] {
-            hooks.scrubber.set_value(fraction);
+        // The knob's value is seconds into the book (see the screen's scrubber).
+        for seconds in [10.0, 15.0, 20.0, 25.0, 30.0] {
+            hooks.scrubber.set_value(seconds);
         }
         assert_eq!(hooks.elapsed_label.label(), "0:30", "the time follows the knob while it moves");
         pump_until(|| false, Duration::from_millis(600));
         let sought: Vec<Duration> = state.borrow().seek_calls[seeks..].to_vec();
         assert_eq!(sought.len(), 1, "one seek per drag: {sought:?}");
         assert!((sought[0].as_secs_f64() - 30.0).abs() < 0.01, "to where the knob settled: {sought:?}");
-        assert!((hooks.scrubber.value() - 0.3).abs() < 0.02, "the knob stays where it was left, got {}", hooks.scrubber.value());
+        assert!((hooks.scrubber.value() - 30.0).abs() < 2.0, "the knob stays where it was left, got {}", hooks.scrubber.value());
 
-        hooks.scrubber.set_value(1.0);
+        hooks.scrubber.set_value(100.0);
         pump_until(|| false, Duration::from_millis(600));
         let snapshot = controller.snapshot().unwrap();
         assert!((snapshot.position_seconds - 99.0).abs() < 0.5, "a seek to the end stops short of it, got {}", snapshot.position_seconds);
