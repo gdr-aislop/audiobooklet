@@ -425,7 +425,9 @@ pub fn build(
     on_open_shelf: impl Fn(Shelf) + Clone + 'static,
 ) -> HomeScreen {
     let header = adw::HeaderBar::new();
-    header.set_title_widget(Some(&adw::WindowTitle::new(&tr("Home"), "")));
+    let home_title = adw::WindowTitle::new(&tr("Home"), "");
+    crate::a11y::landing(&home_title, &tr("Home"));
+    header.set_title_widget(Some(&home_title));
 
     let avatar_letter = account
         .username
@@ -547,6 +549,7 @@ pub fn build(
     // screen's own overlay. Manual sync triggers report through this one.
     let toast_overlay = adw::ToastOverlay::new();
     toast_overlay.set_child(Some(&root));
+    crate::a11y::focus_landing(&home_title, &toast_overlay);
 
     let widgets = HomeWidgets {
         empty_state: empty_state.clone(),
@@ -1169,13 +1172,16 @@ fn section_heading_button(text: &str, tooltip: &str, on_open: impl Fn() + 'stati
 }
 
 fn shelf_row() -> gtk4::Box {
-    gtk4::Box::builder()
+    let row = gtk4::Box::builder()
         .orientation(gtk4::Orientation::Horizontal)
         .spacing(12)
         .margin_start(16)
         .margin_end(16)
         .margin_bottom(4)
-        .build()
+        .build();
+    // One Tab stop for the whole shelf; Left/Right move between its covers.
+    crate::a11y::focus_group(&row);
+    row
 }
 
 fn shelf_scroller(row: &gtk4::Box) -> gtk4::ScrolledWindow {
@@ -1370,6 +1376,54 @@ pub(crate) mod tests {
         hooks.recent_heading.emit_clicked();
 
         assert_eq!(*tapped.borrow(), vec![Shelf::ContinueListening, Shelf::RecentlyAdded], "each heading reports its own shelf, in tap order");
+    }
+
+    /// Not a `#[test]` itself — see `main.rs`'s `mod tests`. A shelf is one Tab stop for a
+    /// keyboard user: Tab from any of its cards leaves it, Shift+Tab goes back before it, and
+    /// the cards say what they are.
+    pub(crate) fn run_a_shelf_is_one_tab_stop(runtime: &tokio::runtime::Runtime) {
+        use crate::a11y::tests::{description_of, focused_name, label_of, press_tab};
+        let mock_server = runtime.block_on(MockServer::start());
+        runtime.block_on(
+            Mock::given(method("GET"))
+                .and(path("/api/libraries"))
+                .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                    "libraries": [{ "id": "e4bb1afb-4a4f-4dd6-8be0-e615d233185b", "name": "Audiobooks", "mediaType": "book" }]
+                })))
+                .mount(&mock_server),
+        );
+        runtime.block_on(
+            Mock::given(method("GET"))
+                .and(path("/api/libraries/e4bb1afb-4a4f-4dd6-8be0-e615d233185b/items"))
+                .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                    "results": [item_json("item-1", "Project Hail Mary"), item_json("item-2", "Dune")]
+                })))
+                .mount(&mock_server),
+        );
+
+        let pool = runtime.block_on(pool());
+        let (server, account) = runtime.block_on(account_and_server(&pool, &mock_server.uri()));
+        let session = abs_core::auth::Session::new(pool.clone(), &server, &account);
+        let offline_mode = crate::offline_mode::OfflineModeState::new(pool.clone());
+        let screen = build(pool.clone(), crate::test_support::test_paths(), server.clone(), account, session, offline_mode, |_| {}, || {}, |_| {});
+        let hooks = screen.test_hooks();
+        let window = gtk4::Window::builder().child(&screen.root).default_width(360).default_height(720).build();
+        window.present();
+        pump_until(|| count_children(&hooks.recent_row) == 2, Duration::from_secs(10));
+
+        let first = hooks.recent_row.first_child().unwrap();
+        assert_eq!(label_of(&first).as_deref(), Some("Project Hail Mary"), "a card is named after its book");
+        assert!(description_of(&first).is_some_and(|text| text.contains("Andy Weir")), "with the author and length after it");
+
+        first.grab_focus();
+        assert!(press_tab(&hooks.recent_row, false), "Tab inside the shelf is handled by it");
+        let after = GtkWindowExt::focus(&window).unwrap();
+        assert!(!after.is_ancestor(&hooks.recent_row), "one Tab leaves the shelf, got {}", focused_name(&window));
+
+        hooks.recent_row.last_child().unwrap().grab_focus();
+        assert!(press_tab(&hooks.recent_row, true));
+        assert_eq!(focused_name(&window), "Recently Added", "Shift+Tab from the shelf lands on its heading");
+        window.close();
     }
 
     /// Toggling offline mode should narrow "Recently Added" to items with at least one completed

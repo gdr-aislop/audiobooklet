@@ -47,7 +47,7 @@ use abs_core::settings::{Grouping, LibraryViewMode, LibraryViewOptions, SortBy};
 use abs_storage::models::{Account, Item, Progress, Server};
 use abs_storage::AppPaths;
 
-use crate::i18n::{tr, tr_args, tr_ctx};
+use crate::i18n::{ntr, tr, tr_args, tr_ctx};
 use crate::player::PlayRequest;
 use crate::widgets::{combo_row, item_card};
 
@@ -446,13 +446,21 @@ pub fn build(
     let category_genre = gtk4::ToggleButton::builder().label(tr("Genre")).group(&category_all).build();
     let category_row = gtk4::Box::builder().orientation(gtk4::Orientation::Horizontal).spacing(6).margin_start(12).margin_end(12).margin_top(6).margin_bottom(4).build();
     for chip in [&category_all, &category_author, &category_series, &category_genre] {
+        // One choice of four: radio buttons, so a screen reader says which is active.
+        crate::a11y::radio(chip);
         category_row.append(chip);
     }
+    // One Tab stop for the row; Left/Right move between chips.
+    crate::a11y::focus_group(&category_row);
     let category_scroller = gtk4::ScrolledWindow::builder().hscrollbar_policy(gtk4::PolicyType::Automatic).vscrollbar_policy(gtk4::PolicyType::Never).child(&category_row).build();
+    // Where a screen reader lands on this tab (the header's title widget is the search entry,
+    // which must not take focus by itself: that would open the on-screen keyboard).
+    crate::a11y::landing(&category_scroller, &tr("Library"));
 
     // Populated fresh from `data.items` whenever it reloads (`rebuild_genre_chips`), same
     // full-rebuild convention as `flow_box`/`list_box`. Hidden until the Genre chip is active.
     let genre_chip_box = gtk4::Box::builder().orientation(gtk4::Orientation::Horizontal).spacing(6).margin_start(12).margin_end(12).margin_bottom(6).build();
+    crate::a11y::focus_group(&genre_chip_box);
     let genre_chip_scroller = gtk4::ScrolledWindow::builder().hscrollbar_policy(gtk4::PolicyType::Automatic).vscrollbar_policy(gtk4::PolicyType::Never).child(&genre_chip_box).build();
     let genre_chip_revealer = gtk4::Revealer::builder().transition_type(gtk4::RevealerTransitionType::SlideDown).child(&genre_chip_scroller).reveal_child(false).build();
 
@@ -573,6 +581,7 @@ pub fn build(
     // screen's and Home's own overlays. Manual sync triggers report through this one.
     let toast_overlay = adw::ToastOverlay::new();
     toast_overlay.set_child(Some(&root));
+    crate::a11y::focus_landing(&category_scroller, &toast_overlay);
 
     let widgets = LibraryWidgets {
         status_page: status_page.clone(),
@@ -1394,6 +1403,7 @@ fn rebuild_genre_chips(widgets: &LibraryWidgets) {
         } else {
             group_anchor = Some(chip.clone());
         }
+        crate::a11y::radio(&chip);
         chip.connect_toggled({
             let widgets = widgets.clone();
             let genre = genre.clone();
@@ -1596,6 +1606,7 @@ fn render_from_current_data(widgets: &LibraryWidgets) {
     if grouping != Grouping::None {
         visible.sort_by_key(|item| group_key_for(item, grouping).sort_rank());
     }
+    let book_count = visible.len();
     let mut groups: Vec<(GroupKey, Vec<&Item>)> = Vec::new();
     for item in visible {
         let key = group_key_for(item, grouping);
@@ -1653,6 +1664,11 @@ fn render_from_current_data(widgets: &LibraryWidgets) {
             append_remaining_entries(widgets.clone(), mode, entries, built, generation, signature, timing);
         }
     }
+
+    // The result count, on the search entry's description: spoken while the user is typing
+    // there, and the one place a screen reader hears a search's outcome. Also on a render that
+    // changed nothing (the count is what matters, not whether the list was rebuilt).
+    crate::a11y::describe_if_changed(&widgets.search_entry, &ntr("{count} book", "{count} books", book_count as u32));
 
     // Deferred past this function returning — the cards above were only just inserted, and
     // `compute_bounds` (inside `decode_covers_in_viewport`) needs a completed layout/allocation
@@ -1753,7 +1769,9 @@ fn append_entries(widgets: &LibraryWidgets, mode: LibraryViewMode, entries: &[Re
     for entry in entries {
         match (mode, entry) {
             (LibraryViewMode::Grid, RenderEntry::Header(label)) => {
-                widgets.flow_box.insert(&grid_group_header(label), -1);
+                let header = grid_group_header(label);
+                widgets.flow_box.insert(&header, -1);
+                skip_flow_cell(&header);
             }
             (LibraryViewMode::List, RenderEntry::Header(label)) => {
                 widgets.list_box.append(&list_group_header(label));
@@ -1762,6 +1780,7 @@ fn append_entries(widgets: &LibraryWidgets, mode: LibraryViewMode, entries: &[Re
                 let subtitle = item_subtitle(item);
                 let built = item_card::build_deferred(TILE_SIZE, item, &subtitle, &widgets.on_open, true, *downloaded, None);
                 widgets.flow_box.insert(&built.widget, -1);
+                skip_flow_cell(&built.widget);
                 pending.push(PendingCover { widget: built.widget, cover: built.cover, path: item.cover_cache_path.as_ref().map(std::path::PathBuf::from) });
             }
             (LibraryViewMode::List, RenderEntry::Item { item, .. }) => {
@@ -1770,6 +1789,15 @@ fn append_entries(widgets: &LibraryWidgets, mode: LibraryViewMode, entries: &[Re
                 pending.push(PendingCover { widget: built.row.upcast(), cover: built.cover, path: item.cover_cache_path.as_ref().map(std::path::PathBuf::from) });
             }
         }
+    }
+}
+
+/// `GtkFlowBox` wraps every inserted widget in a focusable cell of its own, which made each grid
+/// tile two Tab stops (an unnamed cell, then the card). The card is the one stop; the arrow keys
+/// still reach it through the cell.
+fn skip_flow_cell(inserted: &impl IsA<gtk4::Widget>) {
+    if let Some(cell) = inserted.as_ref().parent() {
+        cell.set_focusable(false);
     }
 }
 
@@ -3574,6 +3602,68 @@ pub(crate) mod tests {
         let mut others = entries[5..].to_vec();
         others.sort();
         assert_eq!(others, ["Book Blank", "Book None"], "a blank series is no series: {entries:?}");
+    }
+
+    /// Not a `#[test]` itself — see `main.rs`'s `mod tests`. What a screen reader gets here: a
+    /// "Library" heading to land on, chips as radio buttons with the active one checked, one Tab
+    /// stop per grid card (the flow box's own cell around it is skipped), and the number of
+    /// books found on the search entry as the user types.
+    pub(crate) fn run_chips_cards_and_search_speak_for_screen_readers(runtime: &tokio::runtime::Runtime) {
+        use crate::a11y::tests::{description_of, focused_name, is_checked, label_of, role_of};
+        let mock_server = runtime.block_on(MockServer::start());
+        runtime.block_on(
+            Mock::given(method("GET"))
+                .and(path("/api/libraries"))
+                .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                    "libraries": [{ "id": "e4bb1afb-4a4f-4dd6-8be0-e615d233185b", "name": "Audiobooks", "mediaType": "book" }]
+                })))
+                .mount(&mock_server),
+        );
+        runtime.block_on(
+            Mock::given(method("GET"))
+                .and(path("/api/libraries/e4bb1afb-4a4f-4dd6-8be0-e615d233185b/items"))
+                .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                    "results": [
+                        item_json("item-1", "Book A", "Author One", 1_700_000_000_000, 3600.0),
+                        item_json("item-2", "Book B", "Author One", 1_700_000_001_000, 3600.0),
+                        item_json("item-3", "Other C", "Author Two", 1_700_000_002_000, 3600.0)
+                    ]
+                })))
+                .mount(&mock_server),
+        );
+
+        let pool = runtime.block_on(pool());
+        let (server, account) = runtime.block_on(account_and_server(&pool, &mock_server.uri()));
+        let session = abs_core::auth::Session::new(pool.clone(), &server, &account);
+        let offline_mode = crate::offline_mode::OfflineModeState::new(pool.clone());
+        let screen = build(pool, crate::test_support::test_paths(), server, account, session, offline_mode, |_| {}, || {}, || {});
+        let hooks = screen.test_hooks();
+        let window = gtk4::Window::builder().child(&screen.root).default_width(360).default_height(720).build();
+        window.present();
+        pump_until(|| hooks.list_box.row_at_index(2).is_some(), Duration::from_secs(10));
+        pump_until(|| focused_name(&window) == "Library", Duration::from_secs(5));
+        assert_eq!(focused_name(&window), "Library", "lands on the tab's heading, never the search entry");
+
+        assert_eq!(role_of(&hooks.category_author), gtk4::AccessibleRole::Radio);
+        assert!(is_checked(&hooks.category_all) && !is_checked(&hooks.category_author));
+        hooks.category_author.set_active(true);
+        assert!(is_checked(&hooks.category_author) && !is_checked(&hooks.category_all));
+        hooks.category_all.set_active(true);
+
+        hooks.view_toggle.set_active(false);
+        pump_until(|| hooks.flow_box.child_at_index(2).is_some(), Duration::from_secs(10));
+        let cell = hooks.flow_box.child_at_index(0).unwrap();
+        assert!(!cell.is_focusable(), "the flow box's cell is not a Tab stop of its own");
+        let card = cell.child().unwrap();
+        assert!(card.is_focusable() && label_of(&card).is_some(), "the card inside it is");
+
+        assert_eq!(description_of(&hooks.search_entry).as_deref(), Some("3 books"));
+        hooks.search_entry.set_text("Book");
+        pump_until(|| description_of(&hooks.search_entry).as_deref() == Some("2 books"), Duration::from_secs(5));
+        hooks.search_entry.set_text("Other");
+        pump_until(|| description_of(&hooks.search_entry).as_deref() == Some("1 book"), Duration::from_secs(5));
+        assert_eq!(description_of(&hooks.search_entry).as_deref(), Some("1 book"));
+        window.close();
     }
 
     /// Item Detail's series-button tap-through (`LibraryScreen::apply_series_filter`): filters to
