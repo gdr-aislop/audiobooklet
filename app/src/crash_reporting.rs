@@ -95,6 +95,13 @@ static LOG_WRITER: std::sync::OnceLock<BufferedLogWriter> = std::sync::OnceLock:
 /// Writes any buffered log lines to disk now. Logging buffers for up to a minute (see
 /// [`PERIODIC_FLUSH_INTERVAL`]), so anything about to hand the log file to the user — "open the
 /// log" — flushes first. A no-op before [`init_logging`] has run.
+/// Where this run's log files are, once logging is up.
+static LOG_DIR: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
+
+pub fn log_dir() -> Option<PathBuf> {
+    LOG_DIR.get().cloned()
+}
+
 pub fn flush_logs() {
     if let Some(writer) = LOG_WRITER.get() {
         writer.flush();
@@ -146,12 +153,21 @@ where
 /// Must be called before anything else logs (including [`install_panic_hook`]'s hook firing) and
 /// after `paths.logs_dir()` exists on disk (`AppPaths::ensure_early_dirs`).
 pub fn init_logging(paths: &abs_storage::AppPaths) -> LogHandle {
-    let appender = RollingFileAppender::builder()
-        .rotation(Rotation::DAILY)
-        .filename_prefix(abs_storage::paths::LOG_FILE_PREFIX)
-        .max_log_files(7)
-        .build(paths.logs_dir())
-        .expect("build the rotating log file appender");
+    let appender = |dir: &std::path::Path| {
+        RollingFileAppender::builder().rotation(Rotation::DAILY).filename_prefix(abs_storage::paths::LOG_FILE_PREFIX).max_log_files(7).build(dir)
+    };
+    // The app's own log folder, or — when it can't be written (a full disk, a read-only home)
+    // — a temporary one, so the startup problem that follows is still logged and shown.
+    let fallback = std::env::temp_dir().join("audiobooklet-logs");
+    let (appender, dir) = match appender(&paths.logs_dir()) {
+        Ok(appender) => (appender, paths.logs_dir()),
+        Err(err) => {
+            eprintln!("audiobooklet: can't write logs to {}: {err}; using {}", paths.logs_dir().display(), fallback.display());
+            let _ = std::fs::create_dir_all(&fallback);
+            (appender(&fallback).expect("build the rotating log file appender"), fallback)
+        }
+    };
+    let _ = LOG_DIR.set(dir);
 
     let writer = BufferedLogWriter::new(appender);
     let _ = LOG_WRITER.set(writer.clone());

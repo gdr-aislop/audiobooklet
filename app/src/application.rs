@@ -6,6 +6,7 @@ use abs_storage::paths::APP_ID;
 use adw::glib;
 use adw::prelude::*;
 use sqlx::SqlitePool;
+use std::rc::Rc;
 
 use crate::i18n::tr;
 use crate::screens;
@@ -138,26 +139,130 @@ pub(crate) fn present_existing_window(app: &adw::Application) -> bool {
 }
 
 fn build_window(app: &adw::Application, state: &AppState) {
-    // Before any window content builds — the theme is a global, so the Welcome screen (and every
-    // sheet/popover) gets it too, not just the signed-in shell.
-    apply_theme(state.theme);
+    let window = new_window(app);
+    open_in(&window, state);
+    window.present();
+}
 
+fn new_window(app: &adw::Application) -> adw::ApplicationWindow {
     let window = adw::ApplicationWindow::builder()
         .application(app)
         .title(APP_NAME)
         .default_width(390)
         .default_height(760)
         .build();
-
     crate::icons::register(&WidgetExt::display(&window));
-    add_keyboard_support(app, &window);
+    window
+}
 
-    match &state.active_account {
-        None => show_welcome(&window, state.pool.clone(), state.paths.clone(), state.playback_settings, None),
-        Some(_) => show_main(&window, state.pool.clone(), state.paths.clone(), state.playback_settings),
+/// Fills `window` with the app proper: the login screen, or the main shell for the active account.
+fn open_in(window: &adw::ApplicationWindow, state: &AppState) {
+    // Before any window content builds — the theme is a global, so the Welcome screen (and every
+    // sheet/popover) gets it too, not just the signed-in shell.
+    apply_theme(state.theme);
+    if let Some(app) = window.application().and_downcast::<adw::Application>() {
+        add_keyboard_support(&app, window);
     }
+    match &state.active_account {
+        None => show_welcome(window, state.pool.clone(), state.paths.clone(), state.playback_settings, None),
+        Some(_) => show_main(window, state.pool.clone(), state.paths.clone(), state.playback_settings),
+    }
+}
 
-    window.present();
+/// The application when the app's local data couldn't be opened at startup (see
+/// `crate::startup`): one window explaining `problem`, whose "Try again" opens the app in place
+/// once the problem is gone. `paths` is `None` only when the data folders couldn't even be
+/// found (no home folder), and then nothing can be retried.
+pub fn build_problem_application(problem: crate::startup::StartupProblem, paths: Option<abs_storage::AppPaths>) -> adw::Application {
+    let app = adw::Application::builder().application_id(APP_ID).build();
+    let problem = std::cell::RefCell::new(Some(problem));
+    app.connect_activate(move |app| {
+        if present_existing_window(app) {
+            return;
+        }
+        let Some(problem) = problem.borrow_mut().take() else { return };
+        let window = new_window(app);
+        show_problem(&window, problem, paths.clone());
+        window.present();
+    });
+    quit_cleanly_on_termination_signals(&app);
+    app
+}
+
+/// Replaces `window`'s content with the page explaining `problem` (see `crate::startup`). "Try
+/// again" reopens the app's data from scratch and, if that works, opens the app in this window;
+/// "Start over" (a confirmed damaged database only) moves the database aside first.
+pub(crate) fn show_problem(window: &adw::ApplicationWindow, problem: crate::startup::StartupProblem, paths: Option<abs_storage::AppPaths>) {
+    tracing::error!(kind = ?problem.kind, details = %problem.details, "showing a startup problem");
+    // The shell (if any) goes: its database is the one that failed.
+    release_main_window();
+    let retry: Option<Rc<dyn Fn()>> = paths.clone().map(|paths| -> Rc<dyn Fn()> {
+        let window = window.clone();
+        Rc::new(move || {
+            tracing::info!("startup problem: trying again");
+            reopen(&window, paths.clone());
+        })
+    });
+    let start_over: Option<Rc<dyn Fn()>> = paths.clone().map(|paths| -> Rc<dyn Fn()> {
+        let window = window.clone();
+        Rc::new(move || {
+            let window_for_confirm = window.clone();
+            let paths = paths.clone();
+            crate::screens::settings::confirm(
+                &window,
+                &tr("Start over?"),
+                &tr("The damaged database is kept next to the new one, renamed. You'll sign in again; downloaded books stay on the device but need downloading again to appear."),
+                &tr("Start Over"),
+                Rc::new(move || {
+                    let db_path = paths.db_path();
+                    match crate::startup::move_damaged_database(&db_path) {
+                        Ok(moved) => {
+                            tracing::warn!(moved_to = %moved.display(), "startup problem: moved the damaged database aside, starting over");
+                            reopen(&window_for_confirm, paths.clone());
+                        }
+                        Err(err) => {
+                            tracing::error!(%err, "startup problem: couldn't move the damaged database aside");
+                            show_problem(&window_for_confirm, crate::startup::StartupProblem::from_io(&err, &db_path), Some(paths.clone()));
+                        }
+                    }
+                }),
+            );
+        })
+    });
+    let quit: Rc<dyn Fn()> = {
+        let window = window.clone();
+        Rc::new(move || {
+            tracing::info!("startup problem: quitting");
+            match window.application() {
+                Some(app) => app.quit(),
+                None => window.close(),
+            }
+        })
+    };
+    let log_dir = crate::crash_reporting::log_dir();
+    let page = crate::screens::startup_problem::build(
+        &problem,
+        crate::startup::InstallKind::detect(),
+        log_dir.as_deref(),
+        crate::screens::startup_problem::ProblemActions { retry, start_over, quit },
+    );
+    window.set_content(Some(&page.root));
+}
+
+/// Opens the app's data again (after a startup problem) and the app with it, or shows what is
+/// still wrong.
+fn reopen(window: &adw::ApplicationWindow, paths: abs_storage::AppPaths) {
+    let window = window.clone();
+    glib::spawn_future_local(async move {
+        match crate::startup::open(paths.clone()).await {
+            Ok(state) => {
+                tracing::info!("startup problem resolved; opening the app");
+                open_in(&window, &state);
+                crate::perf::start_main_loop_watchdog();
+            }
+            Err(problem) => show_problem(&window, problem, Some(paths)),
+        }
+    });
 }
 
 /// Swaps the window's content for the login screen. `seed` turns this into the re-login flow:
@@ -290,17 +395,20 @@ pub(crate) fn show_main_or_welcome_on(
 ) {
     let window_for_callback = window.clone();
     glib::spawn_future_local(async move {
-        let active = abs_storage::repo::accounts::get_active(&pool)
-            .await
-            .expect("checking for an active account must not fail");
+        let active = match abs_storage::repo::accounts::get_active(&pool).await {
+            Ok(active) => active,
+            Err(err) => return show_problem(&window_for_callback, crate::startup::StartupProblem::from_storage(&err, &paths.db_path()), Some(paths)),
+        };
         match active {
             Some(_) => {
                 // Before the new shell exists, not after: its MPRIS registration would collide
                 // with the old shell's, which keeps the object path until it is retired.
                 release_main_window();
-                let main_window =
-                    build_main_window(pool, paths, playback_settings, window_for_callback.clone())
-                        .await;
+                let main_window = match build_main_window(pool.clone(), paths.clone(), playback_settings, window_for_callback.clone()).await {
+                    Ok(Some(main_window)) => main_window,
+                    Ok(None) => return show_welcome(&window_for_callback, pool, paths, playback_settings, None),
+                    Err(problem) => return show_problem(&window_for_callback, problem, Some(paths)),
+                };
                 crate::widgets::swap_content(&window_for_callback, &main_window.root);
                 retain_main_window(main_window);
                 if let Some(tab) = tab {
@@ -326,31 +434,36 @@ pub(crate) fn show_main(
     glib::spawn_future_local(async move {
         // See `show_main_or_welcome_on`: the old shell must be retired before the new one registers MPRIS.
         release_main_window();
-        let main_window = build_main_window(pool, paths, playback_settings, window_for_content.clone()).await;
+        let main_window = match build_main_window(pool.clone(), paths.clone(), playback_settings, window_for_content.clone()).await {
+            Ok(Some(main_window)) => main_window,
+            // No active account after all (it was signed out meanwhile): the login screen.
+            Ok(None) => return show_welcome(&window_for_content, pool, paths, playback_settings, None),
+            Err(problem) => return show_problem(&window_for_content, problem, Some(paths)),
+        };
         crate::widgets::swap_content(&window_for_content, &main_window.root);
         retain_main_window(main_window);
     });
 }
 
-/// Resolves the active account (and its server) from storage and builds the main shell. Panics
-/// on a missing active account — every caller guarantees one by construction (checked at startup,
-/// or just created by a successful login), so this is a caller bug, not a runtime condition.
+/// Resolves the active account (and its server) from storage and builds the main shell — or
+/// `None` without an active account, or the problem reading the database (shown by the caller
+/// instead of the app; see `crate::startup`).
 async fn build_main_window(
     pool: SqlitePool,
     paths: abs_storage::AppPaths,
     playback_settings: abs_core::settings::PlaybackSettings,
     window: adw::ApplicationWindow,
-) -> screens::main_window::MainWindow {
+) -> Result<Option<screens::main_window::MainWindow>, crate::startup::StartupProblem> {
+    let db_path = paths.db_path();
+    let problem = |err: abs_storage::StorageError| crate::startup::StartupProblem::from_storage(&err, &db_path);
     // Re-fetch the full rows rather than threading server/account fields through callbacks —
     // ids are all the login flows hand back.
-    let account = abs_storage::repo::accounts::get_active(&pool)
-        .await
-        .expect("checking for an active account must not fail")
-        .expect("the main window requires an active account");
-    let server = abs_storage::repo::servers::get(&pool, &account.server_id)
-        .await
-        .expect("an active account's server must exist");
-    let theme = abs_core::settings::load_theme(&pool).await.expect("load theme");
+    let Some(account) = abs_storage::repo::accounts::get_active(&pool).await.map_err(problem)? else {
+        tracing::warn!("no active account to open the main window with; showing the login screen");
+        return Ok(None);
+    };
+    let server = abs_storage::repo::servers::get(&pool, &account.server_id).await.map_err(problem)?;
+    let theme = abs_core::settings::load_theme(&pool).await.map_err(problem)?;
     // The copy threaded through the callbacks dates from startup; settings saved since then live
     // only in the database, and a stale copy would be written back by the next edit.
     let playback_settings = abs_core::settings::load_playback_settings(&pool).await.unwrap_or(playback_settings);
@@ -362,8 +475,8 @@ async fn build_main_window(
     let offline_mode = abs_core::settings::load_offline_mode(&pool).await.unwrap_or(false);
     session.set_offline(offline_mode);
     tracing::info!(offline_mode, "loaded the offline mode setting");
-    let servers_with_accounts = fetch_servers_with_accounts(&pool).await;
-    screens::main_window::build(
+    let servers_with_accounts = fetch_servers_with_accounts(&pool).await.map_err(problem)?;
+    Ok(Some(screens::main_window::build(
         pool,
         paths,
         server,
@@ -373,22 +486,22 @@ async fn build_main_window(
         theme,
         servers_with_accounts,
         window,
-    )
+    )))
 }
 
 /// Every configured server with its accounts, in creation order — the data behind Settings'
 /// Account and Servers groups. Each server's account list is fetched separately (a join would
 /// hand back flat rows to regroup anyway).
-pub(crate) async fn fetch_servers_with_accounts(pool: &SqlitePool) -> Vec<(abs_storage::models::Server, Vec<abs_storage::models::Account>)> {
-    let servers = abs_storage::repo::servers::list(pool).await.expect("listing servers must not fail");
+pub(crate) async fn fetch_servers_with_accounts(
+    pool: &SqlitePool,
+) -> abs_storage::Result<Vec<(abs_storage::models::Server, Vec<abs_storage::models::Account>)>> {
+    let servers = abs_storage::repo::servers::list(pool).await?;
     let mut result = Vec::with_capacity(servers.len());
     for server in servers {
-        let accounts = abs_storage::repo::accounts::list_for_server(pool, &server.id)
-            .await
-            .expect("listing a server's accounts must not fail");
+        let accounts = abs_storage::repo::accounts::list_for_server(pool, &server.id).await?;
         result.push((server, accounts));
     }
-    result
+    Ok(result)
 }
 
 /// Accelerators registered app-wide through `set_accels_for_action`. Every one of them **must**
