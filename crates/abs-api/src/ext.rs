@@ -305,6 +305,12 @@ impl RawMedia {
     }
 }
 
+/// Audiobookshelf sends `""` rather than leaving the field out for a book with no author, narrator
+/// or series; here that's `None`, so it lands in "Unknown author"/"Other" like a missing one.
+fn non_blank(value: Option<String>) -> Option<String> {
+    value.filter(|value| !value.trim().is_empty())
+}
+
 #[derive(Debug, Deserialize)]
 struct RawMetadata {
     title: Option<String>,
@@ -925,12 +931,12 @@ impl Client {
                 Some(LibraryItemSummary {
                     id,
                     title,
-                    author: metadata.author_name,
-                    narrator: metadata.narrator_name,
+                    author: non_blank(metadata.author_name),
+                    narrator: non_blank(metadata.narrator_name),
                     description: metadata.description,
                     duration_seconds: media.duration.unwrap_or(0.0),
                     added_at_ms: item.added_at.unwrap_or(0),
-                    series_name: metadata.series_name,
+                    series_name: non_blank(metadata.series_name),
                     genres: metadata.genres,
                     has_audio,
                 })
@@ -1856,6 +1862,26 @@ mod tests {
         assert_eq!(items.len(), 1);
         assert_eq!(items[0].series_name, None);
         assert_eq!(items[0].genres, Vec::<String>::new());
+    }
+
+    #[tokio::test]
+    async fn get_library_items_with_media_reads_blank_author_narrator_and_series_as_none() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api/libraries/lib-1/items"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "results": [{
+                    "id": "item-1",
+                    "media": { "metadata": { "title": "Anonymous", "authorName": "", "narratorName": " ", "seriesName": "" } }
+                }]
+            })))
+            .mount(&server)
+            .await;
+
+        let client = Client::new(&server.uri());
+        let items = client.get_library_items_with_media("lib-1").await.unwrap();
+
+        assert_eq!((items[0].author.as_deref(), items[0].narrator.as_deref(), items[0].series_name.as_deref()), (None, None, None));
     }
 
     #[tokio::test]

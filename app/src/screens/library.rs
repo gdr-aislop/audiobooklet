@@ -1565,9 +1565,7 @@ fn render_from_current_data(widgets: &LibraryWidgets) {
     match sort {
         SortKey::DateAdded => visible.sort_by_key(|item| std::cmp::Reverse(item.added_at)),
         SortKey::Title => visible.sort_by_key(|a| a.title.to_lowercase()),
-        SortKey::Author => visible.sort_by(|a, b| {
-            a.author.as_deref().unwrap_or("").to_lowercase().cmp(&b.author.as_deref().unwrap_or("").to_lowercase())
-        }),
+        SortKey::Author => visible.sort_by_cached_key(|item| author_sort_key(item)),
         SortKey::Duration => visible.sort_by(|a, b| b.duration_seconds.total_cmp(&a.duration_seconds)),
         // Played before never-played; within played, newest last-listen first. `updated_at`
         // carries the *true* last-listened time (the server's own `lastUpdate` on import), so
@@ -1838,7 +1836,7 @@ fn decode_covers_in_viewport(widgets: &LibraryWidgets) {
 }
 
 fn item_subtitle(item: &Item) -> String {
-    let author = item.author.clone().unwrap_or_else(|| tr("Unknown author"));
+    let author = named(&item.author).map_or_else(|| tr("Unknown author"), str::to_string);
     let duration = crate::screens::item_detail::format_duration(item.duration_seconds);
     // TRANSLATORS: A book's subtitle on a card or in a list. {author} is the author's name; {duration} its length, e.g. "11.5h" or "45m".
     tr_args("{author} · {duration}", &[("author", &author), ("duration", &duration)])
@@ -1882,13 +1880,30 @@ impl GroupKey {
 fn group_key_for(item: &Item, grouping: Grouping) -> GroupKey {
     match grouping {
         Grouping::None => GroupKey::Named(String::new()),
-        Grouping::ByAuthor => {
-            item.author.clone().map(GroupKey::Named).unwrap_or_else(|| GroupKey::Fallback(tr("Unknown author")))
-        }
-        Grouping::BySeries => {
-            item.series_name.clone().map(GroupKey::Named).unwrap_or_else(|| GroupKey::Fallback(tr_ctx("Group header for books without a series", "Other")))
-        }
+        Grouping::ByAuthor => named(&item.author)
+            .map(|author| GroupKey::Named(author.to_string()))
+            .unwrap_or_else(|| GroupKey::Fallback(tr("Unknown author"))),
+        Grouping::BySeries => named(&item.series_name)
+            .map(|series| GroupKey::Named(series.to_string()))
+            .unwrap_or_else(|| GroupKey::Fallback(tr_ctx("Group header for books without a series", "Other"))),
     }
+}
+
+/// Alphabetical by author, case-insensitively, with books without one after every named one
+/// rather than ahead of "A".
+fn author_sort_key(item: &Item) -> (bool, String) {
+    match named(&item.author) {
+        Some(author) => (false, author.to_lowercase()),
+        None => (true, String::new()),
+    }
+}
+
+/// An author or series name, or `None` when there isn't one. Audiobookshelf sends `""` for a book
+/// without either; the sync now stores that as `None`, but books synced before still hold `""`
+/// until their next sync, and they belong at the bottom with the rest, not first under a blank
+/// header.
+fn named(value: &Option<String>) -> Option<&str> {
+    value.as_deref().filter(|value| !value.trim().is_empty())
 }
 
 /// A grouped (not sticky — see this module's doc comment) section header for grid mode. Returned
@@ -1983,6 +1998,46 @@ pub(crate) mod tests {
     use std::time::Duration;
     use wiremock::matchers::{method, path};
     use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    fn stored_item(author: Option<&str>, series_name: Option<&str>) -> Item {
+        Item {
+            id: "item-1".to_string(),
+            server_id: "server-1".to_string(),
+            library_id: "lib-1".to_string(),
+            title: "Book".to_string(),
+            author: author.map(str::to_string),
+            narrator: None,
+            description: None,
+            cover_cache_path: None,
+            duration_seconds: 3600.0,
+            added_at: chrono::Utc::now(),
+            synced_at: chrono::Utc::now(),
+            series_name: series_name.map(str::to_string),
+            genres_json: "[]".to_string(),
+        }
+    }
+
+    /// Books synced before blank names were dropped at the API still hold `""`.
+    #[test]
+    fn a_blank_author_or_series_groups_with_the_missing_ones() {
+        for blank in [None, Some(""), Some("  ")] {
+            let item = stored_item(blank, blank);
+            assert!(matches!(group_key_for(&item, Grouping::ByAuthor), GroupKey::Fallback(_)), "{blank:?}");
+            assert!(matches!(group_key_for(&item, Grouping::BySeries), GroupKey::Fallback(_)), "{blank:?}");
+        }
+        let named = stored_item(Some("Andy Weir"), Some("Bobiverse"));
+        assert!(group_key_for(&named, Grouping::ByAuthor) == GroupKey::Named("Andy Weir".to_string()));
+        assert!(group_key_for(&named, Grouping::BySeries) == GroupKey::Named("Bobiverse".to_string()));
+    }
+
+    #[test]
+    fn sorting_by_author_puts_books_without_one_last() {
+        let books = [stored_item(Some(""), None), stored_item(Some("zola"), None), stored_item(None, None), stored_item(Some("Asimov"), None)];
+        let mut sorted: Vec<&Item> = books.iter().collect();
+        sorted.sort_by_cached_key(|item| author_sort_key(item));
+        let authors: Vec<Option<&str>> = sorted.iter().map(|item| item.author.as_deref()).collect();
+        assert_eq!(authors, [Some("Asimov"), Some("zola"), Some(""), None]);
+    }
 
     /// Seeds the library/items/progress rows a scenario's progress-dependent assertions read,
     /// before `build`'s first cached load — the progress table's foreign key needs the items to
@@ -3468,7 +3523,9 @@ pub(crate) mod tests {
                     "results": [
                         item_json_with_series_and_genres("item-1", "Book B", Some("Banana"), &[]),
                         item_json_with_series_and_genres("item-2", "Book A", Some("apple"), &[]),
-                        item_json_with_series_and_genres("item-3", "Book None", None, &[])
+                        item_json_with_series_and_genres("item-3", "Book None", None, &[]),
+                        // What Audiobookshelf actually sends for a book outside any series.
+                        item_json_with_series_and_genres("item-4", "Book Blank", Some(""), &[])
                     ]
                 })))
                 .mount(&mock_server),
@@ -3486,26 +3543,29 @@ pub(crate) mod tests {
         app_window.present();
         pump_until(|| app_window.is_mapped(), Duration::from_secs(5));
         // Library defaults to List view; switch to Grid so `flow_box_entries` sees anything.
-        pump_until(|| hooks.list_box.row_at_index(2).is_some(), Duration::from_secs(10));
+        pump_until(|| hooks.list_box.row_at_index(3).is_some(), Duration::from_secs(10));
         hooks.view_toggle.set_active(false);
-        pump_until(|| hooks.flow_box.child_at_index(2).is_some(), Duration::from_secs(10));
+        pump_until(|| hooks.flow_box.child_at_index(3).is_some(), Duration::from_secs(10));
 
         hooks.category_series.set_active(true);
-        pump_until(|| flow_box_entries(&hooks.flow_box).len() == 6, Duration::from_secs(5));
+        pump_until(|| flow_box_entries(&hooks.flow_box).len() == 7, Duration::from_secs(5));
 
+        let entries = flow_box_entries(&hooks.flow_box);
         assert_eq!(
-            flow_box_entries(&hooks.flow_box),
-            vec![
+            entries[..5],
+            [
                 "§apple".to_string(),
                 "Book A".to_string(),
                 "§Banana".to_string(),
                 "Book B".to_string(),
                 "§Other".to_string(),
-                "Book None".to_string(),
             ],
             "named series should sort case-insensitively ahead of the fallback 'Other' bucket, \
              which must always land last regardless of where it would fall alphabetically"
         );
+        let mut others = entries[5..].to_vec();
+        others.sort();
+        assert_eq!(others, ["Book Blank", "Book None"], "a blank series is no series: {entries:?}");
     }
 
     /// Item Detail's series-button tap-through (`LibraryScreen::apply_series_filter`): filters to
@@ -3577,6 +3637,12 @@ pub(crate) mod tests {
                             "id": "item-2",
                             "addedAt": 1_600_000_000_000i64,
                             "media": { "duration": 3600.0, "metadata": { "title": "Book With No Author" } }
+                        }),
+                        // What Audiobookshelf actually sends for a book without an author.
+                        serde_json::json!({
+                            "id": "item-3",
+                            "addedAt": 1_500_000_000_000i64,
+                            "media": { "duration": 3600.0, "metadata": { "title": "Book With Blank Author", "authorName": "" } }
                         })
                     ]
                 })))
@@ -3595,12 +3661,12 @@ pub(crate) mod tests {
         app_window.present();
         pump_until(|| app_window.is_mapped(), Duration::from_secs(5));
         // Library defaults to List view; switch to Grid so `flow_box_entries` sees anything.
-        pump_until(|| hooks.list_box.row_at_index(1).is_some(), Duration::from_secs(10));
+        pump_until(|| hooks.list_box.row_at_index(2).is_some(), Duration::from_secs(10));
         hooks.view_toggle.set_active(false);
-        pump_until(|| hooks.flow_box.child_at_index(1).is_some(), Duration::from_secs(10));
+        pump_until(|| hooks.flow_box.child_at_index(2).is_some(), Duration::from_secs(10));
 
         hooks.category_author.set_active(true);
-        pump_until(|| flow_box_entries(&hooks.flow_box).len() == 4, Duration::from_secs(5));
+        pump_until(|| flow_box_entries(&hooks.flow_box).len() == 5, Duration::from_secs(5));
 
         assert_eq!(
             flow_box_entries(&hooks.flow_box),
@@ -3609,6 +3675,7 @@ pub(crate) mod tests {
                 "Book By Weir".to_string(),
                 "§Unknown author".to_string(),
                 "Book With No Author".to_string(),
+                "Book With Blank Author".to_string(),
             ],
             "the 'Unknown author' fallback bucket must sort last, not wherever it lands alphabetically"
         );
