@@ -3811,6 +3811,8 @@ impl MiniPlayerBar {
 pub struct MiniPlayerHooks {
     pub bar: gtk4::Box,
     pub card: gtk4::Box,
+    /// The keyboard's and a screen reader's card: the focusable wrapper around `card`.
+    pub focus_card: gtk4::Overlay,
     pub cover_picture: gtk4::Picture,
     pub title_label: gtk4::Label,
     pub author_label: gtk4::Label,
@@ -3825,7 +3827,9 @@ pub struct MiniPlayerHooks {
 /// `PlayerController::add_listener`) is identical between the two.
 struct MiniBarWidgets {
     bar: gtk4::Box,
+    #[cfg(test)]
     card: gtk4::Box,
+    focus_card: gtk4::Overlay,
     cover: CoverImage,
     title_label: gtk4::Label,
     author_label: gtk4::Label,
@@ -3905,9 +3909,6 @@ fn build_mini_bar_widgets() -> MiniBarWidgets {
     let progress = gtk4::ProgressBar::builder().margin_start(10).margin_end(10).margin_top(8).margin_bottom(10).build();
 
     // The margins leave room for the card's shadow, which would otherwise be clipped.
-    // For the keyboard and a screen reader the card is a button ("Now playing: …", see the
-    // applier below) that Enter opens the player from; a tap still goes through the gesture its
-    // owner installs on `bar`, and a `GtkBox` never takes focus on a tap.
     let card = gtk4::Box::builder()
         .orientation(gtk4::Orientation::Vertical)
         .css_classes(["card"])
@@ -3915,19 +3916,25 @@ fn build_mini_bar_widgets() -> MiniBarWidgets {
         .margin_end(6)
         .margin_top(6)
         .margin_bottom(6)
-        .accessible_role(gtk4::AccessibleRole::Button)
-        .focusable(true)
         .build();
     card.append(&content_row);
     card.append(&progress);
     crate::a11y::name(&progress, &tr("Progress"));
+    // For the keyboard and a screen reader the card is a button ("Now playing: …", see the
+    // applier below) that Enter opens the player from. A `GtkBox` hands Tab straight to its
+    // children, so the Tab stop is this plain wrapper around it (a `GtkOverlay` draws nothing
+    // and takes focus before its children). A tap still goes through the gesture the owner
+    // installs on `bar`; neither widget takes focus on a tap.
+    let focus_card = gtk4::Overlay::builder().child(&card).accessible_role(gtk4::AccessibleRole::Button).focusable(true).build();
 
     let bar = gtk4::Box::builder().orientation(gtk4::Orientation::Vertical).css_classes(["mini-player"]).visible(false).build();
-    bar.append(&card);
+    bar.append(&focus_card);
 
     MiniBarWidgets {
         bar,
+        #[cfg(test)]
         card,
+        focus_card,
         cover,
         title_label,
         author_label,
@@ -3954,7 +3961,7 @@ fn mini_bar_snapshot_applier(widgets: &MiniBarWidgets) -> impl Fn(&PlayerSnapsho
     let cover = widgets.cover.clone();
     let error_icon = widgets.error_icon.clone();
     let play_button = widgets.play_button.clone();
-    let card = widgets.card.clone();
+    let card = widgets.focus_card.clone();
     move |snapshot: &PlayerSnapshot| {
         let Some(bar) = bar.upgrade() else { return false };
         bar.set_visible(true);
@@ -3989,7 +3996,7 @@ fn mini_bar_from_widgets(widgets: MiniBarWidgets, controller: PlayerController) 
         move |_| controller.toggle_play_pause()
     });
     let on_open: OpenPlayerSlot = Default::default();
-    crate::a11y::activate_on_enter(&widgets.card, {
+    crate::a11y::activate_on_enter(&widgets.focus_card, {
         let on_open = on_open.clone();
         move || {
             let open = on_open.borrow().clone();
@@ -4007,6 +4014,7 @@ fn mini_bar_from_widgets(widgets: MiniBarWidgets, controller: PlayerController) 
         hooks: MiniPlayerHooks {
             bar: widgets.bar,
             card: widgets.card,
+            focus_card: widgets.focus_card,
             cover_picture: widgets.cover.picture().clone(),
             title_label: widgets.title_label,
             author_label: widgets.author_label,

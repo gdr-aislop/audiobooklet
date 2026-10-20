@@ -416,8 +416,12 @@ pub fn build(
             mode_box.set_sensitive(!busy);
             list.set_sensitive(!busy);
             connect_button.set_label(&if busy { tr("Connecting…") } else { tr("Connect") });
-            // The name changes while the button still has focus, so a screen reader speaks it;
-            // the button then goes insensitive and the focus with it, as before.
+            // Spoken by a screen reader: the button takes focus (Enter in a field left it
+            // elsewhere) and its name changes while it has it; it then goes insensitive and the
+            // focus with it, as before. Nothing visible: no focus ring without the keyboard.
+            if busy {
+                crate::a11y::focus_now(&connect_button);
+            }
             crate::a11y::name(&connect_button, &if busy { tr("Connecting…") } else { tr("Connect") });
             connect_button.set_sensitive(!busy);
         }

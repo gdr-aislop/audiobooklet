@@ -188,6 +188,7 @@ pub fn build(
     });
     ssl_row.add_suffix(&ssl_switch);
     ssl_row.set_activatable_widget(Some(&ssl_switch));
+    crate::a11y::switch_row(&ssl_row, &ssl_switch);
     advanced_group.add(&ssl_row);
 
     let local_address_row = adw::ActionRow::builder()

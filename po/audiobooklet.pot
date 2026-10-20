@@ -93,7 +93,7 @@ msgstr ""
 msgid "Open sleep timer"
 msgstr ""
 
-#: app/src/application.rs
+#: app/src/application.rs app/src/screens/player.rs
 msgid "Collapse player"
 msgstr ""
 
@@ -140,12 +140,43 @@ msgstr ""
 msgid "Playback error — tap for details"
 msgstr ""
 
+#: app/src/player.rs app/src/screens/item_detail.rs
+msgid "Progress"
+msgstr ""
+
+#. TRANSLATORS: Screen-reader name of the mini player's card; {title} is the book, {author} its author.
+#: app/src/player.rs
+msgid "Now playing: {title}, {author}"
+msgstr ""
+
+#. TRANSLATORS: Screen-reader name of the mini player's card for a book without an author; {title} is the book.
+#: app/src/player.rs
+msgid "Now playing: {title}"
+msgstr ""
+
+#: app/src/player.rs app/src/screens/player.rs
+msgid "Pause"
+msgstr ""
+
+#: app/src/player.rs app/src/screens/item_detail.rs app/src/screens/player.rs
+msgid "Play"
+msgstr ""
+
+#: app/src/screens/connection.rs app/src/screens/item_detail.rs
+#: app/src/screens/settings.rs
+msgid "Back"
+msgstr ""
+
 #: app/src/screens/connection.rs
 msgid "Connection"
 msgstr ""
 
 #: app/src/screens/connection.rs
 msgid "Server connection"
+msgstr ""
+
+#: app/src/screens/connection.rs
+msgid "About this connection"
 msgstr ""
 
 #: app/src/screens/connection.rs
@@ -290,7 +321,7 @@ msgstr ""
 msgid "Removing the download"
 msgstr ""
 
-#: app/src/screens/downloads.rs
+#: app/src/screens/downloads.rs app/src/widgets/download_scope_menu.rs
 msgid "{count} chapter"
 msgid_plural "{count} chapters"
 msgstr[0] ""
@@ -452,10 +483,6 @@ msgid "Podcasts aren't supported yet"
 msgstr ""
 
 #: app/src/screens/item_detail.rs
-msgid "Play"
-msgstr ""
-
-#: app/src/screens/item_detail.rs
 msgid "more"
 msgstr ""
 
@@ -516,6 +543,7 @@ msgid "Starting…"
 msgstr ""
 
 #: app/src/screens/item_detail.rs app/src/screens/player.rs
+#: app/src/widgets/download_scope_menu.rs app/src/widgets/item_card.rs
 msgid "Downloaded"
 msgstr ""
 
@@ -552,6 +580,10 @@ msgstr ""
 
 #: app/src/screens/library.rs
 msgid "Grid view"
+msgstr ""
+
+#: app/src/screens/library.rs
+msgid "List view"
 msgstr ""
 
 #: app/src/screens/library.rs
@@ -622,6 +654,10 @@ msgstr ""
 msgid "Genre"
 msgstr ""
 
+#: app/src/screens/library.rs app/src/screens/main_window.rs
+msgid "Library"
+msgstr ""
+
 #: app/src/screens/library.rs
 msgid "No items yet"
 msgstr ""
@@ -647,8 +683,10 @@ msgid "Saving view options"
 msgstr ""
 
 #: app/src/screens/library.rs
-msgid "List view"
-msgstr ""
+msgid "{count} book"
+msgid_plural "{count} books"
+msgstr[0] ""
+msgstr[1] ""
 
 #: app/src/screens/library.rs
 msgid "Download books to listen to them offline."
@@ -692,10 +730,6 @@ msgstr ""
 msgid "View"
 msgstr ""
 
-#: app/src/screens/main_window.rs
-msgid "Library"
-msgstr ""
-
 #: app/src/screens/main_window.rs app/src/screens/settings.rs
 msgid "Settings"
 msgstr ""
@@ -710,6 +744,10 @@ msgstr ""
 
 #: app/src/screens/player.rs
 msgid "Now Playing"
+msgstr ""
+
+#: app/src/screens/player.rs
+msgid "Position"
 msgstr ""
 
 #: app/src/screens/player.rs
@@ -747,8 +785,50 @@ msgid "{title} · {number} of {total}"
 msgstr ""
 
 #. TRANSLATORS: {time} is the time left in the whole book, e.g. "1:05:09".
+#. TRANSLATORS: {time} is a duration in words, e.g. "2 hours 5 minutes".
 #: app/src/screens/player.rs
 msgid "{time} left in book"
+msgstr ""
+
+#. TRANSLATORS: Screen-reader name of the speed button; {speed} is e.g. "1.5×".
+#: app/src/screens/player.rs
+msgid "Playback speed: {speed}"
+msgstr ""
+
+#: app/src/screens/player.rs
+msgid "On"
+msgstr ""
+
+#. TRANSLATORS: Screen-reader name of a chapter row; {title} is the chapter's name, {start} the time it starts at, e.g. "2:47".
+#: app/src/screens/player.rs
+msgid "{title}, {start}"
+msgstr ""
+
+#. TRANSLATORS: Screen-reader name of the skip-back button; {seconds} is the configured interval.
+#: app/src/screens/player.rs
+msgid "Skip back {seconds} seconds"
+msgstr ""
+
+#. TRANSLATORS: Screen-reader name of the skip-forward button; {seconds} is the configured interval.
+#: app/src/screens/player.rs
+msgid "Skip forward {seconds} seconds"
+msgstr ""
+
+#: app/src/screens/player.rs
+msgid "{count} hour"
+msgid_plural "{count} hours"
+msgstr[0] ""
+msgstr[1] ""
+
+#: app/src/screens/player.rs
+msgid "{count} second"
+msgid_plural "{count} seconds"
+msgstr[0] ""
+msgstr[1] ""
+
+#. TRANSLATORS: Screen-reader text for the position slider; {elapsed} and {total} are durations in words.
+#: app/src/screens/player.rs
+msgid "{elapsed} of {total}"
 msgstr ""
 
 #: app/src/screens/player.rs
@@ -926,6 +1006,10 @@ msgstr ""
 
 #: app/src/screens/settings.rs
 msgid "Remove Server"
+msgstr ""
+
+#: app/src/screens/settings.rs
+msgid "Server options"
 msgstr ""
 
 #: app/src/screens/settings.rs
@@ -1186,6 +1270,10 @@ msgstr ""
 
 #: app/src/screens/welcome.rs
 msgid "API Key"
+msgstr ""
+
+#: app/src/screens/welcome.rs
+msgid "Sign-in method"
 msgstr ""
 
 #: app/src/screens/welcome.rs
@@ -1452,6 +1540,10 @@ msgid "Download"
 msgstr ""
 
 #: app/src/widgets/download_scope_menu.rs
+msgid "Downloading"
+msgstr ""
+
+#: app/src/widgets/download_scope_menu.rs
 msgid "Offline mode is on — turn it off to download"
 msgstr ""
 
@@ -1493,6 +1585,14 @@ msgid "Next chapters"
 msgstr ""
 
 #: app/src/widgets/download_scope_menu.rs
+msgid "Fewer chapters"
+msgstr ""
+
+#: app/src/widgets/download_scope_menu.rs
+msgid "More chapters"
+msgstr ""
+
+#: app/src/widgets/download_scope_menu.rs
 msgid "Remaining chapters"
 msgstr ""
 
@@ -1510,6 +1610,12 @@ msgstr ""
 
 #: app/src/widgets/download_scope_menu.rs
 msgid "Clearing downloaded chapters"
+msgstr ""
+
+#. TRANSLATORS: Screen-reader text for a book card's progress bar; {percent} is 0-100.
+#: app/src/widgets/item_card.rs
+#, c-format
+msgid "{percent}% listened"
 msgstr ""
 
 #: app/src/widgets/item_card.rs

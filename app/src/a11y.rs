@@ -163,6 +163,14 @@ pub(crate) fn switch_row(row: &adw::ActionRow, switch: &gtk4::Switch) {
         let row = row.clone();
         move |switch| set_checked(&row, switch.is_active())
     });
+    // A row that isn't activatable (a tap on its text does nothing, and keeps doing nothing)
+    // still flips its switch from the keyboard.
+    if row.activatable_widget().is_none() {
+        let switch = switch.clone();
+        activate_on_enter(row, move || {
+            switch.activate();
+        });
+    }
 }
 
 fn set_checked(widget: &impl IsA<gtk4::Accessible>, checked: bool) {
@@ -218,10 +226,14 @@ pub(crate) fn focus_group(container: &impl IsA<gtk4::Widget>) {
             };
             let Some(container) = container.upgrade() else { return glib::Propagation::Proceed };
             let Some(root) = container.root() else { return glib::Propagation::Proceed };
+            let before = root.focus();
+            // On the container itself (a landing heading, say), Tab goes into it as usual.
+            if before.as_ref() == Some(container.upcast_ref()) {
+                return glib::Propagation::Proceed;
+            }
             let direction = if backward { gtk4::DirectionType::TabBackward } else { gtk4::DirectionType::TabForward };
             // With the group unable to take focus, GTK's focus chain skips it as a whole, so the
             // next stop is the one after (or before) the group.
-            let before = root.focus();
             container.set_can_focus(false);
             root.child_focus(direction);
             container.set_can_focus(true);

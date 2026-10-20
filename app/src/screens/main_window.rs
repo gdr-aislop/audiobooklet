@@ -1778,9 +1778,9 @@ pub(crate) mod tests {
         assert_eq!(focused_name().as_deref(), Some("Home"), "back on the shell, Home's heading again");
 
         // The mini bar's card: named after the book, and Enter on it opens the player again.
-        assert_eq!(label_of(&hooks.mini_bar.card).as_deref(), Some("Now playing: Project Hail Mary, Andy Weir"));
-        assert!(hooks.mini_bar.card.grab_focus());
-        crate::a11y::tests::press_key(&hooks.mini_bar.card, gtk4::gdk::Key::Return);
+        assert_eq!(label_of(&hooks.mini_bar.focus_card).as_deref(), Some("Now playing: Project Hail Mary, Andy Weir"));
+        assert!(hooks.mini_bar.focus_card.grab_focus());
+        crate::a11y::tests::press_key(&hooks.mini_bar.focus_card, gtk4::gdk::Key::Return);
         pump_until(|| matches!(focused_name().as_deref(), Some("Pause" | "Play")), std::time::Duration::from_secs(10));
         assert!(matches!(focused_name().as_deref(), Some("Pause" | "Play")), "Enter on the card opened the player, got {:?}", focused_name());
         hooks.mini_bar.play_button.emit_clicked();

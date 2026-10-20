@@ -22,6 +22,10 @@ and filtering.
 *Fast* - native Rust code, no Javascript in sight. Low-memory setting for disabling
 non-essential features and making it even faster.
 
+*Accessible* - works with the Orca screen reader and a keyboard: every control is
+named, play/pause and the seek slider speak their state, and each screen is
+announced as it opens.
+
 *Free Software* - GPLv3 licensed, only makes network calls to your Audiobookshelf
 server
 

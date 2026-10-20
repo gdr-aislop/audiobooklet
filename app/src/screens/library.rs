@@ -386,6 +386,7 @@ pub fn build(
     let downloaded_only_switch = gtk4::Switch::builder().valign(gtk4::Align::Center).build();
     let downloaded_only_row = adw::ActionRow::builder().title(tr("Downloaded only")).build();
     downloaded_only_row.add_suffix(&downloaded_only_switch);
+    crate::a11y::switch_row(&downloaded_only_row, &downloaded_only_switch);
 
     // The one manual home of the "In progress only" filter — the same state Home's Continue
     // Listening header sets on tap-through (see `apply_view`). All state surfaces (this switch,
@@ -395,10 +396,12 @@ pub fn build(
     let in_progress_only_switch = gtk4::Switch::builder().valign(gtk4::Align::Center).build();
     let in_progress_only_row = adw::ActionRow::builder().title(tr("In progress only")).build();
     in_progress_only_row.add_suffix(&in_progress_only_switch);
+    crate::a11y::switch_row(&in_progress_only_row, &in_progress_only_switch);
 
     let hide_finished_switch = gtk4::Switch::builder().valign(gtk4::Align::Center).build();
     let hide_finished_row = adw::ActionRow::builder().title(tr("Hide finished")).build();
     hide_finished_row.add_suffix(&hide_finished_switch);
+    crate::a11y::switch_row(&hide_finished_row, &hide_finished_switch);
 
     let grouping_row = combo_row(&tr("Grouping"), "", &[tr("None"), tr("By Series"), tr("By Author")]);
     let sort_by_row = combo_row(
@@ -450,12 +453,12 @@ pub fn build(
         crate::a11y::radio(chip);
         category_row.append(chip);
     }
-    // One Tab stop for the row; Left/Right move between chips.
+    // One Tab stop for the row; Left/Right move between chips. The row is also where a screen
+    // reader lands on this tab (the header's title widget is the search entry, which must not
+    // take focus by itself: that would open the on-screen keyboard); Tab then enters the chips.
     crate::a11y::focus_group(&category_row);
+    crate::a11y::landing(&category_row, &tr("Library"));
     let category_scroller = gtk4::ScrolledWindow::builder().hscrollbar_policy(gtk4::PolicyType::Automatic).vscrollbar_policy(gtk4::PolicyType::Never).child(&category_row).build();
-    // Where a screen reader lands on this tab (the header's title widget is the search entry,
-    // which must not take focus by itself: that would open the on-screen keyboard).
-    crate::a11y::landing(&category_scroller, &tr("Library"));
 
     // Populated fresh from `data.items` whenever it reloads (`rebuild_genre_chips`), same
     // full-rebuild convention as `flow_box`/`list_box`. Hidden until the Genre chip is active.
@@ -581,7 +584,7 @@ pub fn build(
     // screen's and Home's own overlays. Manual sync triggers report through this one.
     let toast_overlay = adw::ToastOverlay::new();
     toast_overlay.set_child(Some(&root));
-    crate::a11y::focus_landing(&category_scroller, &toast_overlay);
+    crate::a11y::focus_landing(&category_row, &toast_overlay);
 
     let widgets = LibraryWidgets {
         status_page: status_page.clone(),
