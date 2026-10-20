@@ -28,11 +28,23 @@ use gtk4::{glib, AccessibleRole, AccessibleTristate};
 /// The accessible name — what Orca says first for the control.
 pub(crate) fn name(widget: &impl IsA<gtk4::Accessible>, text: &str) {
     widget.update_property(&[Property::Label(text)]);
+    if let Some(inner) = focused_part_of(widget) {
+        inner.update_property(&[Property::Label(text)]);
+    }
 }
 
 /// The accessible description — spoken after the name and role.
 pub(crate) fn describe(widget: &impl IsA<gtk4::Accessible>, text: &str) {
     widget.update_property(&[Property::Description(text)]);
+    if let Some(inner) = focused_part_of(widget) {
+        inner.update_property(&[Property::Description(text)]);
+    }
+}
+
+/// A `GtkMenuButton` is never the focused widget: the toggle button inside it is, and GTK 4.8
+/// gives that one no name of its own. Names and descriptions go on both.
+fn focused_part_of(widget: &impl IsA<gtk4::Accessible>) -> Option<gtk4::Widget> {
+    widget.as_ref().dynamic_cast_ref::<gtk4::MenuButton>()?.first_child()
 }
 
 /// [`name`], but only when the text differs from the last one set here — for closures that run
@@ -79,22 +91,25 @@ pub(crate) fn landing(widget: &impl IsA<gtk4::Widget>, text: &str) {
 }
 
 /// Focuses `widget` whenever it is mapped (a screen shown, a tab switched to, the shell
-/// returning from the player), unless focus is already somewhere inside `screen` — Ctrl+F
-/// focusing the search entry, for one — and never with a focus ring.
+/// returning from the player), unless the user is already typing somewhere inside `screen` —
+/// Ctrl+F put focus in the search entry, for one — and never with a focus ring.
 pub(crate) fn focus_landing(widget: &impl IsA<gtk4::Widget>, screen: &impl IsA<gtk4::Widget>) {
     let screen = screen.as_ref().downgrade();
     widget.as_ref().connect_map(move |widget| {
         let widget = widget.downgrade();
         let screen = screen.clone();
         // Content is swapped in an idle callback, and so is this: the old focus widget is gone by
-        // now, and whatever the new screen focused on its own is in place.
+        // now, and whatever the new screen focused on its own is in place. (GTK's own choice of
+        // an initial focus, the first button it finds, is what this replaces.)
         glib::idle_add_local_once(move || {
             let (Some(widget), Some(screen)) = (widget.upgrade(), screen.upgrade()) else { return };
             let Some(root) = widget.root() else { return };
-            if root.focus().is_some_and(|focus| focus.is_ancestor(&screen) || focus == screen) {
-                return;
+            let typing = root.focus().is_some_and(|focus| {
+                (focus.is_ancestor(&screen) || focus == screen) && (focus.is::<gtk4::Editable>() || focus.is::<gtk4::TextView>())
+            });
+            if !typing {
+                focus_now(&widget);
             }
-            focus_now(&widget);
         });
     });
 }
@@ -171,10 +186,10 @@ pub(crate) fn labelled_by(widget: &impl IsA<gtk4::Accessible>, label: &impl IsA<
 }
 
 /// Marks a field as holding a wrong value, with `message` as the error Orca can read.
-pub(crate) fn invalid(widget: &impl IsA<gtk4::Accessible>, invalid: bool, message: Option<&impl IsA<gtk4::Accessible>>) {
+pub(crate) fn invalid(widget: &impl IsA<gtk4::Accessible>, invalid: bool, message: Option<&gtk4::Widget>) {
     widget.update_state(&[State::Invalid(if invalid { gtk4::AccessibleInvalidState::True } else { gtk4::AccessibleInvalidState::False })]);
     match message {
-        Some(message) if invalid => widget.update_relation(&[Relation::ErrorMessage(&[message.as_ref()])]),
+        Some(message) if invalid => widget.update_relation(&[Relation::ErrorMessage(&[message.upcast_ref()])]),
         _ => widget.reset_relation(gtk4::AccessibleRelation::ErrorMessage),
     }
 }
@@ -246,6 +261,14 @@ pub(crate) mod tests {
         a_standalone_toggle_is_a_switch_and_a_switch_row_is_one_stop();
         an_entry_row_s_text_is_named_after_the_row();
         a_landing_is_a_focusable_named_heading();
+        a_combo_row_describes_its_value();
+    }
+
+    fn a_combo_row_describes_its_value() {
+        let row = crate::widgets::combo_row("Default speed", "Speed every book starts at.", &["0.8×".to_string(), "1.0×".to_string()]);
+        assert_eq!(description_of(&row).as_deref(), Some("0.8×. Speed every book starts at."));
+        row.set_selected(1);
+        assert_eq!(description_of(&row).as_deref(), Some("1.0×. Speed every book starts at."));
     }
 
     fn a_name_is_read_back_and_only_set_again_when_it_changes() {
@@ -333,8 +356,47 @@ pub(crate) mod tests {
         }
     }
 
+    /// Presses Tab (or Shift+Tab) on a [`focus_group`] container, as the keyboard would: runs
+    /// its key controller directly, since nothing here can synthesize a real key event.
+    pub(crate) fn press_tab(container: &impl IsA<gtk4::Widget>, backward: bool) -> bool {
+        let key = if backward { gtk4::gdk::Key::ISO_Left_Tab } else { gtk4::gdk::Key::Tab };
+        let modifiers = if backward { gtk4::gdk::ModifierType::SHIFT_MASK } else { gtk4::gdk::ModifierType::empty() };
+        press_key_with(container, key, modifiers)
+    }
+
+    /// Presses `key` on a widget that has one of this module's key controllers.
+    pub(crate) fn press_key(widget: &impl IsA<gtk4::Widget>, key: gtk4::gdk::Key) -> bool {
+        press_key_with(widget, key, gtk4::gdk::ModifierType::empty())
+    }
+
+    fn press_key_with(widget: &impl IsA<gtk4::Widget>, key: gtk4::gdk::Key, modifiers: gtk4::gdk::ModifierType) -> bool {
+        use glib::translate::IntoGlib;
+        let controllers = widget.as_ref().observe_controllers();
+        let controller = (0..controllers.n_items())
+            .filter_map(|i| controllers.item(i).and_downcast::<gtk4::EventControllerKey>())
+            .next()
+            .expect("the widget has a key controller");
+        controller.emit_by_name::<bool>("key-pressed", &[&key.into_glib(), &23u32, &modifiers])
+    }
+
+    /// A short name for whatever has focus in `window`, for walking the Tab order in tests.
+    pub(crate) fn focused_name(window: &impl IsA<gtk4::Window>) -> String {
+        let Some(focus) = GtkWindowExt::focus(window.as_ref()) else { return "nothing".to_string() };
+        label_of(&focus)
+            .or_else(|| focus.downcast_ref::<gtk4::Button>().and_then(|button| button.label().map(|label| label.to_string())))
+            .or_else(|| focus.downcast_ref::<adw::PreferencesRow>().map(|row| row.title().to_string()))
+            .unwrap_or_else(|| focus.type_().name().to_string())
+    }
+
     pub(crate) fn role_of(widget: &impl IsA<gtk4::Accessible>) -> AccessibleRole {
         widget.accessible_role()
+    }
+
+    pub(crate) fn is_expanded(widget: &impl IsA<gtk4::Accessible>) -> bool {
+        use glib::translate::ToGlibPtr;
+        let accessible: *mut gtk4::ffi::GtkAccessible = widget.as_ref().to_glib_none().0;
+        // SAFETY: a plain FFI call; the boolean is passed as the C int the function expects.
+        unsafe { gtk4::ffi::gtk_test_accessible_check_state(accessible, gtk4::ffi::GTK_ACCESSIBLE_STATE_EXPANDED, glib::ffi::GTRUE).is_null() }
     }
 
     pub(crate) fn is_checked(widget: &impl IsA<gtk4::Accessible>) -> bool {

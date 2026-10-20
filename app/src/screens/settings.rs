@@ -96,7 +96,9 @@ pub fn build(
     let toast_overlay = adw::ToastOverlay::new();
 
     let header = adw::HeaderBar::new();
-    header.set_title_widget(Some(&adw::WindowTitle::new(&tr("Settings"), "")));
+    let settings_title = adw::WindowTitle::new(&tr("Settings"), "");
+    crate::a11y::landing(&settings_title, &tr("Settings"));
+    header.set_title_widget(Some(&settings_title));
 
     let page = adw::PreferencesPage::new();
 
@@ -739,6 +741,7 @@ pub fn build(
     content.append(&header);
     content.append(&page);
     toast_overlay.set_child(Some(&content));
+    crate::a11y::focus_landing(&settings_title, &toast_overlay);
 
     SettingsScreen {
         root: toast_overlay.clone().upcast(),
@@ -829,7 +832,9 @@ pub(crate) fn push_about(window: &adw::ApplicationWindow) {
     });
 
     let header = adw::HeaderBar::new();
-    header.set_title_widget(Some(&adw::WindowTitle::new(&tr("About Audiobooklet"), "")));
+    let about_title = adw::WindowTitle::new(&tr("About Audiobooklet"), "");
+    crate::a11y::landing(&about_title, &tr("About Audiobooklet"));
+    header.set_title_widget(Some(&about_title));
     header.pack_start(&back_button);
 
     let page = adw::PreferencesPage::new();
@@ -870,6 +875,7 @@ pub(crate) fn push_about(window: &adw::ApplicationWindow) {
     content.append(&header);
     content.append(&page);
     toast_overlay.set_child(Some(&content));
+    crate::a11y::focus_landing(&about_title, &toast_overlay);
 
     crate::widgets::swap_content(window, &toast_overlay);
 }

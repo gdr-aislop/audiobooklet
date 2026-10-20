@@ -39,6 +39,7 @@ pub struct WelcomeScreen {
 
 #[cfg(test)]
 pub struct TestHooks {
+    pub landing: gtk4::Image,
     pub url_row: adw::EntryRow,
     pub username_row: adw::EntryRow,
     pub password_row: adw::PasswordEntryRow,
@@ -98,6 +99,9 @@ pub fn build(
         .pixel_size(40)
         .css_classes(["welcome-icon"])
         .build();
+    // Where a screen reader lands when the screen appears (`focus_landing` below): the title
+    // read as a heading. On the icon rather than the title label, which GTK won't focus.
+    crate::a11y::landing(&icon, &tr("Connect to your Audiobookshelf server"));
     let title = gtk4::Label::builder()
         .label(tr("Connect to your Audiobookshelf server"))
         .wrap(true)
@@ -121,12 +125,16 @@ pub fn build(
     let mode_password = gtk4::ToggleButton::builder().label(tr("Password")).active(true).build();
     let mode_token = gtk4::ToggleButton::builder().label(tr("API Key")).build();
     mode_token.set_group(Some(&mode_password));
+    crate::a11y::radio(&mode_password);
+    crate::a11y::radio(&mode_token);
     let mode_box = gtk4::Box::builder()
         .css_classes(["linked"])
         .halign(gtk4::Align::Fill)
         .margin_top(22)
         .margin_bottom(16)
+        .accessible_role(gtk4::AccessibleRole::RadioGroup)
         .build();
+    crate::a11y::name(&mode_box, &tr("Sign-in method"));
     mode_password.set_hexpand(true);
     mode_token.set_hexpand(true);
     mode_box.append(&mode_password);
@@ -157,8 +165,14 @@ pub fn build(
         .activatable_widget(&remember_switch)
         .build();
     remember_row.add_suffix(&remember_switch);
+    crate::a11y::switch_row(&remember_row, &remember_switch);
     let token_row = adw::EntryRow::builder().title(tr("API Key")).show_apply_button(false).build();
     token_row.set_visible(false);
+    // The rows' inner text widgets are what take focus; GTK 4.8 gives them no name of their own.
+    for row in [&url_row, &username_row, &token_row] {
+        crate::a11y::text_field(row);
+    }
+    crate::a11y::text_field(&password_row);
 
     list.append(&url_row);
     list.append(&username_row);
@@ -181,6 +195,7 @@ pub fn build(
         .activatable_widget(&untrusted_switch)
         .build();
     untrusted_row.add_suffix(&untrusted_switch);
+    crate::a11y::switch_row(&untrusted_row, &untrusted_switch);
     untrusted_switch.connect_state_set({
         let settings = settings.clone();
         move |_, allow| {
@@ -201,6 +216,11 @@ pub fn build(
     advanced_row.add_row(&untrusted_row);
     advanced_row.add_row(&headers_row);
     advanced_row.add_row(&certificate_row);
+    // The expander's own header row is what takes focus; its open/closed state goes there.
+    if let Some(header) = crate::widgets::find_descendant::<adw::ActionRow>(advanced_row.upcast_ref()) {
+        crate::a11y::expanded(&header, advanced_row.is_expanded());
+        advanced_row.connect_expanded_notify(move |row| crate::a11y::expanded(&header, row.is_expanded()));
+    }
     list.append(&advanced_row);
     content.append(&list);
 
@@ -367,8 +387,11 @@ pub fn build(
                 if password_mode {
                     username_row.add_css_class("error");
                     password_row.add_css_class("error");
+                    mark_invalid(&username_row, true, Some(banner.widget().upcast_ref()));
+                    mark_invalid(&password_row, true, Some(banner.widget().upcast_ref()));
                 } else {
                     token_row.add_css_class("error");
+                    mark_invalid(&token_row, true, Some(banner.widget().upcast_ref()));
                 }
             }
             if advanced_can_fix(err) {
@@ -379,6 +402,8 @@ pub fn build(
             banner.set_description(Some(&description));
             banner.set_details(login_details(err).as_deref());
             banner.set_revealed(true);
+            // Nothing else has focus by now (the form was insensitive): the failure is spoken.
+            banner.focus();
         }
     });
 
@@ -391,6 +416,9 @@ pub fn build(
             mode_box.set_sensitive(!busy);
             list.set_sensitive(!busy);
             connect_button.set_label(&if busy { tr("Connecting…") } else { tr("Connect") });
+            // The name changes while the button still has focus, so a screen reader speaks it;
+            // the button then goes insensitive and the focus with it, as before.
+            crate::a11y::name(&connect_button, &if busy { tr("Connecting…") } else { tr("Connect") });
             connect_button.set_sensitive(!busy);
         }
     });
@@ -515,6 +543,9 @@ pub fn build(
             username_row.remove_css_class("error");
             password_row.remove_css_class("error");
             token_row.remove_css_class("error");
+            mark_invalid(&username_row, false, None);
+            mark_invalid(&password_row, false, None);
+            mark_invalid(&token_row, false, None);
 
             let url = url_row.text().trim().to_string();
             let username = username_row.text().trim().to_string();
@@ -593,6 +624,7 @@ pub fn build(
 
     #[cfg(test)]
     let hooks = TestHooks {
+        landing: icon.clone(),
         url_row: url_row.clone(),
         username_row: username_row.clone(),
         password_row: password_row.clone(),
@@ -613,6 +645,7 @@ pub fn build(
     // keyboard is up — unscrolled, its minimum height would be the window's while it's shown,
     // and the window never shrinks back afterwards.
     let scroller = gtk4::ScrolledWindow::builder().hscrollbar_policy(gtk4::PolicyType::Never).vexpand(true).child(&content).build();
+    crate::a11y::focus_landing(&icon, &scroller);
 
     WelcomeScreen {
         root: scroller.upcast(),
@@ -649,6 +682,14 @@ fn replacement_warning(kind: &ReplacementKind, previous: &ReloginSeed, url: &str
 
 /// Whether the login screen's Advanced section holds the fix for this failure — it then opens by
 /// itself.
+/// Marks a sign-in field as holding a wrong value for a screen reader, with the banner as the
+/// error it can read — on the row's inner text widget, which is what has focus.
+fn mark_invalid(row: &impl IsA<adw::EntryRow>, invalid: bool, message: Option<&gtk4::Widget>) {
+    if let Some(text) = row.as_ref().delegate() {
+        crate::a11y::invalid(&text, invalid, message);
+    }
+}
+
 fn advanced_can_fix(err: &CoreError) -> bool {
     use abs_api::LoginError as L;
     matches!(err, CoreError::Login(L::Tls(_) | L::ClientCertificate(_) | L::Blocked(_)) | CoreError::ConnectionSetup(_))
@@ -807,6 +848,64 @@ pub(crate) mod tests {
                 "a bad password isn't a low-level transport error — there's no raw detail to show"
             );
         }
+    }
+
+    /// Not a `#[test]` itself — see `main.rs`'s `mod tests`. What a screen reader gets on this
+    /// screen: a heading to land on, fields whose inner text is named after the row, the
+    /// sign-in method as radio buttons, one-stop switch rows, the Advanced expander's state,
+    /// "Connecting…" spoken from the button, and a failure that takes focus as an alert naming
+    /// the invalid fields.
+    pub(crate) fn run_screen_reader_support(runtime: &tokio::runtime::Runtime) {
+        use crate::a11y::tests::{is_checked, is_expanded, label_of, role_of};
+        let pool = runtime.block_on(pool());
+        let screen = build(pool, crate::test_support::test_paths(), None, |_| {}, None);
+        let hooks = screen.test_hooks();
+        let window = gtk4::Window::builder().default_width(360).default_height(720).child(&screen.root).build();
+        window.present();
+        pump_until(|| hooks.landing.has_focus(), Duration::from_secs(5));
+        assert!(hooks.landing.has_focus(), "the screen's heading takes focus on arrival");
+        assert_eq!(label_of(&hooks.landing).as_deref(), Some("Connect to your Audiobookshelf server"));
+        assert_eq!(role_of(&hooks.landing), gtk4::AccessibleRole::Heading);
+        assert!(!window.gets_focus_visible(), "no focus ring for a sighted user");
+
+        for (row, title) in [(&hooks.url_row, "Server URL"), (&hooks.username_row, "Username"), (&hooks.key_row, "API Key")] {
+            let text = row.delegate().unwrap();
+            assert_eq!(role_of(&text), gtk4::AccessibleRole::TextBox, "{title}");
+            assert_eq!(label_of(&text).as_deref(), Some(title));
+        }
+        assert_eq!(label_of(&hooks.password_row.delegate().unwrap()).as_deref(), Some("Password"));
+
+        assert_eq!(role_of(&hooks.mode_key), gtk4::AccessibleRole::Radio);
+        assert!(!is_checked(&hooks.mode_key), "Password is the mode at first");
+        hooks.mode_key.set_active(true);
+        assert!(is_checked(&hooks.mode_key));
+        hooks.mode_key.set_active(false);
+
+        assert!(!hooks.remember_switch.is_focusable(), "the row is the one Tab stop");
+        let remember_row = hooks.remember_switch.parent().and_then(|suffixes| suffixes.ancestor(adw::ActionRow::static_type())).unwrap();
+        assert_eq!(role_of(&remember_row), gtk4::AccessibleRole::Switch);
+        assert!(is_checked(&remember_row));
+        hooks.remember_switch.set_active(false);
+        assert!(!is_checked(&remember_row));
+
+        let advanced_header = crate::widgets::find_descendant::<adw::ActionRow>(hooks.advanced_row.upcast_ref()).unwrap();
+        assert_eq!(advanced_header.title(), "Advanced", "the expander's own header row carries the state");
+        assert!(!is_expanded(&advanced_header));
+        hooks.advanced_row.set_expanded(true);
+        assert!(is_expanded(&advanced_header));
+
+        hooks.url_row.set_text("http://127.0.0.1:1");
+        hooks.username_row.set_text("demo");
+        hooks.password_row.set_text("demo");
+        hooks.connect_button.grab_focus();
+        hooks.connect_button.emit_clicked();
+        assert_eq!(label_of(&hooks.connect_button).as_deref(), Some("Connecting…"), "spoken before the button loses focus");
+        pump_until(|| hooks.banner.widget().reveals_child(), Duration::from_secs(15));
+        pump_until(|| hooks.banner.has_focus(), Duration::from_secs(5));
+        assert!(hooks.banner.has_focus(), "the failure takes focus, so it is spoken");
+        assert_eq!(hooks.banner.accessible_name().as_deref(), Some("Can't reach this server. Check the address and your connection."));
+        assert_eq!(label_of(&hooks.connect_button).as_deref(), Some("Connect"));
+        assert!(!window.gets_focus_visible());
     }
 
     /// The re-login flow end to end: pre-fill, the Cancel affordance, and confirm-before-replace.

@@ -121,7 +121,9 @@ pub fn build(
     on_open: Rc<dyn Fn(crate::player::PlayRequest)>,
 ) -> DownloadsScreen {
     let header = adw::HeaderBar::new();
-    header.set_title_widget(Some(&adw::WindowTitle::new(&tr("Downloads"), "")));
+    let downloads_title = adw::WindowTitle::new(&tr("Downloads"), "");
+    crate::a11y::landing(&downloads_title, &tr("Downloads"));
+    header.set_title_widget(Some(&downloads_title));
 
     // Starts insensitive — nothing to clear until the first refresh below finds at least one
     // row; `spawn_refresh` toggles this the same place it already toggles
@@ -142,6 +144,7 @@ pub fn build(
     content.append(&scroller);
     let toast_overlay = adw::ToastOverlay::new();
     toast_overlay.set_child(Some(&content));
+    crate::a11y::focus_landing(&downloads_title, &toast_overlay);
 
     let widgets = Rc::new(Widgets {
         pool,

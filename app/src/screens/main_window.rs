@@ -914,6 +914,10 @@ pub fn build(
         }
     });
     mini_bar.root.add_controller(mini_bar_gesture);
+    mini_bar.set_on_open({
+        let open_player = open_player.clone();
+        move || open_player()
+    });
 
     #[cfg(test)]
     let toast_overlay_hook = root.clone();
@@ -1685,6 +1689,103 @@ pub(crate) mod tests {
     /// asserts on `TestHooks::open_player`, the shared closure both gesture outcomes call — the
     /// distance/direction decision itself is covered in isolation by the `mini_bar_gesture_*`
     /// tests above.
+    /// Not a `#[test]` itself — see `main.rs`'s `mod tests`. Where a screen reader lands: the
+    /// shown tab's heading when the shell appears and on every tab switch (never the search
+    /// entry, which only Ctrl+F focuses — and keeps), the play/pause button when the player
+    /// opens, the tab's heading again when it collapses. Never with a focus ring.
+    pub(crate) fn run_each_screen_focuses_its_heading_for_screen_readers(runtime: &tokio::runtime::Runtime) {
+        use crate::a11y::tests::label_of;
+        use crate::screens::home::tests::item_json;
+
+        let mock_server = runtime.block_on(wiremock::MockServer::start());
+        runtime.block_on(
+            wiremock::Mock::given(wiremock::matchers::method("GET"))
+                .and(wiremock::matchers::path("/api/libraries"))
+                .respond_with(wiremock::ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                    "libraries": [{ "id": "e4bb1afb-4a4f-4dd6-8be0-e615d233185b", "name": "Audiobooks", "mediaType": "book" }]
+                })))
+                .mount(&mock_server),
+        );
+        runtime.block_on(
+            wiremock::Mock::given(wiremock::matchers::method("GET"))
+                .and(wiremock::matchers::path("/api/libraries/e4bb1afb-4a4f-4dd6-8be0-e615d233185b/items"))
+                .respond_with(wiremock::ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                    "results": [item_json("item-1", "Project Hail Mary")]
+                })))
+                .mount(&mock_server),
+        );
+        runtime.block_on(crate::player::tests::mock_playable_item(&mock_server, "item-1", 5));
+
+        let pool = runtime.block_on(pool());
+        let server_id = runtime.block_on(abs_storage::repo::servers::add(&pool, &mock_server.uri())).unwrap();
+        let account_id = runtime.block_on(abs_storage::repo::accounts::add(&pool, &server_id, "jane", "token123", None)).unwrap();
+        runtime.block_on(abs_storage::repo::accounts::set_active(&pool, &account_id)).unwrap();
+        let server = runtime.block_on(abs_storage::repo::servers::get(&pool, &server_id)).unwrap();
+        let account = runtime.block_on(abs_storage::repo::accounts::get(&pool, &account_id)).unwrap();
+
+        let app_window = adw::ApplicationWindow::builder().build();
+        let session = abs_core::auth::Session::new(pool.clone(), &server, &account);
+        let servers_with_accounts = vec![(server.clone(), vec![account.clone()])];
+        let window = build(
+            pool,
+            crate::test_support::test_paths(),
+            server,
+            account,
+            session,
+            abs_core::settings::PlaybackSettings::default(),
+            abs_core::settings::Theme::default(),
+            servers_with_accounts,
+            app_window.clone(),
+        );
+        let hooks = window.test_hooks();
+        app_window.set_content(Some(&window.root));
+        app_window.present();
+        pump_until(|| app_window.is_mapped(), std::time::Duration::from_secs(5));
+
+        let focused_name = || GtkWindowExt::focus(&app_window).and_then(|focus| label_of(&focus));
+        pump_until(|| focused_name().as_deref() == Some("Home"), std::time::Duration::from_secs(5));
+        assert_eq!(focused_name().as_deref(), Some("Home"), "the shell opens on Home's heading");
+        assert!(!app_window.gets_focus_visible(), "no focus ring for a sighted user");
+
+        hooks.switch_tab.activate(Some(&"library".to_variant()));
+        pump_until(|| focused_name().as_deref() == Some("Library"), std::time::Duration::from_secs(5));
+        assert!(!hooks.library_search.has_focus() && !GtkWindowExt::focus(&app_window).is_some_and(|focus| focus.is_ancestor(&hooks.library_search)), "a tab switch never focuses the search entry");
+
+        hooks.open_library_search.activate(None);
+        crate::test_support::run_pending_main_loop_work();
+        pump_until(|| false, std::time::Duration::from_millis(200));
+        assert!(GtkWindowExt::focus(&app_window).is_some_and(|focus| focus == hooks.library_search || focus.is_ancestor(&hooks.library_search)), "Ctrl+F's focus on the search entry is kept");
+
+        for (name, heading) in [("downloads", "Downloads"), ("settings", "Settings"), ("home", "Home")] {
+            hooks.switch_tab.activate(Some(&name.to_variant()));
+            pump_until(|| focused_name().as_deref() == Some(heading), std::time::Duration::from_secs(5));
+            assert_eq!(focused_name().as_deref(), Some(heading), "{name}");
+        }
+
+        // Into the player (through Item Detail's Play) and back.
+        let home_root = hooks.stack.child_by_name("home").expect("home tab exists");
+        pump_until(|| find_card_button(&home_root).is_some(), std::time::Duration::from_secs(10));
+        find_card_button(&home_root).expect("a synced item's card should render").emit_clicked();
+        pump_until(|| focused_name().as_deref() == Some("Project Hail Mary"), std::time::Duration::from_secs(5));
+        assert_eq!(focused_name().as_deref(), Some("Project Hail Mary"), "Item Detail lands on the book's title");
+        let content = app_window.content().expect("Item Detail should be showing");
+        find_button_labeled(&content, "Play").expect("Item Detail's Play button").emit_clicked();
+        pump_until(|| matches!(focused_name().as_deref(), Some("Pause" | "Play")), std::time::Duration::from_secs(10));
+        assert!(matches!(focused_name().as_deref(), Some("Pause" | "Play")), "the player lands on play/pause, got {:?}", focused_name());
+        assert!(!app_window.gets_focus_visible());
+        WidgetExt::activate_action(&app_window, "player.collapse", None).ok();
+        pump_until(|| focused_name().as_deref() == Some("Home"), std::time::Duration::from_secs(5));
+        assert_eq!(focused_name().as_deref(), Some("Home"), "back on the shell, Home's heading again");
+
+        // The mini bar's card: named after the book, and Enter on it opens the player again.
+        assert_eq!(label_of(&hooks.mini_bar.card).as_deref(), Some("Now playing: Project Hail Mary, Andy Weir"));
+        assert!(hooks.mini_bar.card.grab_focus());
+        crate::a11y::tests::press_key(&hooks.mini_bar.card, gtk4::gdk::Key::Return);
+        pump_until(|| matches!(focused_name().as_deref(), Some("Pause" | "Play")), std::time::Duration::from_secs(10));
+        assert!(matches!(focused_name().as_deref(), Some("Pause" | "Play")), "Enter on the card opened the player, got {:?}", focused_name());
+        hooks.mini_bar.play_button.emit_clicked();
+    }
+
     pub(crate) fn run_mini_bar_open_player_swaps_to_the_full_player_screen(runtime: &tokio::runtime::Runtime) {
         use crate::screens::home::tests::item_json;
 

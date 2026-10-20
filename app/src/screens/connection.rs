@@ -78,7 +78,9 @@ pub fn build(
     });
 
     let header = adw::HeaderBar::new();
-    header.set_title_widget(Some(&adw::WindowTitle::new(&tr("Connection"), "")));
+    let connection_title = adw::WindowTitle::new(&tr("Connection"), "");
+    crate::a11y::landing(&connection_title, &tr("Connection"));
+    header.set_title_widget(Some(&connection_title));
     header.pack_start(&back_button);
 
     let page = adw::PreferencesPage::new();
@@ -399,6 +401,7 @@ pub fn build(
     content.append(&page);
     content.append(&disconnect_button);
     toast_overlay.set_child(Some(&content));
+    crate::a11y::focus_landing(&connection_title, &toast_overlay);
 
     ConnectionScreen {
         root: toast_overlay.clone().upcast(),

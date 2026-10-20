@@ -363,6 +363,8 @@ pub fn build(
     root.append(&header);
     root.append(error_banner.widget());
     root.append(&content_scroller);
+    // A screen reader arrives on play/pause, which says the state and the chapter.
+    crate::a11y::focus_landing(&play_button, &root);
 
     // Swipe-down-to-collapse — the counterpart to the mini bar's own swipe-up-to-open gesture
     // (see `main_window`'s `mini_bar_gesture_should_open`). Added directly on `root`, the same
@@ -580,13 +582,16 @@ pub fn build(
                     let markers = abs_core::download_tracks::chapter_offline_markers_for_item(&pool, &server_id, &item_id, &chapter_ranges).await.unwrap_or_default();
                     let position = controller.snapshot().map(|s| s.position_seconds).unwrap_or(0.0);
                     // New rows again: put the current one back in view, unless the list has been
-                    // scrolled by hand since (the lookup can take a while on a phone).
+                    // scrolled by hand since (the lookup can take a while on a phone). Keyboard
+                    // focus goes back to the row it was on, wherever that was.
                     let left_alone = chapter_scroll.left_alone(opening);
+                    let focused = chapters_list.focus_child().and_downcast::<gtk4::ListBoxRow>().map(|row| row.index());
                     if let Some(current) = rebuild_chapters_list(&chapters_list, &chapters, position, &markers) {
                         if left_alone {
                             chapter_scroll.scroll_to(opening, current);
-                            focus_chapter_row(&chapters_list, current);
                         }
+                        // (Or to the chapter playing, when the lookup beat the first focus.)
+                        focus_chapter_row(&chapters_list, focused.map_or(current, |index| index as usize));
                     }
                 });
             }
@@ -1605,6 +1610,8 @@ pub(crate) mod tests {
         assert!(spoken.ends_with("of 4 seconds. 9 seconds left in book") || spoken.ends_with("of 4 seconds. 10 seconds left in book"), "{spoken}");
         hooks.scrubber.set_value(3.0);
         assert_eq!(description_of(&hooks.scrubber).as_deref(), Some("3 seconds of 4 seconds"), "the knob's own moves are spoken at once");
+        // The knob's move seeks once it has settled; let that land before seeking elsewhere.
+        pump_until(|| (controller.snapshot().unwrap().position_seconds - 3.0).abs() < 0.2, Duration::from_secs(5));
 
         assert_eq!(label_of(&hooks.speed_button).as_deref(), Some("Playback speed: 1.0×"));
         let preset = |text: &str| crate::test_support::find_button_with_label(hooks.speed_popover_box.upcast_ref(), text).unwrap();
@@ -1628,7 +1635,14 @@ pub(crate) mod tests {
         hooks.chapters_popover.popup();
         pump_until(|| hooks.chapters_list.row_at_index(1).is_some_and(|row| row.has_focus()), Duration::from_secs(3));
         let current = hooks.chapters_list.row_at_index(1).unwrap();
-        assert!(current.has_focus(), "the chapter playing has keyboard focus");
+        assert!(
+            current.has_focus(),
+            "the chapter playing has keyboard focus; focus is on {} (list focus child: {:?}, popover visible: {}, position {:?})",
+            crate::a11y::tests::focused_name(&window),
+            hooks.chapters_list.focus_child().and_downcast::<gtk4::ListBoxRow>().map(|row| row.index()),
+            hooks.chapters_popover.is_visible(),
+            controller.snapshot().map(|s| (s.position_seconds, s.is_playing, s.is_loading))
+        );
         assert_eq!(label_of(&current).as_deref(), Some("Chapter One, 0:04"));
         assert!(!window.gets_focus_visible(), "no focus ring for a sighted user");
         hooks.chapters_popover.popdown();
