@@ -16,6 +16,21 @@ msgstr ""
 "|| n%100>=20) ? 1 : 2);\n"
 
 #: app/src/application.rs
+msgid "Start over?"
+msgstr ""
+
+#: app/src/application.rs
+msgid ""
+"The damaged database is kept next to the new one, renamed. You'll sign in "
+"again; downloaded books stay on the device but need downloading again to "
+"appear."
+msgstr ""
+
+#: app/src/application.rs
+msgid "Start Over"
+msgstr ""
+
+#: app/src/application.rs
 msgid "General"
 msgstr "Ogólne"
 
@@ -23,7 +38,7 @@ msgstr "Ogólne"
 msgid "Show shortcuts"
 msgstr "Pokaż skróty"
 
-#: app/src/application.rs
+#: app/src/application.rs app/src/screens/startup_problem.rs
 msgid "Quit"
 msgstr "Zakończ"
 
@@ -350,7 +365,8 @@ msgstr "{finished}/{total} rozdziałów"
 msgid "{speed}/s"
 msgstr "{speed}/s"
 
-#: app/src/screens/home.rs app/src/widgets/banner.rs
+#: app/src/screens/home.rs app/src/screens/startup_problem.rs
+#: app/src/widgets/banner.rs
 msgid "Details"
 msgstr "Szczegóły"
 
@@ -358,7 +374,7 @@ msgstr "Szczegóły"
 msgid "Hide details"
 msgstr "Ukryj szczegóły"
 
-#: app/src/screens/home.rs
+#: app/src/screens/home.rs app/src/screens/startup_problem.rs
 msgid "Try again"
 msgstr "Spróbuj ponownie"
 
@@ -1309,6 +1325,25 @@ msgstr "Zapisywanie ustawień odtwarzania"
 msgid "Connect"
 msgstr "Połącz"
 
+#: app/src/screens/startup_problem.rs
+msgid "Get the latest version"
+msgstr ""
+
+#: app/src/screens/startup_problem.rs
+#, fuzzy
+msgid "Start over…"
+msgstr "Uruchamianie…"
+
+#. TRANSLATORS: {path} is the folder holding the app's log files.
+#: app/src/screens/startup_problem.rs
+msgid "Logs: {path}"
+msgstr ""
+
+#: app/src/screens/startup_problem.rs
+#, fuzzy
+msgid "Copy details"
+msgstr "Szczegóły książki"
+
 #: app/src/screens/welcome.rs
 msgid "Connect to your Audiobookshelf server"
 msgstr "Połącz się z serwerem Audiobookshelf"
@@ -1492,6 +1527,98 @@ msgstr "Spróbuj ponownie."
 #: app/src/screens/welcome.rs
 msgid "Something went wrong"
 msgstr "Coś poszło nie tak"
+
+#: app/src/startup.rs
+msgid "This version of Audiobooklet is too old for your library"
+msgstr ""
+
+#: app/src/startup.rs
+#, fuzzy
+msgid "Couldn't update your library to this version"
+msgstr "Nie udało się zaktualizować biblioteki"
+
+#: app/src/startup.rs
+msgid "Your device is out of storage space"
+msgstr ""
+
+#: app/src/startup.rs
+msgid "Audiobooklet can't write to its data folder"
+msgstr ""
+
+#: app/src/startup.rs
+msgid "Audiobooklet's library is in use"
+msgstr ""
+
+#: app/src/startup.rs
+msgid "Audiobooklet's library is damaged"
+msgstr ""
+
+#: app/src/startup.rs
+#, fuzzy
+msgid "Audiobooklet couldn't start"
+msgstr "Audiobooklet"
+
+#: app/src/startup.rs
+msgid ""
+"A newer version of Audiobooklet on this device — an AppImage next to the "
+"installed app, for example — last opened your library and changed it in a "
+"way this version doesn't understand. Update Audiobooklet to the latest "
+"version to keep using it; nothing has been lost."
+msgstr ""
+
+#: app/src/startup.rs
+msgid "Download the latest AppImage and run it instead of this one."
+msgstr ""
+
+#: app/src/startup.rs
+msgid "Update it from your software center, or run “flatpak update”."
+msgstr ""
+
+#: app/src/startup.rs
+msgid ""
+"Update it from your software center or package manager, or download the "
+"latest release."
+msgstr ""
+
+#: app/src/startup.rs
+msgid ""
+"Something went wrong while bringing your library up to this version of the "
+"app. Your library hasn't been deleted. Try again; if it keeps happening, "
+"please report the details below."
+msgstr ""
+
+#: app/src/startup.rs
+msgid ""
+"Audiobooklet needs a little free space to open its library. Free up some "
+"space on the device, then try again."
+msgstr ""
+
+#. TRANSLATORS: {path} is a folder or file on the device, e.g. "/home/user/.local/share/…".
+#: app/src/startup.rs
+msgid ""
+"Audiobooklet needs to write to {path}. Check that it belongs to you and "
+"isn't read-only, then try again."
+msgstr ""
+
+#: app/src/startup.rs
+msgid ""
+"Another copy of Audiobooklet may be running — possibly a different version "
+"of it. Close it, then try again."
+msgstr ""
+
+#. TRANSLATORS: {path} is the database file on the device.
+#: app/src/startup.rs
+msgid ""
+"Its local database, {path}, can't be read. You can start over: the damaged "
+"file is kept next to it, and you sign in again. Downloaded books stay on the "
+"device but need downloading again to appear."
+msgstr ""
+
+#: app/src/startup.rs
+msgid ""
+"Something went wrong while opening the app's local data. Try again; if it "
+"keeps happening, please report the details below."
+msgstr ""
 
 #: app/src/widgets/banner.rs
 msgid "Showing what's saved on this device. Log in again to update it."

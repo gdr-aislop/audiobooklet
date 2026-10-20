@@ -619,6 +619,26 @@ in the mockup itself as OS-rendered, not app UI, since there's nothing here for 
   when it is switched on plays to its end (its connection is already open). The login and
   add-server screens aren't affected.
 
+- **Startup problems:** when the app's local data can't be opened, a page says why instead of
+  the app exiting silently (`app/src/startup.rs`, `screens/startup_problem.rs`): a warning
+  `AdwStatusPage` with a title, what to do, the buttons below, and "Details" (the raw error and
+  the log folder, selectable, with "Copy details"). It is an alert a screen reader lands on.
+
+  | Problem | Recognised by | Says | Offers |
+  |---|---|---|---|
+  | Too old for the library | a migration in the database this build doesn't have (a newer copy — e.g. an AppImage next to the installed package — opened it) | update; how depends on AppImage / Flatpak / package | "Get the latest version" (releases page), Quit |
+  | Upgrade failed | any other migration failure | your library isn't deleted; try again, report if it repeats | Try again, Quit |
+  | Out of space | `SQLITE_FULL`, `StorageFull` | free up space | Try again, Quit |
+  | Can't write | `SQLITE_PERM`/`READONLY`/`CANTOPEN`, permission denied, read-only filesystem | the folder must be yours and writable | Try again, Quit |
+  | In use | `SQLITE_BUSY`/`LOCKED`, a pool timeout | close the other copy | Try again, Quit |
+  | Damaged | `SQLITE_CORRUPT`/`NOTADB`, **and** a separate read-only `quick_check` failing | the file can't be read | Try again, Start over… (confirmed; the file is kept, renamed `.damaged-<time>`), Quit |
+  | Other | anything else | try again, report if it repeats | Try again, Quit |
+
+  A database that is newer than the app, or whose upgrade failed, is never called damaged and is
+  never offered "Start over": its data is fine. "Try again" reopens everything and opens the app
+  in the same window once it works. The same page replaces the app when a database read fails
+  while the main window is (re)built.
+
 ## 6. Keyboard shortcuts
 
 This is a phone-first app, but it runs on desktop GNOME and on phones with attached keyboards

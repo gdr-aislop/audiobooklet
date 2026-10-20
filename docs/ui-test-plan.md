@@ -1709,6 +1709,35 @@ row reads "not selected" in the chapters list even though it has focus (AX-8; th
 selection state wins on GTK 4.14). While playing, the focused slider also speaks GTK's numeric
 value every second (AX-7). AX-12 is the phone check, still to be done on the Librem 5.
 
+## 19. Startup problems and quitting (ST) — ✅ implemented
+
+Design: `docs/design/ui-spec.md` §5 "Startup problems". Each case starts the app on a prepared
+profile; the expected page replaces what used to be a silent exit.
+
+- [ ] **ST-1 — Library from a newer version.** In a working profile, add a row to the
+      database's migrations table (`INSERT INTO _sqlx_migrations (version, description, success,
+      checksum, execution_time) VALUES (99, 'newer', 1, x'00', 0)`) — or run an older release on
+      a profile a newer one has used — and start the app.
+      *Expected:* "This version of Audiobooklet is too old for your library", update advice
+      matching how it's installed, "Get the latest version" opens the releases page, no "Try
+      again" and no "Start over". The library is untouched (remove the row: the app opens).
+- [ ] **ST-2 — Library in use.** Hold the database with another process (`sqlite3 db.sqlite3`,
+      `BEGIN EXCLUSIVE;`) and start the app; wait ~15 s.
+      *Expected:* "Audiobooklet's library is in use". End the other process, tap "Try again":
+      the app opens in the same window.
+- [ ] **ST-3 — Damaged library.** Overwrite the database with random bytes and start the app.
+      *Expected:* "Audiobooklet's library is damaged" with "Start over…"; confirming moves the
+      file to `db.sqlite3.damaged-<time>` (and its `-wal`/`-shm`), and the app opens on sign-in.
+- [ ] **ST-4 — Quitting while playing.** Play a book, then quit by the close button, Ctrl+Q,
+      Ctrl+C in the terminal and `kill` (SIGTERM).
+      *Expected:* exit code 0 each time and no "panic" line in the log (0.9.10 and earlier
+      panicked here with "cannot access a Thread Local Storage value during or after
+      destruction").
+
+**Pass summary (2026-10-20, debug build under Xvfb/openbox, local server):** ST-1 to ST-4 pass.
+For ST-4, the build without the exit fix panicked on the close button and on Ctrl+Q with the
+same message as the field report; the fixed build exits with code 0 all four ways.
+
 ## Regression quick-pass (15 minutes)
 
 When touching the player or sync code, at minimum re-run: WT-6, NT-2, HT-3, MP-1–MP-5, FP-2,
