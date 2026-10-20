@@ -154,6 +154,11 @@ fn set_checked(widget: &impl IsA<gtk4::Accessible>, checked: bool) {
     widget.update_state(&[State::Checked(if checked { AccessibleTristate::True } else { AccessibleTristate::False })]);
 }
 
+/// Whether a list row is the current one (the chapter playing).
+pub(crate) fn selected(widget: &impl IsA<gtk4::Accessible>, selected: bool) {
+    widget.update_state(&[State::Selected(Some(selected))]);
+}
+
 /// Whether an expander (the "more" button under a description, an expander row's header) is
 /// open.
 pub(crate) fn expanded(widget: &impl IsA<gtk4::Accessible>, expanded: bool) {

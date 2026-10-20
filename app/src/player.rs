@@ -3935,6 +3935,7 @@ fn mini_bar_snapshot_applier(widgets: &MiniBarWidgets) -> impl Fn(&PlayerSnapsho
     let progress = widgets.progress.clone();
     let cover = widgets.cover.clone();
     let error_icon = widgets.error_icon.clone();
+    let play_button = widgets.play_button.clone();
     move |snapshot: &PlayerSnapshot| {
         let Some(bar) = bar.upgrade() else { return false };
         bar.set_visible(true);
@@ -3942,11 +3943,9 @@ fn mini_bar_snapshot_applier(widgets: &MiniBarWidgets) -> impl Fn(&PlayerSnapsho
         author_label.set_label(snapshot.author.as_deref().unwrap_or(""));
         author_label.set_visible(snapshot.author.is_some());
         cover.set_path(snapshot.cover_path.as_deref());
-        play_icon.set_icon_name(Some(if snapshot.shows_pause_button() {
-            "media-playback-pause-symbolic"
-        } else {
-            "media-playback-start-symbolic"
-        }));
+        let shows_pause = snapshot.shows_pause_button();
+        play_icon.set_icon_name(Some(if shows_pause { "media-playback-pause-symbolic" } else { "media-playback-start-symbolic" }));
+        crate::a11y::name_if_changed(&play_button, &if shows_pause { tr("Pause") } else { tr("Play") });
         error_icon.set_visible(snapshot.last_error.is_some());
         let fraction = if snapshot.duration_seconds > 0.0 {
             (snapshot.position_seconds / snapshot.duration_seconds).clamp(0.0, 1.0)

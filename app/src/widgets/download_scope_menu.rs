@@ -28,7 +28,7 @@ use abs_core::downloads::DownloadScope;
 use abs_core::tracks::TrackRef;
 
 use crate::downloads::{DownloadEvent, DownloadManager, ItemDownloadState};
-use crate::i18n::{tr, tr_args, tr_noop};
+use crate::i18n::{ntr, tr, tr_args, tr_noop};
 
 /// The button + its popover. Callers embed `.widget` (a `GtkMenuButton`) wherever their layout
 /// wants a download action — Player's secondary control row, Item Detail's actions row.
@@ -380,6 +380,13 @@ fn populate_download_popover_rows(
             (None, _) => {}
         }
         let button = gtk4::Button::builder().child(&inner).css_classes(["flat"]).build();
+        // A screen reader takes nothing from the labels inside the button.
+        crate::a11y::name(&button, label);
+        match (estimate_for(scope), blocked) {
+            (Some(bytes), false) => crate::a11y::describe(&button, &estimate_text(bytes)),
+            (Some(_), true) => crate::a11y::describe(&button, &tr("Not enough free space")),
+            (None, _) => {}
+        }
         button.connect_clicked({
             let download_manager = download_manager.clone();
             let popover = popover.clone();
@@ -455,9 +462,13 @@ fn populate_download_popover_rows(
         next_inner.append(&next_title);
         next_inner.append(&next_subtitle);
         let next_button = gtk4::Button::builder().child(&next_inner).css_classes(["flat"]).build();
+        crate::a11y::name(&next_button, &tr("Next chapters"));
         let minus_button = gtk4::Button::builder().label("−").css_classes(["flat"]).width_request(44).height_request(44).build(); // i18n: ignore — a mathematical symbol, not text
         let plus_button = gtk4::Button::builder().label("+").css_classes(["flat"]).width_request(44).height_request(44).build(); // i18n: ignore — a mathematical symbol, not text
+        crate::a11y::name(&minus_button, &tr("Fewer chapters"));
+        crate::a11y::name(&plus_button, &tr("More chapters"));
         let count_label = gtk4::Label::builder().width_chars(3).justify(gtk4::Justification::Center).build();
+        count_label.set_accessible_role(gtk4::AccessibleRole::Status);
         // Whether the Next-chapters estimate currently exceeds free space — flipped by the subtitle
         // update (which knows) and read by the row's click handler, so stepping into or out of the
         // blocked range changes what tapping the row does.
@@ -466,10 +477,20 @@ fn populate_download_popover_rows(
         let update_count_label: Rc<dyn Fn()> = {
             let count_label = count_label.clone();
             let next_count = next_count.clone();
-            Rc::new(move || count_label.set_label(&next_count.get().to_string()))
+            let minus_button = minus_button.clone();
+            let plus_button = plus_button.clone();
+            Rc::new(move || {
+                let count = next_count.get();
+                count_label.set_label(&count.to_string());
+                // A screen-reader user steps with focus on − or +, so the count is read there.
+                let spoken = ntr("{count} chapter", "{count} chapters", count);
+                crate::a11y::describe(&minus_button, &spoken);
+                crate::a11y::describe(&plus_button, &spoken);
+            })
         };
         let update_next_subtitle: Rc<dyn Fn()> = {
             let next_subtitle = next_subtitle.clone();
+            let next_button = next_button.clone();
             let next_count = next_count.clone();
             let next_blocked = next_blocked.clone();
             let tracks = tracks.to_vec();
@@ -496,6 +517,8 @@ fn populate_download_popover_rows(
                         next_blocked.set(false);
                     }
                 }
+                let spoken = if next_subtitle.is_visible() { next_subtitle.label().to_string() } else { String::new() };
+                crate::a11y::describe(&next_button, &spoken);
             })
         };
         next_count.set(next_count.get().clamp(1, remaining.max(1) as u32));
