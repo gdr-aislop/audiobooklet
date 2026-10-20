@@ -444,6 +444,10 @@ pub fn build(
         .tooltip_text(tr_args("Signed in as {username}", &[("username", account.username.as_str())]))
         .child(&gtk4::Label::new(Some(&avatar_letter)))
         .build();
+    // Not a Tab stop: it does nothing yet. Its name still says who is signed in.
+    avatar.set_focusable(false);
+    avatar.set_accessible_role(gtk4::AccessibleRole::Status);
+    crate::a11y::name(&avatar, &tr_args("Signed in as {username}", &[("username", account.username.as_str())]));
     header.pack_end(&avatar);
 
     // "Sync now" (ui-spec Home): the header-bar ⋯ overflow — the one page-level action this
@@ -458,11 +462,14 @@ pub fn build(
         .tooltip_text(tr("More"))
         .popover(&sync_menu_popover)
         .build();
+    crate::a11y::name(&sync_menu_button, &tr("More"));
     header.pack_end(&sync_menu_button);
 
     // Offline-mode toggle (ui-spec: "leading side, opposite the avatar"). Shared persisted state
     // with Library's own toggle — see `HomeWidgets::offline_mode`'s field doc.
     let offline_toggle = gtk4::ToggleButton::builder().icon_name("airplane-mode-symbolic").tooltip_text(tr("Offline mode")).build();
+    crate::a11y::switch_like(&offline_toggle);
+    crate::a11y::name(&offline_toggle, &tr("Offline mode"));
     header.pack_start(&offline_toggle);
 
     let offline_banner_label = gtk4::Label::builder().label(tr("Showing downloaded items only")).xalign(0.0).hexpand(true).css_classes(["caption", "dim-label"]).build();
@@ -1127,7 +1134,7 @@ fn item_subtitle(item: &Item) -> String {
 }
 
 fn section_heading(text: &str) -> gtk4::Label {
-    gtk4::Label::builder()
+    let label = gtk4::Label::builder()
         .label(text)
         .xalign(0.0)
         .css_classes(["heading"])
@@ -1135,7 +1142,9 @@ fn section_heading(text: &str) -> gtk4::Label {
         .margin_end(16)
         .margin_top(18)
         .margin_bottom(8)
-        .build()
+        .build();
+    crate::a11y::heading(&label, 2);
+    label
 }
 
 /// A shelf heading that's also tappable (ui-spec Home tap-through): visually the same heading
@@ -1152,6 +1161,9 @@ fn section_heading_button(text: &str, tooltip: &str, on_open: impl Fn() + 'stati
         .margin_top(18)
         .margin_bottom(8)
         .build();
+    // The heading is the button's name (a screen reader otherwise reads only the tooltip).
+    crate::a11y::name(&button, text);
+    crate::a11y::describe(&button, tooltip);
     button.connect_clicked(move |_| on_open());
     button
 }

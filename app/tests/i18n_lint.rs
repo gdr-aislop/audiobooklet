@@ -46,7 +46,15 @@ const TEXT_SETTERS: &[&str] = &[
 ];
 
 /// Methods whose *second* argument is the shown text (`add_response("id", "Label")`).
-const SECOND_ARG_SETTERS: &[&str] = &[".add_response(", ".append_item("];
+const SECOND_ARG_SETTERS: &[&str] = &[
+    ".add_response(",
+    ".append_item(",
+    "a11y::name(",
+    "a11y::describe(",
+    "a11y::name_if_changed(",
+    "a11y::describe_if_changed(",
+    "a11y::landing(",
+];
 
 fn source_files(dir: &Path, out: &mut Vec<PathBuf>) {
     for entry in fs::read_dir(dir).unwrap() {

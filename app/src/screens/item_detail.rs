@@ -114,7 +114,8 @@ pub fn build(
     let on_open_downloads: Rc<dyn Fn()> = Rc::new(on_open_downloads);
 
     let header = adw::HeaderBar::new();
-    let back_button = gtk4::Button::from_icon_name("go-previous-symbolic");
+    let back_button = gtk4::Button::builder().icon_name("go-previous-symbolic").tooltip_text(tr("Back")).build();
+    crate::a11y::name(&back_button, &tr("Back"));
     back_button.connect_clicked({
         let on_back = on_back.clone();
         move |_| on_back()
@@ -210,7 +211,9 @@ pub fn build(
         .build();
     let more_button = gtk4::Button::builder().label(tr("more")).css_classes(["flat"]).halign(gtk4::Align::Start).visible(false).build();
     let description_section = gtk4::Box::builder().orientation(gtk4::Orientation::Vertical).margin_top(16).visible(false).build();
-    description_section.append(&gtk4::Label::builder().label(tr("Description")).xalign(0.0).css_classes(["heading"]).build());
+    let description_heading = gtk4::Label::builder().label(tr("Description")).xalign(0.0).css_classes(["heading"]).build();
+    crate::a11y::heading(&description_heading, 2);
+    description_section.append(&description_heading);
     description_section.append(&description_label);
     description_section.append(&more_button);
 
@@ -242,7 +245,9 @@ pub fn build(
     chapters_legend.append(&gtk4::Label::builder().label(tr("downloaded")).css_classes(["caption", "dim-label"]).build());
     let chapters_list = gtk4::ListBox::builder().selection_mode(gtk4::SelectionMode::None).css_classes(["boxed-list"]).build();
     let chapters_section = gtk4::Box::builder().orientation(gtk4::Orientation::Vertical).margin_top(16).visible(false).build();
-    chapters_section.append(&gtk4::Label::builder().label(tr("Chapters")).xalign(0.0).css_classes(["heading"]).margin_bottom(4).build());
+    let chapters_heading = gtk4::Label::builder().label(tr("Chapters")).xalign(0.0).css_classes(["heading"]).margin_bottom(4).build();
+    crate::a11y::heading(&chapters_heading, 2);
+    chapters_section.append(&chapters_heading);
     chapters_section.append(&chapters_legend);
     chapters_section.append(&chapters_list);
 

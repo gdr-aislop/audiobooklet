@@ -1,3 +1,4 @@
+mod a11y;
 mod application;
 mod crash_reporting;
 mod downloads;
@@ -249,6 +250,7 @@ mod tests {
     }
 
     gtk_scenarios! {
+        (a11y_helpers, crate::a11y::tests::run_helpers),
         (application_single_key_shortcuts_defer_to_the_focused_widget, crate::application::tests::run_single_key_shortcuts_defer_to_the_focused_widget),
         (application_activating_again_presents_the_open_window, crate::application::tests::run_activating_again_presents_the_open_window),
         (error_reporting_shows_one_toast, crate::error_reporting::tests::run_report_background_error_shows_one_toast),

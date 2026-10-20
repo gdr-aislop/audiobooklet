@@ -3874,6 +3874,7 @@ fn build_mini_bar_widgets() -> MiniBarWidgets {
     // glance to know something needs attention, with "tap to open the full player" (already the
     // mini bar's own established gesture) as the way to actually see why.
     let error_icon = gtk4::Image::builder().icon_name("dialog-warning-symbolic").tooltip_text(tr("Playback error — tap for details")).visible(false).build();
+    crate::a11y::name(&error_icon, &tr("Playback error — tap for details"));
 
     let content_row = gtk4::Box::builder()
         .orientation(gtk4::Orientation::Horizontal)

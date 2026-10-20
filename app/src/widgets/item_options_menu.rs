@@ -49,6 +49,7 @@ pub fn build(
 
     let popover = gtk4::Popover::builder().child(&popover_box).build();
     let widget = gtk4::MenuButton::builder().icon_name("view-more-symbolic").tooltip_text(tr("More")).popover(&popover).build();
+    crate::a11y::name(&widget, &tr("More"));
 
     mark_as_finished_button.connect_clicked({
         let popover = popover.clone();

@@ -105,6 +105,7 @@ pub fn build(
     let popover_box = gtk4::Box::builder().orientation(gtk4::Orientation::Vertical).build();
     let popover = gtk4::Popover::builder().child(&popover_box).build();
     let widget = gtk4::MenuButton::builder().icon_name("folder-download-symbolic").tooltip_text(tr("Download")).popover(&popover).build();
+    crate::a11y::name(&widget, &tr("Download"));
 
     // Shared by `connect_show` below and `DownloadScopeMenu::refresh` — rebuilding whether
     // "Clear downloaded chapters" applies, the size estimates, the free-space guard, and now
@@ -227,13 +228,15 @@ pub fn build(
             if *event_item_id != item_id {
                 return true;
             }
-            widget.set_icon_name(match state {
-                ItemDownloadState::Downloading => "content-loading-symbolic",
-                ItemDownloadState::Complete => "object-select-symbolic",
+            let (icon, name) = match state {
+                ItemDownloadState::Downloading => ("content-loading-symbolic", tr("Downloading")),
+                ItemDownloadState::Complete => ("object-select-symbolic", tr("Downloaded")),
                 // A stopped download kept its completed chapters — the button returns to its
                 // "can start/continue a download" state, same as idle.
-                ItemDownloadState::Idle | ItemDownloadState::Stopped | ItemDownloadState::Failed(_) => "folder-download-symbolic",
-            });
+                ItemDownloadState::Idle | ItemDownloadState::Stopped | ItemDownloadState::Failed(_) => ("folder-download-symbolic", tr("Download")),
+            };
+            widget.set_icon_name(icon);
+            crate::a11y::name_if_changed(&widget, &name);
             // Before this, a failure only ever showed as the icon quietly reverting from its
             // in-progress spinner to idle a moment after "Download started" — indistinguishable
             // from Stop, and with the actual reason (metered connection, dead session, a 404)

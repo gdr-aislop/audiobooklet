@@ -368,6 +368,10 @@ pub fn build(
     // the two via header bar button"), separate from the view-options popover below. Starts
     // active, showing the "switch to grid" icon, since List is the default mode.
     let view_toggle = gtk4::ToggleButton::builder().active(true).icon_name("view-grid-symbolic").tooltip_text(tr("Grid view")).build();
+    // For a screen reader it's a switch named for the mode it's in when on (checked = list),
+    // where the tooltip names the mode a tap switches to.
+    crate::a11y::switch_like(&view_toggle);
+    crate::a11y::name(&view_toggle, &tr("List view"));
     header.pack_end(&view_toggle);
 
     // The view-options popover (ui-spec "Library browse": Downloaded only/In progress only/Hide
@@ -419,12 +423,15 @@ pub fn build(
     view_options_box.append(&settings_row);
     let view_options_popover = gtk4::Popover::builder().child(&view_options_box).build();
     let view_options_button = gtk4::MenuButton::builder().icon_name(VIEW_OPTIONS_ICON).tooltip_text(tr("View options")).popover(&view_options_popover).build();
+    crate::a11y::name(&view_options_button, &tr("View options"));
     header.pack_end(&view_options_button);
 
     // Offline-mode toggle (ui-spec: "leading side, opposite the avatar" on Home; mirrored here on
     // the leading side too, alongside the search entry). Shared persisted state with Home's own
     // toggle, not a per-screen setting — see `offline_mode`'s field doc.
     let offline_toggle = gtk4::ToggleButton::builder().icon_name("airplane-mode-symbolic").tooltip_text(tr("Offline mode")).build();
+    crate::a11y::switch_like(&offline_toggle);
+    crate::a11y::name(&offline_toggle, &tr("Offline mode"));
     header.pack_start(&offline_toggle);
 
     // Category chips (ui-spec "Library browse": All/Author/Series/Genre), a horizontally
@@ -460,6 +467,7 @@ pub fn build(
         .tooltip_text(tr("More"))
         .popover(&sync_menu_popover)
         .build();
+    crate::a11y::name(&sync_menu_button, &tr("More"));
     header.pack_end(&sync_menu_button);
 
     let (_, offline_banner_row) = caption_banner_row(&tr("Showing downloaded items only"));

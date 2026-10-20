@@ -67,8 +67,10 @@ pub fn build(
 
     let back_button = gtk4::Button::builder()
         .icon_name("go-previous-symbolic")
+        .tooltip_text(tr("Back"))
         .css_classes(["flat"])
         .build();
+    crate::a11y::name(&back_button, &tr("Back"));
     back_button.connect_clicked({
         let window = window.clone();
         let shell_root = shell_root.clone();
@@ -88,9 +90,11 @@ pub fn build(
 
     let info_button = gtk4::MenuButton::builder()
         .icon_name("dialog-information-symbolic")
+        .tooltip_text(tr("About this connection"))
         .css_classes(["flat"])
         .valign(gtk4::Align::Center)
         .build();
+    crate::a11y::name(&info_button, &tr("About this connection"));
     let info_label = gtk4::Label::builder()
         .label(tr("This connection is used for syncing, streaming and downloads — every call the app makes to the server goes through it."))
         .wrap(true)

@@ -200,11 +200,13 @@ pub fn build(
 
         let menu_button = gtk4::MenuButton::builder()
             .icon_name("open-menu-symbolic")
+            .tooltip_text(tr("Server options"))
             .css_classes(["flat"])
             .width_request(44)
             .height_request(44)
             .valign(gtk4::Align::Center)
             .build();
+        crate::a11y::name(&menu_button, &tr("Server options"));
         menu_button.set_popover(Some(&gtk4::Popover::builder().child(&menu_box).build()));
         row.add_suffix(&menu_button);
 
@@ -818,7 +820,8 @@ pub(crate) fn push_about(window: &adw::ApplicationWindow) {
 
     let toast_overlay = adw::ToastOverlay::new();
 
-    let back_button = gtk4::Button::builder().icon_name("go-previous-symbolic").css_classes(["flat"]).build();
+    let back_button = gtk4::Button::builder().icon_name("go-previous-symbolic").tooltip_text(tr("Back")).css_classes(["flat"]).build();
+    crate::a11y::name(&back_button, &tr("Back"));
     back_button.connect_clicked({
         let window = window.clone();
         let shell_root = shell_root.clone();

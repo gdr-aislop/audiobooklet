@@ -128,6 +128,7 @@ pub fn build(
     // `status_page`/`scroller` from `any_row`. A single icon button rather than a menu: unlike
     // Player/Item Detail's `⋯` menus, there's only ever one action here.
     let clear_all_button = gtk4::Button::builder().icon_name("user-trash-symbolic").tooltip_text(tr("Clear all downloads")).css_classes(["flat"]).sensitive(false).build();
+    crate::a11y::name(&clear_all_button, &tr("Clear all downloads"));
     header.pack_end(&clear_all_button);
 
     let status_page = adw::StatusPage::builder().icon_name("folder-download-symbolic").title(tr("No downloads yet")).vexpand(true).visible(false).build();
@@ -397,6 +398,7 @@ fn download_row(
         // Stop, not cancel-delete: chapters that already completed stay downloaded (the row's own
         // subtitle switches to their "N chapters, size" summary once the batch winds down).
         let stop_button = gtk4::Button::builder().icon_name("process-stop-symbolic").tooltip_text(tr("Stop")).css_classes(["flat"]).valign(gtk4::Align::Center).build();
+        crate::a11y::name(&stop_button, &tr("Stop"));
         stop_button.connect_clicked({
             let download_manager = download_manager.clone();
             let server_id = server_id.to_string();
@@ -409,6 +411,7 @@ fn download_row(
         row.add_suffix(&box_);
     } else {
         let remove_button = gtk4::Button::builder().icon_name("user-trash-symbolic").tooltip_text(tr("Remove")).css_classes(["flat"]).valign(gtk4::Align::Center).build();
+        crate::a11y::name(&remove_button, &tr("Remove"));
         remove_button.connect_clicked({
             let download_manager = download_manager.clone();
             let server_id = server_id.to_string();

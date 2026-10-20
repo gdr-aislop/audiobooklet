@@ -94,7 +94,8 @@ pub fn build(
         }
     });
     let header = adw::HeaderBar::new();
-    let collapse_button = gtk4::Button::from_icon_name("go-down-symbolic");
+    let collapse_button = gtk4::Button::builder().icon_name("go-down-symbolic").tooltip_text(tr("Collapse player")).build();
+    crate::a11y::name(&collapse_button, &tr("Collapse player"));
     collapse_button.connect_clicked({
         let controller = controller.clone();
         let on_collapse = on_collapse.clone();
@@ -223,6 +224,11 @@ pub fn build(
     for button in [&previous_chapter, &skip_back, &skip_forward, &next_chapter] {
         button.set_valign(gtk4::Align::Center);
     }
+    // Icon-only buttons have no name for a screen reader (see `a11y`); the skip pair's names
+    // carry the configured intervals, kept current in `update` below.
+    crate::a11y::name(&previous_chapter, &tr("Previous chapter"));
+    crate::a11y::name(&next_chapter, &tr("Next chapter"));
+    name_skip_buttons(&skip_back, &skip_forward, controller.skip_intervals());
 
     // Secondary row: speed, sleep timer, chapters. `AdwBottomSheet`/popover-menu widgets from
     // libadwaita 1.4+ are unavailable at this crate's v1.2 ceiling, so every one of these is a
@@ -234,6 +240,7 @@ pub fn build(
     let speed_popover_box = gtk4::Box::builder().orientation(gtk4::Orientation::Vertical).build();
     let speed_popover = gtk4::Popover::builder().child(&speed_popover_box).build();
     let speed_button = gtk4::MenuButton::builder().child(&speed_label).tooltip_text(tr("Playback speed")).popover(&speed_popover).build();
+    crate::a11y::name(&speed_button, &tr("Playback speed"));
     for speed in SPEED_PRESETS {
         let button = gtk4::Button::builder().label(format_speed(speed)).css_classes(["flat"]).build();
         button.connect_clicked({
@@ -254,6 +261,7 @@ pub fn build(
         .tooltip_text(tr("Sleep timer"))
         .popover(&sleep_timer_popover)
         .build();
+    crate::a11y::name(&sleep_timer_button, &tr("Sleep timer"));
     type SleepTimerAction = Box<dyn Fn(&PlayerController)>;
     let sleep_timer_options: [(String, SleepTimerAction); 5] = [
         (tr("Off"), Box::new(|c: &PlayerController| c.cancel_sleep_timer())),
@@ -299,6 +307,7 @@ pub fn build(
         .tooltip_text(tr("Chapters"))
         .popover(&chapters_popover)
         .build();
+    crate::a11y::name(&chapters_button, &tr("Chapters"));
 
     let secondary_row = gtk4::Box::builder().orientation(gtk4::Orientation::Horizontal).spacing(18).halign(gtk4::Align::Center).margin_top(10).build();
     secondary_row.append(&speed_button);
@@ -933,6 +942,14 @@ fn undo_position_toast(controller: &crate::player::PlayerController, title: &str
         controller.save_progress_now();
     });
     toast
+}
+
+/// The skip buttons' accessible names: "Skip back 15 seconds", from the configured intervals.
+fn name_skip_buttons(skip_back: &gtk4::Button, skip_forward: &gtk4::Button, (back, forward): (f64, f64)) {
+    // TRANSLATORS: Screen-reader name of the skip-back button; {seconds} is the configured interval.
+    crate::a11y::name_if_changed(skip_back, &tr_args("Skip back {seconds} seconds", &[("seconds", &format!("{back:.0}"))]));
+    // TRANSLATORS: Screen-reader name of the skip-forward button; {seconds} is the configured interval.
+    crate::a11y::name_if_changed(skip_forward, &tr_args("Skip forward {seconds} seconds", &[("seconds", &format!("{forward:.0}"))]));
 }
 
 pub(crate) fn format_hms(total_seconds: f64) -> String {
