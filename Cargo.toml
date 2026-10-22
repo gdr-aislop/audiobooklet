@@ -19,7 +19,7 @@ repository = "https://github.com/gdr-aislop/audiobooklet"
 progenitor = "0.9"
 progenitor-client = "0.9"
 openapiv3 = "2"
-syn = "2"
+syn = "3"
 prettyplease = "0.2"
 
 # Shared runtime/data deps
