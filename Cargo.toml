@@ -36,7 +36,7 @@ serde_json = "1"
 uuid = { version = "1", features = ["serde", "v4"] }
 chrono = { version = "0.4", features = ["serde"] }
 schemars = "0.8"
-thiserror = "1"
+thiserror = "2"
 tracing = "0.1"
 # NFD decomposition + combining-mark stripping for diacritic-insensitive search
 # (`abs_core::search::normalize_for_search`).
