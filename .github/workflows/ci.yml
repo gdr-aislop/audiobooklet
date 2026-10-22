@@ -1,0 +1,110 @@
+name: CI
+
+# Builds and tests every pull request and every push to main, in the same debian:bookworm
+# container the release builds use (release.yml's build-deb job), so the app is checked against
+# PureOS Crimson's libraries — GTK 4.8, libadwaita 1.2, GStreamer 1.22 — rather than whatever a
+# newer runner image ships. A change that needs a newer API than the feature ceiling in
+# app/Cargo.toml (`v4_8`, `v1_2`) fails to build here instead of crashing on the phone, and a
+# dependency update that doesn't compile never reaches main.
+#
+# Make this a required check: Settings → Branches → the rule for main → "Require status checks
+# to pass before merging" → select "Build and test".
+#
+# Time-boxed so a hang can't burn Actions minutes: a cap on the job and on every step, runs
+# superseded by a newer push are cancelled, and changes that can't affect the build (docs,
+# translations) don't start one. The numbers are a first guess — the whole suite takes about
+# 8 minutes on a workstation; lower them to roughly twice the real time once a run shows it.
+
+on:
+  pull_request:
+    paths-ignore:
+      - "docs/**"
+      - "**/*.md"
+      - "po/**"
+  push:
+    branches: [main]
+    paths-ignore:
+      - "docs/**"
+      - "**/*.md"
+      - "po/**"
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: Build and test
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    container:
+      image: debian:bookworm
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # Only the checked-out commit: the build needs no history.
+          fetch-depth: 1
+
+      - name: Install build and test dependencies
+        timeout-minutes: 10
+        env:
+          DEBIAN_FRONTEND: noninteractive
+        run: |
+          set -eux
+          apt-get update
+          # The same set as release.yml's build-deb job, plus what the GTK tests need to run:
+          # a virtual X display, a session bus, and GStreamer's runtime plugins.
+          apt-get install -y --no-install-recommends \
+            build-essential pkg-config git curl ca-certificates gettext \
+            libgtk-4-dev libadwaita-1-dev \
+            libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev \
+            libssl-dev libpulse-dev \
+            xvfb xauth dbus dbus-x11 \
+            gstreamer1.0-plugins-base gstreamer1.0-plugins-good \
+            adwaita-icon-theme shared-mime-info
+
+      - name: Install Rust (stable)
+        timeout-minutes: 10
+        run: |
+          curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
+            | sh -s -- -y --default-toolchain stable --profile minimal --component clippy
+          echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+
+      # Container jobs run as root over a workspace owned by the runner's host user; git refuses
+      # that without this (see release.yml's AppImage job).
+      - name: Trust the workspace for git
+        run: git config --global --add safe.directory "$GITHUB_WORKSPACE"
+
+      - name: Build
+        timeout-minutes: 20
+        run: cargo build --workspace --all-targets --locked
+        env:
+          # No debug symbols: CI never reads a backtrace's line numbers, and leaving them out
+          # makes the build quicker and the target folder smaller.
+          CARGO_PROFILE_DEV_DEBUG: "0"
+          CARGO_INCREMENTAL: "0"
+
+      - name: Clippy
+        timeout-minutes: 10
+        # Reported, not required: the code base predates this check and carries a few old
+        # warnings. Tighten to `-D warnings` once they are gone.
+        run: cargo clippy --workspace --all-targets --locked
+        continue-on-error: true
+        env:
+          CARGO_PROFILE_DEV_DEBUG: "0"
+          CARGO_INCREMENTAL: "0"
+
+      - name: Test
+        timeout-minutes: 15
+        # The GTK scenarios need a display and a session bus; each runs in its own process.
+        run: xvfb-run -a dbus-run-session -- cargo test --workspace --locked
+        env:
+          # The GTK tests' accessibility bus isn't running in a container.
+          GTK_A11Y: none
+          CARGO_PROFILE_DEV_DEBUG: "0"
+          CARGO_INCREMENTAL: "0"

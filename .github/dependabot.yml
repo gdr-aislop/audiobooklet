@@ -1,47 +1,87 @@
 # Dependabot version updates. Dependabot reads the dependencies itself (Cargo.toml/Cargo.lock,
-# the workflow files); this only says where to look, how often, and how to group the PRs.
+# the workflow files); this only says where to look, how often, and what to leave alone.
+#
+# What it is for here: routine patch and minor updates of ordinary crates, and the GitHub
+# Actions the release workflow uses. What it is not for: the upgrades that have to move several
+# crates together or are tied to the system libraries the app is promised to run on (PureOS
+# Crimson: GTK 4.8, libadwaita 1.2, GStreamer 1.22, GLib 2.74). Dependabot opens one PR per
+# crate, so those can't build as separate PRs and are done by hand, together, with a test on the
+# phone. For a 0.x crate Dependabot counts 0.12 → 0.13 as a *minor* update, hence the ignores
+# below name `semver-minor` as well as `semver-major`: those crates get patch updates only.
+#
+# Every PR it opens is built and tested by .github/workflows/ci.yml in a debian:bookworm
+# container, so one that doesn't compile against Crimson's libraries shows up red.
 version: 2
 updates:
   - package-ecosystem: "cargo"
     # The workspace root: its Cargo.toml and Cargo.lock cover every crate (crates/*, app).
     directory: "/"
     schedule:
-      interval: "weekly"
-    open-pull-requests-limit: 10
+      interval: "monthly"
+    open-pull-requests-limit: 5
     groups:
-      # The gtk-rs crates must move together, and they're held to GTK 4.8 / libadwaita 1.2
-      # (PureOS Crimson) by feature flags in app/Cargo.toml — their own PR, to test on the phone.
-      gtk-rs:
-        patterns:
-          - "gtk4"
-          - "gtk4-*"
-          - "libadwaita"
-          - "libadwaita-*"
-          - "glib"
-          - "glib-*"
-          - "gio"
-          - "gio-*"
-          - "gdk4"
-          - "gdk4-*"
-          - "gdk-pixbuf"
-          - "gdk-pixbuf-*"
-          - "gsk4"
-          - "gsk4-*"
-          - "pango"
-          - "pango-*"
-          - "cairo-rs"
-          - "cairo-sys-rs"
-          - "graphene-rs"
-          - "graphene-sys"
-      gstreamer:
-        patterns:
-          - "gstreamer"
-          - "gstreamer-*"
-      # Every other crate's minor and patch updates in one weekly PR.
+      # Every other crate's minor and patch updates in one PR.
       cargo-minor-and-patch:
         update-types:
           - "minor"
           - "patch"
+    ignore:
+      # Major versions of anything are a decision, not a routine update.
+      - dependency-name: "*"
+        update-types:
+          - "version-update:semver-major"
+
+      # Patch updates only, for what moves in lockstep or is bound to a system library:
+      # the gtk-rs crates (held to GTK 4.8 / libadwaita 1.2 by feature flags in app/Cargo.toml;
+      # gtk4, libadwaita, glib, gio, gdk, pango, cairo ... have to be upgraded together)
+      - dependency-name: "gtk4*"
+        update-types: ["version-update:semver-minor", "version-update:semver-major"]
+      - dependency-name: "libadwaita*"
+        update-types: ["version-update:semver-minor", "version-update:semver-major"]
+      - dependency-name: "glib*"
+        update-types: ["version-update:semver-minor", "version-update:semver-major"]
+      - dependency-name: "gio*"
+        update-types: ["version-update:semver-minor", "version-update:semver-major"]
+      - dependency-name: "gdk*"
+        update-types: ["version-update:semver-minor", "version-update:semver-major"]
+      - dependency-name: "gsk4*"
+        update-types: ["version-update:semver-minor", "version-update:semver-major"]
+      - dependency-name: "pango*"
+        update-types: ["version-update:semver-minor", "version-update:semver-major"]
+      - dependency-name: "cairo*"
+        update-types: ["version-update:semver-minor", "version-update:semver-major"]
+      - dependency-name: "graphene*"
+        update-types: ["version-update:semver-minor", "version-update:semver-major"]
+      # GStreamer (built on the same glib as gtk-rs, so it moves with it)
+      - dependency-name: "gstreamer*"
+        update-types: ["version-update:semver-minor", "version-update:semver-major"]
+      # The Audiobookshelf API client is generated at build time: progenitor, its runtime
+      # progenitor-client (which hands reqwest's types to ours), reqwest, and the crates that
+      # turn the spec into code (openapiv3, schemars, syn, prettyplease) go together
+      - dependency-name: "progenitor*"
+        update-types: ["version-update:semver-minor", "version-update:semver-major"]
+      - dependency-name: "reqwest"
+        update-types: ["version-update:semver-minor", "version-update:semver-major"]
+      - dependency-name: "openapiv3"
+        update-types: ["version-update:semver-minor", "version-update:semver-major"]
+      - dependency-name: "schemars"
+        update-types: ["version-update:semver-minor", "version-update:semver-major"]
+      - dependency-name: "syn"
+        update-types: ["version-update:semver-minor", "version-update:semver-major"]
+      - dependency-name: "prettyplease"
+        update-types: ["version-update:semver-minor", "version-update:semver-major"]
+      # The database layer: a new sqlx changes how the database is opened and migrated, and
+      # needs trying against real users' databases
+      - dependency-name: "sqlx*"
+        update-types: ["version-update:semver-minor", "version-update:semver-major"]
+      # The keyring (needs a "Remember password" check on a device) and the crates that link
+      # the system's libpulse and gettext
+      - dependency-name: "oo7"
+        update-types: ["version-update:semver-minor", "version-update:semver-major"]
+      - dependency-name: "libpulse*"
+        update-types: ["version-update:semver-minor", "version-update:semver-major"]
+      - dependency-name: "gettext*"
+        update-types: ["version-update:semver-minor", "version-update:semver-major"]
 
   - package-ecosystem: "github-actions"
     # Workflows in .github/workflows.
