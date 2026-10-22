@@ -30,7 +30,7 @@ futures = "0.3"
 # `native-tls` is the backend already in use via reqwest's default features; naming it
 # explicitly additionally unlocks the client-certificate API (`ClientBuilder::identity`,
 # `Identity::from_pkcs12_der`) the Connection page's mTLS setting needs.
-reqwest = { version = "0.12", features = ["json", "stream", "native-tls"] }
+reqwest = { version = "0.13", features = ["json", "stream", "native-tls"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 uuid = { version = "1", features = ["serde", "v4"] }
