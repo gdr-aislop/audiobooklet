@@ -242,7 +242,7 @@ mod tests {
         ];
         for query in queries {
             let plan: Vec<(i64, i64, i64, String)> =
-                sqlx::query_as(&format!("EXPLAIN QUERY PLAN {query}")).fetch_all(&pool).await.unwrap();
+                sqlx::query_as(sqlx::AssertSqlSafe(format!("EXPLAIN QUERY PLAN {query}"))).fetch_all(&pool).await.unwrap();
             for (_, _, _, detail) in &plan {
                 assert!(!detail.starts_with("SCAN "), "`{query}` scans: {plan:?}");
             }

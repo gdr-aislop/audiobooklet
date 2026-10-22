@@ -50,7 +50,7 @@ crash-handler = "0.8"
 minidumper = "0.11"
 
 # Storage
-sqlx = { version = "0.8", features = ["runtime-tokio", "sqlite", "chrono", "uuid", "migrate"] }
+sqlx = { version = "0.9", features = ["runtime-tokio", "sqlite", "chrono", "uuid", "migrate"] }
 directories = "5"
 # `fs` backs the free-space check the download sheet's size estimates are compared against
 # (statvfs); rustix is already in the tree via the gtk stack, so this adds no new compile cost.

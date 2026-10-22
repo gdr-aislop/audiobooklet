@@ -97,7 +97,7 @@ pub async fn mark_pushed(
 
 /// Every row of an account's progress the server hasn't confirmed yet.
 pub async fn list_needing_push(pool: &SqlitePool, account_id: &str) -> Result<Vec<Progress>> {
-    let progress = sqlx::query_as(&format!("SELECT {COLUMNS} FROM progress WHERE account_id = ? AND needs_push = 1"))
+    let progress = sqlx::query_as(sqlx::AssertSqlSafe(format!("SELECT {COLUMNS} FROM progress WHERE account_id = ? AND needs_push = 1")))
         .bind(account_id)
         .fetch_all(pool)
         .await?;
@@ -124,7 +124,7 @@ pub async fn get(
     item_id: &str,
 ) -> Result<Option<Progress>> {
     let progress = sqlx::query_as(
-        &format!("SELECT {COLUMNS} FROM progress WHERE account_id = ? AND server_id = ? AND item_id = ?"),
+        sqlx::AssertSqlSafe(format!("SELECT {COLUMNS} FROM progress WHERE account_id = ? AND server_id = ? AND item_id = ?")),
     )
     .bind(account_id)
     .bind(server_id)
@@ -143,7 +143,7 @@ pub async fn list_recent_for_account(
     limit: i64,
 ) -> Result<Vec<Progress>> {
     let progress = sqlx::query_as(
-        &format!("SELECT {COLUMNS} FROM progress WHERE account_id = ? ORDER BY updated_at DESC LIMIT ?"),
+        sqlx::AssertSqlSafe(format!("SELECT {COLUMNS} FROM progress WHERE account_id = ? ORDER BY updated_at DESC LIMIT ?")),
     )
     .bind(account_id)
     .bind(limit)
@@ -158,7 +158,7 @@ pub async fn list_recent_for_account(
 /// `LIMIT`ed shape of the same read).
 pub async fn list_for_account(pool: &SqlitePool, account_id: &str) -> Result<Vec<Progress>> {
     let progress = sqlx::query_as(
-        &format!("SELECT {COLUMNS} FROM progress WHERE account_id = ?"),
+        sqlx::AssertSqlSafe(format!("SELECT {COLUMNS} FROM progress WHERE account_id = ?")),
     )
     .bind(account_id)
     .fetch_all(pool)
