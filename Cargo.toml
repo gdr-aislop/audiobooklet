@@ -17,7 +17,7 @@ repository = "https://github.com/gdr-aislop/audiobooklet"
 [workspace.dependencies]
 # Generated API client build chain
 progenitor = "0.9"
-progenitor-client = "0.9"
+progenitor-client = "0.15"
 openapiv3 = "2"
 syn = "2"
 prettyplease = "0.2"
