@@ -1098,6 +1098,17 @@ pub(crate) mod tests {
         let window = gtk4::Window::builder().child(&screen.root).default_width(360).default_height(720).build();
         window.present();
         pump_until(|| hooks.play_button.opacity() == 1.0 && hooks.chapters_list.row_at_index(2).is_some(), Duration::from_secs(10));
+        // Tab visits widgets in the order they sit on the page, so the walk below has to start
+        // once the buttons and the chapter list are all laid out: a list still collapsing in from
+        // the top of the page sorts ahead of Play and Download.
+        pump_until(
+            || {
+                let list_bottom = hooks.chapters_list.compute_bounds(&screen.root).map(|r| r.y() + r.height()).unwrap_or(0.0);
+                let play_bottom = hooks.play_button.compute_bounds(&screen.root).map(|r| r.y() + r.height()).unwrap_or(f32::MAX);
+                hooks.download_button.is_sensitive() && hooks.download_button.allocated_height() > 0 && list_bottom > play_bottom
+            },
+            Duration::from_secs(5),
+        );
         pump_until(|| focused_name(&window) == "Project Hail Mary", Duration::from_secs(5));
         assert_eq!(focused_name(&window), "Project Hail Mary", "lands on the heading named after the book");
         let landing = GtkWindowExt::focus(&window).unwrap();

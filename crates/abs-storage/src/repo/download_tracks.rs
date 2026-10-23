@@ -148,7 +148,7 @@ pub async fn mark_damaged(pool: &SqlitePool, server_id: &str, item_id: &str, ino
 }
 
 pub async fn get(pool: &SqlitePool, server_id: &str, item_id: &str, ino: &str) -> Result<Option<DownloadTrack>> {
-    let row: Option<Row> = sqlx::query_as(sqlx::AssertSqlSafe(format!("SELECT {SELECT_COLUMNS} FROM download_tracks WHERE server_id = ? AND item_id = ? AND ino = ?")))
+    let row: Option<Row> = sqlx::query_as(&format!("SELECT {SELECT_COLUMNS} FROM download_tracks WHERE server_id = ? AND item_id = ? AND ino = ?"))
         .bind(server_id)
         .bind(item_id)
         .bind(ino)
@@ -158,7 +158,7 @@ pub async fn get(pool: &SqlitePool, server_id: &str, item_id: &str, ino: &str) -
 }
 
 pub async fn list_for_item(pool: &SqlitePool, server_id: &str, item_id: &str) -> Result<Vec<DownloadTrack>> {
-    let rows: Vec<Row> = sqlx::query_as(sqlx::AssertSqlSafe(format!("SELECT {SELECT_COLUMNS} FROM download_tracks WHERE server_id = ? AND item_id = ?")))
+    let rows: Vec<Row> = sqlx::query_as(&format!("SELECT {SELECT_COLUMNS} FROM download_tracks WHERE server_id = ? AND item_id = ?"))
         .bind(server_id)
         .bind(item_id)
         .fetch_all(pool)
@@ -194,7 +194,7 @@ pub async fn remove_for_item(pool: &SqlitePool, server_id: &str, item_id: &str) 
 /// what was removed so the caller can delete the actual files — the server-scoped mirror of
 /// [`remove_for_item`].
 pub async fn remove_for_server(pool: &SqlitePool, server_id: &str) -> Result<Vec<DownloadTrack>> {
-    let rows: Vec<Row> = sqlx::query_as(sqlx::AssertSqlSafe(format!("SELECT {SELECT_COLUMNS} FROM download_tracks WHERE server_id = ?")))
+    let rows: Vec<Row> = sqlx::query_as(&format!("SELECT {SELECT_COLUMNS} FROM download_tracks WHERE server_id = ?"))
         .bind(server_id)
         .fetch_all(pool)
         .await?;
