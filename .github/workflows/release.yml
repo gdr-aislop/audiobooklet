@@ -51,7 +51,7 @@ jobs:
       image: debian:bookworm
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       # Fails fast, before spending CI minutes on apt/rustup/the build itself: a tag push with a
       # Cargo.toml the release-tagger forgot to bump would otherwise silently ship a mislabeled
@@ -104,7 +104,7 @@ jobs:
           cd dist
           sha256sum ./*.deb > "SHA256SUMS-${{ matrix.arch }}.txt"
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: deb-${{ matrix.arch }}
           path: dist/*
@@ -147,7 +147,7 @@ jobs:
             gstreamer1.0-libav gstreamer1.0-pulseaudio \
             libsoup-3.0-0
 
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       # Container jobs run as root over a workspace owned by the runner's host user, and that
       # mismatch isn't visible to actions/checkout's own safe.directory handling — only to a git
@@ -166,7 +166,7 @@ jobs:
       - name: Build AppImage
         run: ./scripts/build-appimage.sh --version "${GITHUB_REF_NAME#v}"
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: appimage-${{ matrix.arch }}
           path: |
@@ -190,7 +190,7 @@ jobs:
     # Ubuntu userspace (systemd/dbus for the build sandbox), not a bare container image.
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Install flatpak-builder
         run: |
@@ -246,7 +246,7 @@ jobs:
           cd dist
           sha256sum ./*.flatpak > "SHA256SUMS-${{ matrix.arch }}.txt"
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: flatpak-${{ matrix.arch }}
           path: dist/*
@@ -257,7 +257,7 @@ jobs:
       # deploy-pages below). Only meaningful on a tag push; still uploaded on a workflow_dispatch
       # dry run for consistency, just unsigned and never actually published (both downstream jobs
       # are gated on the tag condition too).
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: flatpak-ostree-${{ matrix.arch }}
           path: build/flatpak-repo
@@ -270,7 +270,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       # flatpak (for `flatpak build-update-repo`) as well as gpg: ubuntu-latest ships neither.
       - name: Install flatpak and GPG
@@ -284,7 +284,7 @@ jobs:
         env:
           FLATPAK_GPG_PRIVATE_KEY: ${{ secrets.FLATPAK_GPG_PRIVATE_KEY }}
 
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with:
           pattern: flatpak-ostree-*
           path: flatpak-repos
@@ -330,7 +330,7 @@ jobs:
         env:
           FLATPAK_GPG_KEY_ID: ${{ secrets.FLATPAK_GPG_KEY_ID }}
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: flatpak-pages
           path: flatpak-repo
@@ -354,7 +354,7 @@ jobs:
         env:
           SIGNING_GPG_PRIVATE_KEY: ${{ secrets.FLATPAK_GPG_PRIVATE_KEY }}
 
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with:
           pattern: deb-*
           path: debs
@@ -414,7 +414,7 @@ jobs:
         env:
           SIGNING_GPG_KEY_ID: ${{ secrets.FLATPAK_GPG_KEY_ID }}
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: apt-repo
           path: apt-repo
@@ -440,12 +440,12 @@ jobs:
       # The Flatpak repo (OSTree objects/refs/config/summary + the .flatpakrepo file) sits at the
       # Pages root; the APT repo sits under /apt/ alongside it — nothing in either tree's top level
       # is named "apt", so the two coexist with no path collisions.
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with:
           name: flatpak-pages
           path: pages
 
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with:
           name: apt-repo
           path: pages/apt
@@ -472,7 +472,7 @@ jobs:
       # Explicitly excludes flatpak-ostree-*/flatpak-pages (the raw OSTree repo artifacts
       # combine-flatpak-repo/deploy-pages consume) — a bare "flatpak-*" would also match those and
       # dump repo internals (config/objects/refs, with colliding filenames across arches) into dist.
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with:
           pattern: "{deb-*,appimage-*,flatpak-x86_64,flatpak-aarch64}"
           merge-multiple: true
@@ -509,7 +509,7 @@ jobs:
         env:
           SIGNING_GPG_KEY_ID: ${{ secrets.FLATPAK_GPG_KEY_ID }}
 
-      - uses: softprops/action-gh-release@v2
+      - uses: softprops/action-gh-release@v3
         with:
           files: |
             dist/*.deb
