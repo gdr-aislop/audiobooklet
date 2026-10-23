@@ -44,7 +44,7 @@ pub async fn save(pool: &SqlitePool, session: &ListeningSession) -> Result<()> {
 }
 
 pub async fn get(pool: &SqlitePool, id: &str) -> Result<Option<ListeningSession>> {
-    let session = sqlx::query_as(sqlx::AssertSqlSafe(format!("SELECT {COLUMNS} FROM listening_sessions WHERE id = ?")))
+    let session = sqlx::query_as(&format!("SELECT {COLUMNS} FROM listening_sessions WHERE id = ?"))
         .bind(id)
         .fetch_optional(pool)
         .await?;
@@ -54,11 +54,11 @@ pub async fn get(pool: &SqlitePool, id: &str) -> Result<Option<ListeningSession>
 /// Sessions of one account on one server with something the server hasn't confirmed, oldest
 /// change first, at most `limit` of them.
 pub async fn list_dirty(pool: &SqlitePool, account_id: &str, server_id: &str, limit: i64) -> Result<Vec<ListeningSession>> {
-    let sessions = sqlx::query_as(sqlx::AssertSqlSafe(format!(
+    let sessions = sqlx::query_as(&format!(
         "SELECT {COLUMNS} FROM listening_sessions
          WHERE account_id = ? AND server_id = ? AND sent_updated_at IS NOT updated_at
          ORDER BY updated_at LIMIT ?"
-    )))
+    ))
     .bind(account_id)
     .bind(server_id)
     .bind(limit)

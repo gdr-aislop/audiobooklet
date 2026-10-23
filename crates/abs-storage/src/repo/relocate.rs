@@ -29,7 +29,7 @@ pub async fn rebase_paths(pool: &SqlitePool, from: &Path, to: &Path) -> Result<u
         let sql = format!(
             "UPDATE {table} SET {column} = ?1 || substr({column}, length(?2) + 1) WHERE substr({column}, 1, length(?2)) = ?2"
         );
-        changed += sqlx::query(sqlx::AssertSqlSafe(sql)).bind(&to).bind(&from).execute(&mut *tx).await?.rows_affected();
+        changed += sqlx::query(&sql).bind(&to).bind(&from).execute(&mut *tx).await?.rows_affected();
     }
     tx.commit().await?;
     Ok(changed)
@@ -61,13 +61,13 @@ mod tests {
             "INSERT INTO download_tracks (server_id, item_id, ino, file_path, updated_at) VALUES ('s1', 'i1', '8', '/home/jan/.local/share/ioXgithubXgdrXaislopXabs-app/8.mp3', 'now')".to_string(),
         ];
         for row in rows {
-            sqlx::query(sqlx::AssertSqlSafe(row)).execute(&mut *conn).await.unwrap();
+            sqlx::query(&row).execute(&mut *conn).await.unwrap();
         }
         drop(conn);
         pool
     }
 
-    async fn text(pool: &SqlitePool, sql: &'static str) -> Option<String> {
+    async fn text(pool: &SqlitePool, sql: &str) -> Option<String> {
         sqlx::query_scalar(sql).fetch_one(pool).await.unwrap()
     }
 
