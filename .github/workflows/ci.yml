@@ -104,7 +104,9 @@ jobs:
         # The GTK scenarios need a display and a session bus; each runs in its own process.
         run: xvfb-run -a dbus-run-session -- cargo test --workspace --locked
         env:
-          # The GTK tests' accessibility bus isn't running in a container.
-          GTK_A11Y: none
+          # No accessibility bus in a container. "test" keeps each widget's accessible roles and
+          # properties in memory for the screen-reader scenarios to read; "none" drops them, and
+          # those scenarios fail.
+          GTK_A11Y: test
           CARGO_PROFILE_DEV_DEBUG: "0"
           CARGO_INCREMENTAL: "0"
