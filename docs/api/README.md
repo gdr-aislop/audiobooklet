@@ -177,6 +177,10 @@ What the client does (`abs-core/src/listening_sessions.rs`, `app/src/listening.r
   request, at most 50 per request;
 - a stable per-install `deviceId` goes with every request — without one the server adds a device
   row for every request;
+- the device's maker and model go in `deviceInfo`; the OS name and version can't — the server takes
+  them only from the `User-Agent` (its bundled ua-parser-js 0.7.31), so the default agent is
+  `Audiobooklet/<version> (Linux <kernel>)`, which the server lists as "Linux 6.6.101" rather than
+  "Linux undefined" (`default_user_agent` in `ext.rs`);
 - timestamps are moved onto the server's clock (estimated from the `Date` header), because the
   server compares a session's `updatedAt` with its own time;
 - a server that answers 404/405 gets the newest position per book by `PATCH /api/me/progress`

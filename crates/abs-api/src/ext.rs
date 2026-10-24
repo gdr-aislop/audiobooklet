@@ -6,6 +6,8 @@
 //! hand-written. If upstream ever documents one of these endpoints, the generated method takes
 //! over and the hand-written one here is deleted.
 
+use std::sync::OnceLock;
+
 use serde::{Deserialize, Serialize};
 
 use crate::Client;
@@ -332,7 +334,7 @@ struct RawMetadata {
 /// ever names a reqwest type to describe connection settings.
 ///
 /// `ConnectionOptions::default()` is what [`Client::with_bearer_token`] uses: no extra headers,
-/// certificate verification on, no client certificate, and the app's own [`DEFAULT_USER_AGENT`].
+/// certificate verification on, no client certificate, and the app's own [`default_user_agent`].
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct ConnectionOptions {
     /// Headers attached to every request, on top of the generated client's own. The
@@ -355,15 +357,45 @@ pub struct ConnectionOptions {
     pub client_cert_path: Option<std::path::PathBuf>,
     /// The PKCS#12 bundle's export password, if it has one.
     pub client_cert_password: Option<String>,
-    /// Replaces [`DEFAULT_USER_AGENT`] when set.
+    /// Replaces [`default_user_agent`] when set.
     pub user_agent: Option<String>,
 }
 
 /// The `User-Agent` every request sends unless a server's settings override it, so the app is
-/// recognizable in a server's logs. Deliberately not "Audiobookshelf": the project asks
-/// third-party clients not to use its name in a way that suggests affiliation
+/// recognizable in a server's logs: `Audiobooklet/<version> (Linux <kernel>)`. Deliberately not
+/// "Audiobookshelf": the project asks third-party clients not to use its name in a way that
+/// suggests affiliation
 /// (https://audiobookshelf.org/docs/faq/app#i-want-to-build-a-client-app-what-are-the-rules).
-pub const DEFAULT_USER_AGENT: &str = concat!("Audiobooklet/", env!("CARGO_PKG_VERSION"), " (Linux)");
+///
+/// The kernel version is there for the server's device list, which takes the OS name and version
+/// from this header alone (`DeviceInfo.setData`, via its bundled ua-parser-js 0.7.31): `(Linux)`
+/// showed as "Linux undefined". The kernel works on every distribution and inside the Flatpak;
+/// distribution names don't (the parser knows Debian or Ubuntu, but not PureOS or postmarketOS,
+/// and an unknown one in front of "Linux" made it read the next word as the version). Without a
+/// readable kernel version it's `(Linux)` as before. Worked out once per run.
+pub fn default_user_agent() -> &'static str {
+    static USER_AGENT: OnceLock<String> = OnceLock::new();
+    USER_AGENT.get_or_init(|| {
+        let kernel = std::fs::read_to_string("/proc/sys/kernel/osrelease").ok().and_then(|release| kernel_version(&release));
+        user_agent_for(kernel.as_deref())
+    })
+}
+
+fn user_agent_for(kernel: Option<&str>) -> String {
+    match kernel {
+        Some(kernel) => format!("Audiobooklet/{} (Linux {kernel})", env!("CARGO_PKG_VERSION")),
+        None => format!("Audiobooklet/{} (Linux)", env!("CARGO_PKG_VERSION")),
+    }
+}
+
+/// The numeric part of a kernel release (`6.6.101-librem5` → `6.6.101`): digits and dots only,
+/// so nothing odd can reach the header or the server's parser. `None` when it doesn't start with
+/// a number.
+fn kernel_version(release: &str) -> Option<String> {
+    let numeric: String = release.trim().chars().take_while(|c| c.is_ascii_digit() || *c == '.').take(32).collect();
+    let numeric = numeric.trim_end_matches('.');
+    numeric.starts_with(|c: char| c.is_ascii_digit()).then(|| numeric.to_string())
+}
 
 /// Why minting a [`Client`] with connection options failed. Unlike the plain
 /// headers/timeout-only constructors (which cannot fail beyond an invalid token), honoring a
@@ -434,7 +466,7 @@ fn load_client_identity(
 impl Client {
     /// An unauthenticated client with default [`ConnectionOptions`] — for the calls that run
     /// before any server settings exist (the first login) or when they can't be loaded. Unlike
-    /// the generated `Client::new`, it sends [`DEFAULT_USER_AGENT`].
+    /// the generated `Client::new`, it sends [`default_user_agent`].
     pub fn with_default_options(baseurl: &str) -> Self {
         Self::with_options(baseurl, &ConnectionOptions::default()).expect("a client with default connection options always builds")
     }
@@ -514,7 +546,7 @@ impl Client {
         if options.disable_ssl_verify {
             builder = builder.danger_accept_invalid_certs(true);
         }
-        builder = builder.user_agent(options.user_agent.as_deref().unwrap_or(DEFAULT_USER_AGENT));
+        builder = builder.user_agent(options.user_agent.as_deref().unwrap_or(default_user_agent()));
         if let Some(path) = &options.client_cert_path {
             builder = builder.identity(load_client_identity(path, options.client_cert_password.as_deref())?);
         }
@@ -2659,17 +2691,38 @@ mod tests {
         assert!(!err.server_may_have_acted());
     }
 
-    /// The app identifies itself as `Audiobooklet/<version> (Linux)` unless a server's settings say
-    /// otherwise — never without a User-Agent (a `"-"` in the server's log), and never with the
-    /// Audiobookshelf name.
+    /// The kernel version in the User-Agent: only the leading number survives, and anything
+    /// that isn't one leaves the old `(Linux)`.
+    #[test]
+    fn kernel_version_keeps_only_the_leading_number() {
+        assert_eq!(kernel_version("6.6.101-librem5\n").as_deref(), Some("6.6.101"));
+        assert_eq!(kernel_version("6.12.0").as_deref(), Some("6.12.0"));
+        assert_eq!(kernel_version("6").as_deref(), Some("6"));
+        assert_eq!(kernel_version("5.15.0-122-generic").as_deref(), Some("5.15.0"));
+        assert_eq!(kernel_version("6.1.0+rpt-rpi-v8").as_deref(), Some("6.1.0"));
+        assert_eq!(kernel_version("6.8.").as_deref(), Some("6.8"));
+        assert_eq!(kernel_version(&"1".repeat(100)).map(|v| v.len()), Some(32));
+        for odd in ["", "\n", "abc", "-1", ".5", "v6.6", "  ", "６.６"] {
+            assert_eq!(kernel_version(odd), None, "{odd:?}");
+        }
+        assert_eq!(user_agent_for(Some("6.6.101")), concat!("Audiobooklet/", env!("CARGO_PKG_VERSION"), " (Linux 6.6.101)"));
+        assert_eq!(user_agent_for(None), concat!("Audiobooklet/", env!("CARGO_PKG_VERSION"), " (Linux)"));
+    }
+
+    /// The app identifies itself as `Audiobooklet/<version> (Linux <kernel>)` unless a server's
+    /// settings say otherwise — never without a User-Agent (a `"-"` in the server's log), and
+    /// never with the Audiobookshelf name.
     #[tokio::test]
     async fn requests_send_the_app_s_own_user_agent_unless_overridden() {
-        assert!(DEFAULT_USER_AGENT.starts_with(concat!("Audiobooklet/", env!("CARGO_PKG_VERSION"))));
-        assert!(!DEFAULT_USER_AGENT.to_lowercase().contains("audiobookshelf"));
+        let agent = default_user_agent();
+        assert!(agent.starts_with(concat!("Audiobooklet/", env!("CARGO_PKG_VERSION"), " (Linux")), "{agent}");
+        assert!(!agent.to_lowercase().contains("audiobookshelf"));
+        let os = agent.split_once(" (").unwrap().1;
+        assert!(os == "Linux)" || os.strip_prefix("Linux ").and_then(|rest| rest.strip_suffix(')')).is_some_and(|kernel| kernel_version(kernel).as_deref() == Some(kernel)), "{agent}");
         let server = MockServer::start().await;
         Mock::given(method("POST"))
             .and(path("/login"))
-            .and(header("user-agent", DEFAULT_USER_AGENT))
+            .and(header("user-agent", default_user_agent()))
             .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
                 "user": { "id": "user-1", "username": "jane", "accessToken": "abc123" }
             })))
