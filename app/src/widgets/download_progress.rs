@@ -21,25 +21,9 @@ use adw::prelude::*;
 use std::cell::RefCell;
 use std::time::Instant;
 
+use crate::download_speed::SpeedMeter;
 use crate::downloads::{DownloadEvent, DownloadManager, ItemDownloadState};
 use crate::i18n::{tr, tr_args};
-
-/// Per-instance speed smoothing — same EMA shape as `screens::downloads`'s own `SpeedState`, just
-/// keyed to a single item (this widget is always built for exactly one) rather than a `HashMap`
-/// across a whole screen's worth of rows. No separate staleness window (that screen's own
-/// `SPEED_DISPLAY_WINDOW`): every recompute here happens on a fresh `TrackProgress` event, not a
-/// periodic poll, so there's no gap in which a rate could go stale between updates.
-struct SpeedState {
-    ema: f64,
-    last_bytes: u64,
-    last_instant: Option<Instant>,
-}
-
-impl Default for SpeedState {
-    fn default() -> Self {
-        Self { ema: 0.0, last_bytes: 0, last_instant: None }
-    }
-}
 
 pub(crate) struct DownloadProgressStrip {
     revealer: gtk4::Revealer,
@@ -48,8 +32,7 @@ pub(crate) struct DownloadProgressStrip {
     server_id: String,
     item_id: String,
     download_manager: DownloadManager,
-    speed: RefCell<SpeedState>,
-    bytes_so_far: std::cell::Cell<u64>,
+    speed: RefCell<SpeedMeter>,
     /// Guards against stacking more than one deferred `update_label` per main-loop turn — several
     /// `TrackProgress`/`ItemStateChanged` events can land before the idle callback runs, and only
     /// the latest state matters.
@@ -88,8 +71,7 @@ impl DownloadProgressStrip {
             server_id: server_id.clone(),
             item_id: item_id.clone(),
             download_manager: download_manager.clone(),
-            speed: RefCell::new(SpeedState::default()),
-            bytes_so_far: std::cell::Cell::new(0),
+            speed: RefCell::new(SpeedMeter::default()),
             update_pending: std::cell::Cell::new(false),
         });
 
@@ -130,8 +112,7 @@ impl DownloadProgressStrip {
         match event {
             DownloadEvent::ItemStateChanged { item_id, state } if *item_id == strip.item_id => match state {
                 ItemDownloadState::Downloading => {
-                    *strip.speed.borrow_mut() = SpeedState::default();
-                    strip.bytes_so_far.set(0);
+                    *strip.speed.borrow_mut() = SpeedMeter::default();
                     strip.revealer.set_reveal_child(true);
                     strip.schedule_update(strip);
                 }
@@ -139,8 +120,8 @@ impl DownloadProgressStrip {
                     strip.revealer.set_reveal_child(false);
                 }
             },
-            DownloadEvent::TrackProgress { item_id, bytes_downloaded, .. } if *item_id == strip.item_id => {
-                strip.bytes_so_far.set(*bytes_downloaded);
+            DownloadEvent::TrackProgress { item_id, ino, bytes_downloaded, .. } if *item_id == strip.item_id => {
+                strip.speed.borrow_mut().record(ino, *bytes_downloaded, Instant::now());
                 strip.schedule_update(strip);
             }
             _ => {}
@@ -171,20 +152,10 @@ impl DownloadProgressStrip {
             self.progress_bar.pulse();
         }
 
-        let now = Instant::now();
-        let mut speed = self.speed.borrow_mut();
-        let bytes = self.bytes_so_far.get();
-        if let Some(last_instant) = speed.last_instant {
-            let elapsed = now.duration_since(last_instant).as_secs_f64();
-            if elapsed > 0.0 {
-                let instant_rate = bytes.saturating_sub(speed.last_bytes) as f64 / elapsed;
-                speed.ema = if speed.ema <= 0.0 { instant_rate } else { speed.ema * 0.5 + instant_rate * 0.5 };
-            }
-        }
-        speed.last_bytes = bytes;
-        speed.last_instant = Some(now);
-        let display_speed = (speed.ema > 0.0).then_some(speed.ema);
-        drop(speed);
+        let (bytes, display_speed) = {
+            let speed = self.speed.borrow();
+            (speed.total(), speed.rate(Instant::now()))
+        };
 
         let details = crate::screens::downloads::downloading_subtitle(batch, bytes, display_speed);
         // TRANSLATORS: {details} is a progress summary such as "3 of 12 chapters · 40 MB of 200 MB · 2.1 MB/s".
