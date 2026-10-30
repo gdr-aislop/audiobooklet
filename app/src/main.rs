@@ -269,6 +269,7 @@ mod tests {
         (library_sync_now_and_pull_to_refresh, crate::screens::library::tests::run_sync_now_and_pull_to_refresh),
         (item_detail_metadata_renders_from_cache_and_play_for_unstarted, crate::screens::item_detail::tests::run_metadata_renders_from_cache_and_play_for_unstarted),
         (item_detail_tab_walks_from_the_header_through_the_page, crate::screens::item_detail::tests::run_tab_walks_from_the_header_through_the_page),
+        (item_detail_an_unspaced_title_and_author_fit_a_phone, crate::screens::item_detail::tests::run_an_unspaced_title_and_author_fit_a_phone),
         (item_detail_empty_narrator_falls_back_to_author_only, crate::screens::item_detail::tests::run_empty_narrator_falls_back_to_author_only),
         (item_detail_partially_listened_book_shows_resume_and_progress, crate::screens::item_detail::tests::run_partially_listened_book_shows_resume_and_progress),
         (item_detail_description_truncation_and_more_toggle, crate::screens::item_detail::tests::run_description_truncation_and_more_toggle),
