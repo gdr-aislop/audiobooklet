@@ -143,13 +143,14 @@ pub fn build(
     // the screen (see `widgets::banner`'s identical fix for the same reasoning).
     let title_label = gtk4::Label::builder()
         .wrap(true)
+        .wrap_mode(gtk4::pango::WrapMode::WordChar)
         .max_width_chars(1)
         .justify(gtk4::Justification::Center)
         .css_classes(["title-2"])
         .margin_top(16)
         .build();
     let author_label =
-        gtk4::Label::builder().wrap(true).max_width_chars(1).justify(gtk4::Justification::Center).css_classes(["dim-label"]).margin_top(4).build();
+        gtk4::Label::builder().wrap(true).wrap_mode(gtk4::pango::WrapMode::WordChar).max_width_chars(1).justify(gtk4::Justification::Center).css_classes(["dim-label"]).margin_top(4).build();
     // The chapter playing, under the author (Lissen shows it in the author's place). One line,
     // ellipsized, so it never adds more than a line of height on a phone; tapping it opens the
     // chapters list, like the chapters button.
@@ -691,8 +692,8 @@ pub fn build(
             if window_title.subtitle() != source {
                 window_title.set_subtitle(&source);
             }
-            title_label.set_label(&snapshot.title);
-            author_label.set_label(snapshot.author.as_deref().unwrap_or(""));
+            title_label.set_label(&crate::widgets::breakable(&snapshot.title));
+            author_label.set_label(&crate::widgets::breakable(snapshot.author.as_deref().unwrap_or("")));
             author_label.set_visible(snapshot.author.is_some());
             match &snapshot.chapter {
                 Some(chapter) => {

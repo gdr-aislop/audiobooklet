@@ -2452,6 +2452,19 @@ pub(crate) mod tests {
         pump_until(|| window.controller.snapshot().is_some_and(|s| s.last_error.is_some()), std::time::Duration::from_secs(10));
         open_player_and_measure("player, long title + error banner", &mut measure);
 
+        // A title and author taken from a folder name have no spaces to break at.
+        window.controller.start(
+            abs_core::auth::Session::new(pool.clone(), &server, &account),
+            PlayRequest {
+                item_id: "item-3".to_string(),
+                title: "Andrzej.Pilipiuk.Wojslawicka.masakra.kosa.lancuch.gyky".to_string(),
+                author: Some("Jan.Kowalski-Nowakowski.Grzegorz_Brzeczyszczykiewicz.Chrzaszczyrzewoszyce".to_string()),
+            },
+            1.0,
+        );
+        pump_until(|| window.controller.snapshot().is_some_and(|s| s.is_playing && s.title.starts_with("Andrzej.")), std::time::Duration::from_secs(10));
+        open_player_and_measure("player, unspaced title + author", &mut measure);
+
         // Item Detail (long title and author), About, Welcome.
         hooks.stack.set_visible_child_name("home");
         pump_until(|| false, std::time::Duration::from_millis(300));

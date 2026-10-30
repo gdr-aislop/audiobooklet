@@ -100,6 +100,7 @@ pub fn build(
     let info_label = gtk4::Label::builder()
         .label(tr("This connection is used for syncing, streaming and downloads — every call the app makes to the server goes through it."))
         .wrap(true)
+        .wrap_mode(gtk4::pango::WrapMode::WordChar)
         .max_width_chars(32)
         .margin_top(12)
         .margin_bottom(12)

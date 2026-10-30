@@ -161,7 +161,7 @@ impl CoverViewer {
             .can_target(false)
             .build();
         let spinner = gtk4::Spinner::new();
-        let pill_label = gtk4::Label::builder().wrap(true).justify(gtk4::Justification::Center).build();
+        let pill_label = gtk4::Label::builder().wrap(true).wrap_mode(gtk4::pango::WrapMode::WordChar).justify(gtk4::Justification::Center).build();
         let pill = gtk4::Box::builder()
             .orientation(gtk4::Orientation::Horizontal)
             .spacing(8)

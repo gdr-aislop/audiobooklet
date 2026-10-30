@@ -163,7 +163,7 @@ pub fn build(
     // sits in a `ScrolledWindow` with `hscrollbar_policy(Never)` (see below), so an unclamped,
     // fully server-controlled title/author string could otherwise force the whole window wider
     // than the screen (see `widgets::banner`'s identical fix for the same reasoning).
-    let title_label = gtk4::Label::builder().wrap(true).max_width_chars(1).justify(gtk4::Justification::Center).css_classes(["title-2"]).margin_top(18).selectable(true).build();
+    let title_label = gtk4::Label::builder().wrap(true).wrap_mode(gtk4::pango::WrapMode::WordChar).max_width_chars(1).justify(gtk4::Justification::Center).css_classes(["title-2"]).margin_top(18).selectable(true).build();
     // Selectable so the title can be copied (long-press or drag, then Copy), but never focusable:
     // a selectable label is focusable by default, and the first focusable label in a freshly
     // shown page gets its whole text selected — the title would open highlighted. `can_focus`,
@@ -172,7 +172,7 @@ pub fn build(
     // header's last button — `can_focus(false)` keeps GTK from asking the label at all.
     title_label.set_focusable(false);
     title_label.set_can_focus(false);
-    let author_label = gtk4::Label::builder().wrap(true).max_width_chars(1).justify(gtk4::Justification::Center).css_classes(["dim-label"]).margin_top(4).visible(false).build();
+    let author_label = gtk4::Label::builder().wrap(true).wrap_mode(gtk4::pango::WrapMode::WordChar).max_width_chars(1).justify(gtk4::Justification::Center).css_classes(["dim-label"]).margin_top(4).visible(false).build();
     // One widget, whose *text* changes in place from the plain series name (Pass 1, local) to
     // "Name, N/M" (Pass 2, once the network call resolves) — never swapped for a different widget
     // and never allowed to wrap to a second line (`max_width_chars` + `ellipsize` on the label,
@@ -212,6 +212,7 @@ pub fn build(
     // full text (ID-4). Hidden entirely when the item has no description at all.
     let description_label = gtk4::Label::builder()
         .wrap(true)
+        .wrap_mode(gtk4::pango::WrapMode::WordChar)
         .xalign(0.0)
         .lines(3)
         .ellipsize(gtk4::pango::EllipsizeMode::End)
@@ -492,7 +493,7 @@ pub fn build(
             // if the item somehow isn't cached (shouldn't happen: a card is only tappable once
             // its item is synced), rather than leaving the page blank.
             let item = abs_storage::repo::items::get(&pool, &server_id, &item_id).await.ok();
-            title_label.set_label(item.as_ref().map(|i| i.title.as_str()).unwrap_or(&item_id));
+            title_label.set_label(&crate::widgets::breakable(item.as_ref().map(|i| i.title.as_str()).unwrap_or(&item_id)));
             crate::a11y::name(&window_title, item.as_ref().map(|i| i.title.as_str()).unwrap_or(&item_id));
             if let Some(item) = &item {
                 if let Some(author) = &item.author {
@@ -503,7 +504,7 @@ pub fn build(
                         }
                         None => author.clone(),
                     };
-                    author_label.set_label(&subtitle);
+                    author_label.set_label(&crate::widgets::breakable(&subtitle));
                     author_label.set_visible(true);
                 }
                 // Series: shown immediately with just the plain name (already cached on the
@@ -1077,6 +1078,35 @@ pub(crate) mod tests {
             )
             .mount(mock_server)
             .await;
+    }
+
+    /// Not a `#[test]` itself — see `main.rs`'s `mod tests`. A title or author taken from a folder
+    /// name has no spaces (`Andrzej.Pilipiuk.Wojslawicka.masakra.kosa.lancuch.gyky`); the page must
+    /// still fit a 360 px phone, with the name wrapped at its dots rather than widening the window.
+    pub(crate) fn run_an_unspaced_title_and_author_fit_a_phone(runtime: &tokio::runtime::Runtime) {
+        const TITLE: &str = "Andrzej.Pilipiuk.Wojslawicka.masakra.kosa.lancuch.gyky";
+        const AUTHOR: &str = "Jan.Kowalski-Nowakowski.Grzegorz_Brzeczyszczykiewicz.Chrzaszczyrzewoszyce";
+        let mock_server = runtime.block_on(MockServer::start());
+        runtime.block_on(mock_item_with_chapters(&mock_server, "item-1", 3600.0, &[("Intro", 0.0, 60.0), ("Chapter One", 60.0, 1800.0)]));
+        let pool = runtime.block_on(crate::test_support::pool());
+        let (server, account) = runtime.block_on(account_and_server(&pool, &mock_server.uri()));
+        runtime.block_on(insert_synced_item(&pool, &server.id, "item-1", TITLE, Some(AUTHOR), None, Some("A description."), 3600.0));
+
+        let session = abs_core::auth::Session::new(pool.clone(), &server, &account);
+        let screen = build(pool.clone(), server, account, session, test_download_manager(pool.clone()), test_controller(pool.clone()), "item-1".to_string(), |_, _| {}, || {}, || {}, |_| {}, || {});
+        let hooks = screen.test_hooks();
+        let window = gtk4::Window::builder().child(&screen.root).default_width(360).default_height(720).build();
+        window.present();
+        pump_until(|| hooks.play_button.opacity() == 1.0 && hooks.chapters_list.row_at_index(1).is_some(), Duration::from_secs(10));
+        pump_until(|| false, Duration::from_millis(300));
+
+        let (min_width, ..) = screen.root.measure(gtk4::Orientation::Horizontal, -1);
+        assert!(min_width <= 360, "the page needs {min_width}px of width, wider than a 360px phone");
+        let shown = hooks.title_label.label();
+        assert_eq!(shown.replace('\u{200b}', ""), TITLE, "the title is the server's, with only invisible break points added");
+        assert!(shown.contains('\u{200b}'), "the dotted title can break at its dots");
+        assert!(hooks.title_label.layout().line_count() > 1, "the title wraps onto several lines");
+        window.close();
     }
 
     /// Not a `#[test]` itself — see `main.rs`'s `mod tests`. The Tab order for a keyboard user:

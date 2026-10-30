@@ -43,7 +43,7 @@ pub(crate) fn save_cancel_dialog(window: &adw::ApplicationWindow, title: &str, o
     // `max_width_chars(1)` caps this label's natural width regardless of `wrap`, so a long
     // validation error can't force this dialog window wider than the screen (see
     // `widgets::banner`'s identical fix for the same reasoning).
-    let error_label = gtk4::Label::builder().css_classes(["error"]).wrap(true).max_width_chars(1).visible(false).halign(gtk4::Align::Start).build();
+    let error_label = gtk4::Label::builder().css_classes(["error"]).wrap(true).wrap_mode(gtk4::pango::WrapMode::WordChar).max_width_chars(1).visible(false).halign(gtk4::Align::Start).build();
     let response_label = error_label.clone();
     dialog.connect_response(move |dialog, response| {
         if response == gtk4::ResponseType::Ok {
@@ -64,7 +64,7 @@ pub(crate) fn add_dialog_content(dialog: &gtk4::Dialog, description: &str) -> gt
     content.set_margin_top(12);
     content.set_margin_bottom(12);
     content.set_spacing(12);
-    let description_label = gtk4::Label::builder().label(description).wrap(true).max_width_chars(36).halign(gtk4::Align::Start).build();
+    let description_label = gtk4::Label::builder().label(description).wrap(true).wrap_mode(gtk4::pango::WrapMode::WordChar).max_width_chars(36).halign(gtk4::Align::Start).build();
     content.append(&description_label);
     content
 }

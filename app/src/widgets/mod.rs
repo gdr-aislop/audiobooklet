@@ -243,3 +243,82 @@ pub(crate) mod tests {
         assert_eq!(*runs.borrow(), vec!["second"], "only the later schedule should have run");
     }
 }
+
+/// `text` with invisible line-break opportunities after `.`, `_` and `/` inside long unspaced
+/// runs, for labels showing a title or author that came from a file or folder name
+/// (`Andrzej.Pilipiuk.Wojslawicka.masakra`). Line breaking follows Unicode's rules, which allow a
+/// break after a hyphen but not after a dot or underscore between letters, so such a name is one
+/// unbreakable word, and `WrapMode::WordChar` alone cuts it wherever it runs out of room. Pango has
+/// no attribute that adds break opportunities, hence a zero-width space (U+200B) in the displayed
+/// text. Only a run of 12 or more characters without whitespace is touched, so ordinary titles
+/// and initials ("J.R.R. Tolkien") come back unchanged. For display only: names for screen readers
+/// and anything stored or searched use the original text, and selecting and copying the label
+/// copies the invisible spaces too.
+pub fn breakable(text: &str) -> std::borrow::Cow<'_, str> {
+    const MIN_RUN: usize = 12;
+    const ZERO_WIDTH_SPACE: char = '\u{200b}';
+    let mut out = String::with_capacity(text.len());
+    let mut changed = false;
+    for piece in text.split_inclusive(char::is_whitespace) {
+        let run = piece.trim_end_matches(char::is_whitespace);
+        if run.chars().count() < MIN_RUN {
+            out.push_str(piece);
+            continue;
+        }
+        let mut chars = run.chars().peekable();
+        while let Some(c) = chars.next() {
+            out.push(c);
+            if matches!(c, '.' | '_' | '/') && chars.peek().is_some_and(|next| *next != ZERO_WIDTH_SPACE) {
+                out.push(ZERO_WIDTH_SPACE);
+                changed = true;
+            }
+        }
+        out.push_str(&piece[run.len()..]);
+    }
+    if changed {
+        std::borrow::Cow::Owned(out)
+    } else {
+        std::borrow::Cow::Borrowed(text)
+    }
+}
+
+#[cfg(test)]
+mod breakable_tests {
+    use super::breakable;
+
+    const Z: &str = "\u{200b}";
+
+    #[test]
+    fn ordinary_text_comes_back_unchanged() {
+        for text in ["", "Piranesi", "J.R.R. Tolkien", "Mr. Smith", "Project Hail Mary", "a.b.c", "Krzysztof Kolumb. Odkrywca z wyspy Chios"] {
+            assert!(matches!(breakable(text), std::borrow::Cow::Borrowed(_)), "{text:?}");
+            assert_eq!(breakable(text).replace(Z, "").as_str(), text);
+        }
+        assert_eq!(breakable("J.R.R. Tolkien"), "J.R.R. Tolkien");
+        assert_eq!(breakable("Mr. Smith"), "Mr. Smith");
+    }
+
+    #[test]
+    fn a_long_dotted_name_gets_a_break_after_each_separator() {
+        let title = "Andrzej.Pilipiuk.Wojslawicka.masakra.kosa.lancuch.gyky";
+        let shown = breakable(title);
+        assert_eq!(shown.matches(Z).count(), 6);
+        assert_eq!(shown.replace(Z, ""), title);
+        assert!(shown.starts_with(&format!("Andrzej.{Z}Pilipiuk.{Z}")));
+        assert_eq!(breakable("some_long_file_name_here"), format!("some_{Z}long_{Z}file_{Z}name_{Z}here"));
+        assert_eq!(breakable("path/to/some/where/else"), format!("path/{Z}to/{Z}some/{Z}where/{Z}else"));
+    }
+
+    #[test]
+    fn edges_and_odd_input_are_safe() {
+        // A trailing separator gets no break after it; runs of separators each get one except at the end.
+        assert_eq!(breakable("abcdefghijkl."), "abcdefghijkl.");
+        assert_eq!(breakable("abcdefgh...ijkl"), format!("abcdefgh.{Z}.{Z}.{Z}ijkl"));
+        // Only the long run in a mixed string is touched, and whitespace is kept as it was.
+        assert_eq!(breakable("Intro  to.a_very_long_file.name  end"), format!("Intro  to.a_very_long_file.name  end").replace("to.a_very_long_file.name", &format!("to.{Z}a_{Z}very_{Z}long_{Z}file.{Z}name")));
+        // Multi-byte characters, and text that already has the invisible space.
+        assert_eq!(breakable("Żółć.Gęślą.Jaźń.Ąę"), format!("Żółć.{Z}Gęślą.{Z}Jaźń.{Z}Ąę"));
+        assert_eq!(breakable(&format!("abcdefgh.{Z}ijklmnop")), format!("abcdefgh.{Z}ijklmnop"));
+        assert_eq!(breakable("   "), "   ");
+    }
+}

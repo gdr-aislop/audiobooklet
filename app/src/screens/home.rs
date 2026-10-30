@@ -166,6 +166,7 @@ impl EmptyState {
         let title = gtk4::Label::builder().css_classes(["title-2"]).build();
         let description = gtk4::Label::builder()
             .wrap(true)
+            .wrap_mode(gtk4::pango::WrapMode::WordChar)
             .justify(gtk4::Justification::Center)
             .css_classes(["dim-label"])
             .build();
@@ -178,6 +179,7 @@ impl EmptyState {
         // identical fix for the same reasoning).
         let details = gtk4::Label::builder()
             .wrap(true)
+            .wrap_mode(gtk4::pango::WrapMode::WordChar)
             .max_width_chars(1)
             .justify(gtk4::Justification::Center)
             .selectable(true)
