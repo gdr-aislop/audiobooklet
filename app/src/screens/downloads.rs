@@ -24,6 +24,7 @@ use std::time::{Duration, Instant};
 use adw::prelude::*;
 use sqlx::SqlitePool;
 
+use crate::download_speed::SpeedMeter;
 use crate::downloads::{DownloadEvent, DownloadManager, ItemDownloadState};
 use crate::i18n::{ntr, tr, tr_args};
 use crate::screens::settings::confirm;
@@ -35,10 +36,6 @@ use abs_storage::models::DownloadStatus;
 /// even if that upstream cadence ever changes; the subtitle only needs ~5 updates a second either
 /// way.
 const LABEL_UPDATE_INTERVAL: Duration = Duration::from_millis(200);
-
-/// A speed sample older than this means nothing has arrived in a while — hide the speed part
-/// rather than showing a frozen rate as if it were current.
-const SPEED_DISPLAY_WINDOW: Duration = Duration::from_secs(2);
 
 pub struct DownloadsScreen {
     pub root: gtk4::Widget,
@@ -61,15 +58,6 @@ impl DownloadsScreen {
     }
 }
 
-/// Per-item speed smoothing, kept across row rebuilds (rebuilds happen on every
-/// `ItemStateChanged`; the download itself doesn't reset each time).
-struct SpeedState {
-    ema: f64,
-    last_bytes: u64,
-    last_instant: Option<Instant>,
-    last_label_write: Instant,
-}
-
 struct Widgets {
     pool: SqlitePool,
     server_id: String,
@@ -88,8 +76,11 @@ struct Widgets {
     /// (`bytes_downloaded` is the full size for `Complete` tracks, the last checkpoint otherwise)
     /// and updated from `TrackProgress` events (per-track cumulative, so no deltas to reconcile).
     track_bytes: Rc<RefCell<HashMap<String, HashMap<String, u64>>>>,
-    /// Smoothed per-item download speed across rebuilds — see `SpeedState`.
-    speeds: Rc<RefCell<HashMap<String, SpeedState>>>,
+    /// Per-item download speed, kept across row rebuilds (rebuilds happen on every
+    /// `ItemStateChanged`; the download itself doesn't reset each time) — see `SpeedMeter`.
+    speeds: Rc<RefCell<HashMap<String, SpeedMeter>>>,
+    /// When each in-flight row's subtitle was last rewritten, for `LABEL_UPDATE_INTERVAL`.
+    last_label_write: Rc<RefCell<HashMap<String, Instant>>>,
     /// The in-flight rows themselves, keyed by item id — `TrackProgress` updates a row's subtitle
     /// text in place (throttled) instead of rebuilding the whole list per chunk. Rebuilt rows
     /// re-register here at refresh.
@@ -159,6 +150,7 @@ pub fn build(
         downloading: Rc::new(RefCell::new(download_manager.in_flight_items(&server.id).into_iter().collect())),
         track_bytes: Rc::new(RefCell::new(HashMap::new())),
         speeds: Rc::new(RefCell::new(HashMap::new())),
+        last_label_write: Rc::new(RefCell::new(HashMap::new())),
         live_rows: Rc::new(RefCell::new(HashMap::new())),
         failed: Rc::new(RefCell::new(HashMap::new())),
         on_open,
@@ -226,34 +218,23 @@ pub fn build(
                 widgets.track_bytes.borrow_mut().entry(item_id.clone()).or_default().insert(ino.clone(), *bytes_downloaded);
 
                 let now = Instant::now();
-                let mut speeds = widgets.speeds.borrow_mut();
-                let speed = speeds.entry(item_id.clone()).or_insert(SpeedState { ema: 0.0, last_bytes: *bytes_downloaded, last_instant: None, last_label_write: now });
-                match speed.last_instant {
-                    // First sample of a (re)started download: seed the baseline, no rate yet.
-                    None => {
-                        speed.last_bytes = *bytes_downloaded;
-                        speed.last_instant = Some(now);
-                    }
-                    Some(_) => {
-                        let elapsed = now.duration_since(speed.last_instant.unwrap()).as_secs_f64();
-                        if elapsed > 0.0 {
-                            let instant_rate = (*bytes_downloaded).saturating_sub(speed.last_bytes) as f64 / elapsed;
-                            speed.ema = if speed.ema <= 0.0 { instant_rate } else { speed.ema * 0.5 + instant_rate * 0.5 };
-                            speed.last_bytes = *bytes_downloaded;
-                            speed.last_instant = Some(now);
-                        }
-                    }
-                }
-
                 // Throttled in-place subtitle update — never a list rebuild per chunk.
-                if now.duration_since(speed.last_label_write) >= LABEL_UPDATE_INTERVAL {
-                    speed.last_label_write = now;
-                    let ema = speed.ema;
-                    drop(speeds);
+                let write_label = {
+                    let mut speeds = widgets.speeds.borrow_mut();
+                    speeds.entry(item_id.clone()).or_default().record(ino, *bytes_downloaded, now);
+                    let mut last_write = widgets.last_label_write.borrow_mut();
+                    let due = last_write.get(item_id).is_none_or(|at| now.duration_since(*at) >= LABEL_UPDATE_INTERVAL);
+                    if due {
+                        last_write.insert(item_id.clone(), now);
+                    }
+                    due
+                };
+                if write_label {
+                    let ema = widgets.speeds.borrow().get(item_id).and_then(|meter| meter.rate(now));
                     let bytes: u64 = widgets.track_bytes.borrow().get(item_id).map(|tracks| tracks.values().sum()).unwrap_or(0);
                     let batch = widgets.download_manager.batch_progress(&widgets.server_id, item_id);
                     if let Some(row) = widgets.live_rows.borrow().get(item_id.as_str()) {
-                        row.set_subtitle(&downloading_subtitle(batch, bytes, Some(ema)));
+                        row.set_subtitle(&downloading_subtitle(batch, bytes, ema));
                     }
                 }
             }
@@ -321,13 +302,7 @@ fn spawn_refresh(widgets: Rc<Widgets>) {
             } else if is_downloading {
                 let batch = widgets.download_manager.batch_progress(&widgets.server_id, &item_id);
                 let bytes: u64 = tracks.iter().map(|track| track.bytes_downloaded.max(0) as u64).sum();
-                let speed = {
-                    let speeds = widgets.speeds.borrow();
-                    speeds
-                        .get(&item_id)
-                        .filter(|state| state.ema > 0.0 && state.last_instant.is_some_and(|at| at.elapsed() < SPEED_DISPLAY_WINDOW))
-                        .map(|state| state.ema)
-                };
+                let speed = widgets.speeds.borrow().get(&item_id).and_then(|meter| meter.rate(Instant::now()));
                 Some(downloading_subtitle(batch, bytes, speed))
             } else {
                 let complete: Vec<_> = tracks.iter().filter(|track| track.status == DownloadStatus::Complete).collect();
@@ -351,6 +326,7 @@ fn spawn_refresh(widgets: Rc<Widgets>) {
         // Drop bookkeeping for items that left the list entirely (cleared/removed downloads).
         widgets.track_bytes.borrow_mut().retain(|id, _| all_ids.contains(id));
         widgets.speeds.borrow_mut().retain(|id, _| all_ids.contains(id));
+        widgets.last_label_write.borrow_mut().retain(|id, _| all_ids.contains(id));
 
         if read_failed {
             widgets.status_page.set_title(&tr("Couldn't read downloads"));

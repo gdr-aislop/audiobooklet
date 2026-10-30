@@ -1,6 +1,7 @@
 mod a11y;
 mod application;
 mod crash_reporting;
+mod download_speed;
 mod downloads;
 mod error_reporting;
 mod external_apps;
