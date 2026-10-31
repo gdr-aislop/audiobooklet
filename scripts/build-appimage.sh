@@ -363,6 +363,9 @@ export LDAI_UPDATE_INFORMATION="gh-releases-zsync|$GH_OWNER|$GH_REPO|latest|$APP
 # The metainfo was validated offline above.
 export LDAI_NO_APPSTREAM=1
 
+# Deploy first, package afterwards: linuxdeploy rewrites the plugins while deploying (RPATH,
+# strip), and the GStreamer cache that ships in the AppImage records their size and times, so it
+# can only be built once they are final — between the two steps.
 (
     cd "$OUTPUT_DIR"
     "$LINUXDEPLOY_BIN" \
@@ -371,8 +374,32 @@ export LDAI_NO_APPSTREAM=1
         --desktop-file="$APPDIR/usr/share/applications/$APP_ID.desktop" \
         --icon-file="$APPDIR/usr/share/icons/hicolor/scalable/apps/$APP_ID.svg" \
         --icon-file="$ICON_PNG" \
-        "${DEPLOY_ARGS[@]}" \
-        --output=appimage
+        "${DEPLOY_ARGS[@]}"
+)
+
+# The GStreamer plugin cache that ships in the AppImage (scripts/appimage-gst-registry.sh), built
+# for the path the launcher links the plugins at: $XDG_RUNTIME_DIR/audiobooklet-gstreamer-plugins
+# on the phone's first user (uid 1000). Needs a writable /run/user/1000 (the CI containers are
+# root) and gst-inspect-1.0; without them the AppImage ships as before and the phone builds its
+# cache on first start. The release build insists (AUDIOBOOKLET_REQUIRE_GST_PREWARM=1).
+GST_PREWARM_RUNDIR="/run/user/1000"
+GST_PREWARMED=0
+# shellcheck source=scripts/appimage-gst-registry.sh
+. "$REPO_ROOT/scripts/appimage-gst-registry.sh"
+if command -v gst-inspect-1.0 >/dev/null 2>&1 && mkdir -p "$GST_PREWARM_RUNDIR" 2>/dev/null && [ -w "$GST_PREWARM_RUNDIR" ]; then
+    audiobooklet_gst_registry_build "$APPDIR" "$GST_PREWARM_RUNDIR" || die "couldn't build the GStreamer plugin cache"
+    audiobooklet_gst_registry_verify "$APPDIR" || die "the GStreamer plugin cache lacks what playback needs"
+    GST_PREWARMED=1
+    echo "Built the GStreamer plugin cache ($(du -h "$APPDIR/usr/share/audiobooklet/gst-registry.bin" | cut -f1))"
+elif [ "${AUDIOBOOKLET_REQUIRE_GST_PREWARM:-}" = "1" ]; then
+    die "can't build the GStreamer plugin cache (need gst-inspect-1.0 from gstreamer1.0-tools and a writable $GST_PREWARM_RUNDIR)"
+else
+    warn "not building the GStreamer plugin cache (gst-inspect-1.0 or a writable $GST_PREWARM_RUNDIR is missing): the first start will scan the plugins"
+fi
+
+(
+    cd "$OUTPUT_DIR"
+    "$LINUXDEPLOY_BIN" --appdir="$APPDIR" --output=appimage
 )
 
 # The appimage plugin derives the output file name from the desktop file's
@@ -417,6 +444,19 @@ if [ "$produced" != "$OUTPUT_PATH" ]; then
     if ! grep -q "^Filename: $new_basename\$" "$OUTPUT_PATH.zsync"; then
         die "failed to rewrite $OUTPUT_PATH.zsync's header from $old_basename to $new_basename"
     fi
+fi
+
+# The shipped GStreamer cache, checked on the finished file: extracted through its squashfs, the
+# plugins have the times a phone will see, and GStreamer must accept the cache as it is. A cache
+# that doesn't match (times, paths, a plugin changed after it was built) would do nothing on the
+# phone, so it stops the build here instead.
+if [ "$GST_PREWARMED" = "1" ]; then
+    CHECK_DIR="$(mktemp -d)"
+    (cd "$CHECK_DIR" && "$OUTPUT_PATH" --appimage-extract >/dev/null) || die "couldn't extract $OUTPUT_PATH to check its GStreamer cache"
+    audiobooklet_gst_registry_matches "$CHECK_DIR/squashfs-root" "$GST_PREWARM_RUNDIR" \
+        || die "the GStreamer cache in the finished AppImage is not accepted by GStreamer as it is (it would be rescanned on every first start)"
+    rm -rf "$CHECK_DIR"
+    echo "Checked: GStreamer accepts the shipped plugin cache as it is."
 fi
 
 echo

@@ -116,6 +116,74 @@ check "the hook still scans in-process" test "$(sed -n 3p <<<"$hook_env")" = "no
 check "the hook records the host's cache setting for the apps it launches" test "$(sed -n 4p <<<"$hook_env")" = "/host/registry.bin"
 check "and lists the cache setting among what those apps must not inherit" grep -qw GST_REGISTRY <<<"$(sed -n 5p <<<"$hook_env")"
 
+# --- 6. the cache shipped in the AppImage ---------------------------------------------------------
+. "$REPO_ROOT/scripts/appimage-gst-registry.sh"
+RUN="$TMP/run"
+mkdir -p "$RUN"
+make_mount "$TMP/release"
+check "the release-time cache is built" audiobooklet_gst_registry_build "$TMP/release" "$RUN"
+SHIPPED="$TMP/release/usr/share/audiobooklet/gst-registry.bin"
+check "it ships with the link path and id" test -s "$SHIPPED" -a "$(cat "$TMP/release/usr/share/audiobooklet/gst-registry.link")" = "$RUN/audiobooklet-gstreamer-plugins" -a -s "$TMP/release/usr/share/audiobooklet/gst-registry.id"
+sum() { sha256sum "$1" 2>/dev/null | cut -d' ' -f1; }
+# A start of the app from <mount> by a user whose home is <home>, as the launcher would make it.
+start_in() { # <mount> <home> [runtime dir]
+    ( export HOME="$2" XDG_RUNTIME_DIR="${3:-$RUN}"; unset XDG_CACHE_HOME
+      . "$SETUP"; audiobooklet_gst_setup "$1"; GST_REGISTRY_FORK=no gst-inspect-1.0 coreelements >/dev/null 2>&1 )
+}
+mount_of_release() { rm -rf "$1"; cp -a "$TMP/release" "$1"; } # what a mount of the finished AppImage shows
+
+mount_of_release "$TMP/mounted"
+check "the cache is accepted as it is, from the files as a mount shows them" audiobooklet_gst_registry_matches "$TMP/mounted" "$RUN"
+rm -rf "$TMP/mounted"
+rm -f "$RUN/audiobooklet-gstreamer-plugins"
+
+mount_of_release "$TMP/pw1"
+mkdir -p "$TMP/h1/.cache/audiobooklet"
+echo junk > "$TMP/h1/.cache/audiobooklet/gstreamer-registry.bin" # an earlier version's cache file
+start_in "$TMP/pw1" "$TMP/h1"
+H1="$TMP/h1/.cache/audiobooklet"
+check "the first start copies the shipped cache in" test "$(sum "$H1/gstreamer-registry-prewarmed.bin")" = "$(sum "$SHIPPED")"
+check "and nothing scanned: GStreamer left it exactly as shipped" test "$(sum "$H1/gstreamer-registry-prewarmed.bin")" = "$(sum "$SHIPPED")"
+check "the plugins are reached through the link in the runtime folder" test "$(readlink -f "$RUN/audiobooklet-gstreamer-plugins")" = "$(readlink -f "$TMP/pw1/usr/lib/gstreamer-1.0")"
+check "an earlier version's cache file is removed" test ! -e "$H1/gstreamer-registry.bin"
+
+rm -rf "$TMP/pw1"; mount_of_release "$TMP/pw2"
+mkdir -p "$TMP/h2"
+start_in "$TMP/pw2" "$TMP/h2"
+check "another mount path and another home: still no scan" test "$(sum "$TMP/h2/.cache/audiobooklet/gstreamer-registry-prewarmed.bin")" = "$(sum "$SHIPPED")"
+
+# A plugin that changed after the cache was built is scanned again.
+rm -rf "$TMP/pw2"; mount_of_release "$TMP/pw3"
+sleep 1; touch "$TMP/pw3/usr/lib/gstreamer-1.0/libgstcoreelements.so"
+mkdir -p "$TMP/h3"
+start_in "$TMP/pw3" "$TMP/h3"
+check "a plugin that changed is scanned again (the cache is rewritten)" test "$(sum "$TMP/h3/.cache/audiobooklet/gstreamer-registry-prewarmed.bin")" != "$(sum "$SHIPPED")"
+
+# A new AppImage (a new id) replaces the user's copy, even a damaged one.
+rm -rf "$TMP/pw3"; mount_of_release "$TMP/pw4"
+echo damaged > "$H1/gstreamer-registry-prewarmed.bin"
+printf 'an older build' > "$H1/gstreamer-registry-prewarmed.bin.id"
+start_in "$TMP/pw4" "$TMP/h1"
+check "a different id brings the shipped cache back" test "$(sum "$H1/gstreamer-registry-prewarmed.bin")" = "$(sum "$SHIPPED")"
+check "and the id is recorded" test "$(cat "$H1/gstreamer-registry-prewarmed.bin.id")" = "$(cat "$TMP/pw4/usr/share/audiobooklet/gst-registry.id")"
+
+# Elsewhere than where it was built for: the per-user setup, as before.
+mkdir -p "$TMP/other-run" "$TMP/h4"
+start_in "$TMP/pw4" "$TMP/h4" "$TMP/other-run"
+check "another runtime folder: no shipped cache is used" test ! -e "$TMP/h4/.cache/audiobooklet/gstreamer-registry-prewarmed.bin"
+check "the per-user cache is used instead" test -s "$TMP/h4/.cache/audiobooklet/gstreamer-registry.bin"
+nort="$( export HOME="$TMP/h4"; unset XDG_RUNTIME_DIR XDG_CACHE_HOME; . "$SETUP"; audiobooklet_gst_setup "$TMP/pw4"; printf '%s' "${GST_REGISTRY:-unset}" )"
+check "no runtime folder at all: the same" test "$nort" = "$TMP/h4/.cache/audiobooklet/gstreamer-registry.bin"
+
+# A runtime folder that can't be written to.
+if [ "$(id -u)" -ne 0 ]; then
+    mkdir -p "$TMP/ro-run"; cp -a "$RUN/." "$TMP/ro-run/" 2>/dev/null; chmod 500 "$TMP/ro-run"
+    printf '%s' "$TMP/ro-run/audiobooklet-gstreamer-plugins" > "$TMP/pw4/usr/share/audiobooklet/gst-registry.link"
+    ro="$( export HOME="$TMP/h4" XDG_RUNTIME_DIR="$TMP/ro-run"; unset XDG_CACHE_HOME; . "$SETUP"; audiobooklet_gst_setup "$TMP/pw4"; printf '%s' "${GST_REGISTRY:-unset}" )"
+    check "a runtime folder that can't be written: the per-user setup" test "$ro" = "$TMP/h4/.cache/audiobooklet/gstreamer-registry.bin"
+    chmod 700 "$TMP/ro-run"
+fi
+
 if [ "$FAILED" -ne 0 ]; then
     echo "FAILED"
     exit 1

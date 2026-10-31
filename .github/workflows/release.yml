@@ -144,7 +144,7 @@ jobs:
             glib-networking dconf-gsettings-backend gsettings-desktop-schemas \
             librsvg2-common librsvg2-bin adwaita-icon-theme \
             gstreamer1.0-plugins-base gstreamer1.0-plugins-good \
-            gstreamer1.0-libav gstreamer1.0-pulseaudio \
+            gstreamer1.0-libav gstreamer1.0-pulseaudio gstreamer1.0-tools \
             libsoup-3.0-0
 
       - uses: actions/checkout@v7
@@ -164,6 +164,9 @@ jobs:
           echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
 
       - name: Build AppImage
+        env:
+          # Ships the pre-built GStreamer plugin cache, and fails the build if it can't.
+          AUDIOBOOKLET_REQUIRE_GST_PREWARM: "1"
         run: ./scripts/build-appimage.sh --version "${GITHUB_REF_NAME#v}"
 
       - uses: actions/upload-artifact@v7
