@@ -4,3 +4,4 @@
 *
 !scripts/appimage-builder-bookworm.Dockerfile
 !scripts/appimage-builder-bookworm-arm64.Dockerfile
+!scripts/appimage-cross-aarch64-bookworm.Dockerfile

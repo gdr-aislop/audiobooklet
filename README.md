@@ -122,6 +122,9 @@ postmarketOS — see [BUILD.md](BUILD.md).
 
 # aarch64 AppImage on an x86_64 host (arm64 container under QEMU emulation):
 ./scripts/build-aarch64-appimage-on-x86.sh
+
+# Same, but cross-compiles the Rust code natively and emulates only the packaging (much faster):
+./scripts/build-aarch64-appimage-on-x86-fast.sh
 ```
 
 Output lands in `build/appimage/audiobooklet-<version>-<arch>.AppImage`.
