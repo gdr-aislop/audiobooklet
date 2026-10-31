@@ -65,7 +65,7 @@ jobs:
             libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev \
             libssl-dev libpulse-dev \
             xvfb xauth dbus dbus-x11 \
-            gstreamer1.0-plugins-base gstreamer1.0-plugins-good \
+            gstreamer1.0-plugins-base gstreamer1.0-plugins-good gstreamer1.0-tools \
             adwaita-icon-theme shared-mime-info
 
       - name: Install Rust (stable)
@@ -79,6 +79,11 @@ jobs:
       # that without this (see release.yml's AppImage job).
       - name: Trust the workspace for git
         run: git config --global --add safe.directory "$GITHUB_WORKSPACE"
+
+      # The AppImage launcher's GStreamer setup, against the real plugins (a few seconds).
+      - name: AppImage launcher script tests
+        timeout-minutes: 5
+        run: bash scripts/test-appimage-gst-env.sh
 
       - name: Build
         timeout-minutes: 20

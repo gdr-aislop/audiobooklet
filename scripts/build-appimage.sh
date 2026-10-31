@@ -267,6 +267,10 @@ if [ -f /usr/share/icons/hicolor/index.theme ]; then
     cp -a /usr/share/icons/hicolor/index.theme "$APPDIR/usr/share/icons/hicolor/index.theme"
 fi
 
+# The part of the launcher hook that points GStreamer at its plugins, in a file of its own so it
+# can be tested (scripts/test-appimage-gst-env.sh); the hook below sources it.
+install -Dm755 "$REPO_ROOT/scripts/appimage-gst-env.sh" "$APPDIR/usr/share/$APP_NAME/gst-env.sh"
+
 # Runtime environment: sourced by linuxdeploy's default AppRun.
 mkdir -p "$APPDIR/apprun-hooks"
 cat > "$APPDIR/apprun-hooks/$APP_NAME.sh" <<'EOF'
@@ -283,7 +287,7 @@ export APPDIR
 # app/src/external_apps.rs puts them back for those launches. Kept from an earlier run of this
 # hook, if any, so the values recorded are always the host's.
 if [ -z "${AUDIOBOOKLET_BUNDLE_ENV+x}" ]; then
-    export AUDIOBOOKLET_BUNDLE_ENV="LD_LIBRARY_PATH GTK_PATH GTK_EXE_PREFIX GSETTINGS_SCHEMA_DIR GDK_PIXBUF_MODULE_FILE GDK_PIXBUF_MODULEDIR GIO_MODULE_DIR GST_PLUGIN_SYSTEM_PATH GST_REGISTRY_FORK GST_PLUGIN_SCANNER XDG_DATA_DIRS"
+    export AUDIOBOOKLET_BUNDLE_ENV="LD_LIBRARY_PATH GTK_PATH GTK_EXE_PREFIX GSETTINGS_SCHEMA_DIR GDK_PIXBUF_MODULE_FILE GDK_PIXBUF_MODULEDIR GIO_MODULE_DIR GST_PLUGIN_SYSTEM_PATH GST_REGISTRY GST_REGISTRY_FORK GST_PLUGIN_SCANNER XDG_DATA_DIRS"
     for var in $AUDIOBOOKLET_BUNDLE_ENV; do
         if [ -n "${!var+x}" ]; then export "AUDIOBOOKLET_HOST_$var=${!var}"; fi
     done
@@ -296,7 +300,10 @@ export GSETTINGS_SCHEMA_DIR="$APPDIR/usr/share/glib-2.0/schemas"
 export GDK_PIXBUF_MODULE_FILE="$APPDIR/usr/lib/gdk-pixbuf-2.0/2.10.0/loaders.cache"
 export GDK_PIXBUF_MODULEDIR="$APPDIR/usr/lib/gdk-pixbuf-2.0/2.10.0/loaders"
 export GIO_MODULE_DIR="$APPDIR/usr/lib/gio/modules"
-export GST_PLUGIN_SYSTEM_PATH="$APPDIR/usr/lib/gstreamer-1.0"
+# The plugin folder and cache file (GST_PLUGIN_SYSTEM_PATH, GST_REGISTRY): see gst-env.sh for why
+# they aren't simply the bundle's own path.
+. "$APPDIR/usr/share/audiobooklet/gst-env.sh"
+audiobooklet_gst_setup "$APPDIR"
 export GST_REGISTRY_FORK=no
 if [ -x "$APPDIR/usr/libexec/gstreamer-1.0/gst-plugin-scanner" ]; then
     export GST_PLUGIN_SCANNER="$APPDIR/usr/libexec/gstreamer-1.0/gst-plugin-scanner"
