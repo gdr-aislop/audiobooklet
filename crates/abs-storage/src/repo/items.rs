@@ -20,7 +20,7 @@ pub struct UpsertItem<'a> {
     pub genres: &'a [String],
 }
 
-pub async fn upsert(pool: &SqlitePool, item: UpsertItem<'_>) -> Result<()> {
+pub async fn upsert<'e>(db: impl sqlx::Executor<'e, Database = sqlx::Sqlite>, item: UpsertItem<'_>) -> Result<()> {
     let now = Utc::now().to_rfc3339();
     let genres_json = serde_json::to_string(item.genres).unwrap_or_else(|_| "[]".to_string());
     sqlx::query(
@@ -52,7 +52,7 @@ pub async fn upsert(pool: &SqlitePool, item: UpsertItem<'_>) -> Result<()> {
     .bind(now)
     .bind(item.series_name)
     .bind(genres_json)
-    .execute(pool)
+    .execute(db)
     .await?;
     Ok(())
 }
@@ -72,10 +72,10 @@ pub async fn get(pool: &SqlitePool, server_id: &str, id: &str) -> Result<Item> {
 }
 
 /// Saves what the library list returned beyond the basic fields (see [`ItemExtras`]) on an item
-/// [`upsert`] has already written. A separate write so the many callers that only know the basics
+/// [`upsert`] has already written. Like `upsert`, takes a pool or a transaction. A separate write so the many callers that only know the basics
 /// stay as they are; replaces every extra (the server is the authority, and a field it stopped
 /// sending is cleared). Changes nothing if the item doesn't exist.
-pub async fn set_extras(pool: &SqlitePool, server_id: &str, id: &str, extras: &ItemExtras) -> Result<()> {
+pub async fn set_extras<'e>(db: impl sqlx::Executor<'e, Database = sqlx::Sqlite>, server_id: &str, id: &str, extras: &ItemExtras) -> Result<()> {
     sqlx::query(
         "UPDATE items SET subtitle = ?, size_bytes = ?, num_chapters = ?, tags = ?, published_year = ?,
             publisher = ?, language = ?, explicit = ?, isbn = ?, asin = ?, has_cover = ?, title_sort = ?, author_sort = ?
@@ -96,7 +96,7 @@ pub async fn set_extras(pool: &SqlitePool, server_id: &str, id: &str, extras: &I
     .bind(&extras.author_sort)
     .bind(server_id)
     .bind(id)
-    .execute(pool)
+    .execute(db)
     .await?;
     Ok(())
 }

@@ -7,6 +7,7 @@ use abs_api::error_chain;
 use abs_storage::AppPaths;
 use chrono::{DateTime, Utc};
 use std::collections::HashSet;
+use std::time::{Duration, Instant};
 use sqlx::SqlitePool;
 
 use crate::error::{CoreError, Result};
@@ -93,7 +94,50 @@ pub async fn sync_items_for_library(
     server_id: &str,
     library_id: &str,
 ) -> Result<usize> {
-    Ok(store_items_for_library(pool, api, server_id, library_id).await?.len())
+    Ok(store_items_for_library(pool, api, server_id, library_id, &mut SyncTimings::default()).await?.len())
+}
+
+/// How many books one write transaction holds. A write transaction blocks every other writer
+/// (saving playback or download progress) until it commits, so it's kept to a hundred books: about
+/// one lock grab per hundred instead of two per book, without holding the lock for seconds on a
+/// library of thousands.
+const BATCH_SIZE: usize = 100;
+
+/// `None` (one autocommit write per statement, as before batching) when `ABS_SYNC_BATCH=0`; the
+/// switch for comparing the two on a real device. Otherwise transactions of [`BATCH_SIZE`] books.
+fn batch_size_from_env() -> Option<usize> {
+    if std::env::var_os("ABS_SYNC_BATCH").is_some_and(|value| value == "0") { None } else { Some(BATCH_SIZE) }
+}
+
+/// Where one sync spent its time, logged once per sync (see [`SyncTimings::line`]).
+#[derive(Debug, Default)]
+struct SyncTimings {
+    libraries: usize,
+    items: usize,
+    /// The item list requests, including parsing the responses.
+    fetch: Duration,
+    /// Writing the books into the database.
+    write: Duration,
+    /// The longest single write transaction: how long other writers can have been held up.
+    longest_chunk: Duration,
+    /// Flagging books without audio and removing books the server no longer lists.
+    tidy: Duration,
+    batched: bool,
+}
+
+impl SyncTimings {
+    fn line(&self) -> String {
+        format!(
+            "library sync timings libraries={} items={} fetch_ms={} write_ms={} longest_chunk_ms={} tidy_ms={} batched={}",
+            self.libraries,
+            self.items,
+            self.fetch.as_millis(),
+            self.write.as_millis(),
+            self.longest_chunk.as_millis(),
+            self.tidy.as_millis(),
+            self.batched
+        )
+    }
 }
 
 /// [`sync_items_for_library`], returning the ids the server listed. Items without playable audio
@@ -103,7 +147,60 @@ async fn store_items_for_library(
     api: &abs_api::Client,
     server_id: &str,
     library_id: &str,
+    timings: &mut SyncTimings,
 ) -> Result<HashSet<String>> {
+    store_items_for_library_in_batches(pool, api, server_id, library_id, batch_size_from_env(), timings).await
+}
+
+/// The two rows one listed book is saved as: its basic fields, and everything else the list carried.
+fn rows_for<'a>(item: &'a abs_api::LibraryItemSummary, server_id: &'a str, library_id: &'a str) -> (UpsertItem<'a>, ItemExtras) {
+    let added_at = DateTime::<Utc>::from_timestamp_millis(item.added_at_ms).unwrap_or_else(Utc::now);
+    (
+        UpsertItem {
+            id: &item.id,
+            server_id,
+            library_id,
+            title: &item.title,
+            author: item.author.as_deref(),
+            narrator: item.narrator.as_deref(),
+            description: item.description.as_deref(),
+            duration_seconds: item.duration_seconds,
+            added_at,
+            series_name: item.series_name.as_deref(),
+            genres: &item.genres,
+        },
+        ItemExtras {
+            subtitle: item.subtitle.clone(),
+            size_bytes: item.size_bytes.and_then(|size| i64::try_from(size).ok()),
+            num_chapters: item.num_chapters,
+            tags_json: serde_json::to_string(&item.tags).unwrap_or_else(|_| "[]".to_string()),
+            published_year: item.published_year.clone(),
+            publisher: item.publisher.clone(),
+            language: item.language.clone(),
+            explicit: item.explicit,
+            isbn: item.isbn.clone(),
+            asin: item.asin.clone(),
+            has_cover: item.has_cover,
+            title_sort: item.title_sort.clone(),
+            author_sort: item.author_sort.clone(),
+        },
+    )
+}
+
+/// [`store_items_for_library`] with the transaction size as a parameter (`None`: every statement is
+/// its own write, as before batching), so tests can compare the two. The list is fetched and parsed
+/// before any transaction begins, so no write lock is held while waiting on the network. Each chunk
+/// is all-or-nothing (a failure rolls the whole chunk back, never half a book) and every write is an
+/// idempotent upsert, so the next sync simply writes whatever an interrupted one didn't.
+async fn store_items_for_library_in_batches(
+    pool: &SqlitePool,
+    api: &abs_api::Client,
+    server_id: &str,
+    library_id: &str,
+    batch_size: Option<usize>,
+    timings: &mut SyncTimings,
+) -> Result<HashSet<String>> {
+    let fetching = Instant::now();
     let remote_items = api
         .get_library_items_with_media(library_id)
         .await
@@ -112,56 +209,50 @@ async fn store_items_for_library(
             other if other.is_unreachable() => CoreError::Unreachable(other.details()),
             other => CoreError::UnexpectedResponse(other.details()),
         })?;
+    timings.fetch += fetching.elapsed();
+    timings.libraries += 1;
+    timings.items += remote_items.len();
+    timings.batched = batch_size.is_some();
 
     let mut seen = HashSet::new();
     let mut without_audio = Vec::new();
-    for item in remote_items {
-        let added_at = DateTime::<Utc>::from_timestamp_millis(item.added_at_ms).unwrap_or_else(Utc::now);
-
-        items::upsert(
-            pool,
-            UpsertItem {
-                id: &item.id,
-                server_id,
-                library_id,
-                title: &item.title,
-                author: item.author.as_deref(),
-                narrator: item.narrator.as_deref(),
-                description: item.description.as_deref(),
-                duration_seconds: item.duration_seconds,
-                added_at,
-                series_name: item.series_name.as_deref(),
-                genres: &item.genres,
-            },
-        )
-        .await?;
-        items::set_extras(
-            pool,
-            server_id,
-            &item.id,
-            &ItemExtras {
-                subtitle: item.subtitle.clone(),
-                size_bytes: item.size_bytes.and_then(|size| i64::try_from(size).ok()),
-                num_chapters: item.num_chapters,
-                tags_json: serde_json::to_string(&item.tags).unwrap_or_else(|_| "[]".to_string()),
-                published_year: item.published_year.clone(),
-                publisher: item.publisher.clone(),
-                language: item.language.clone(),
-                explicit: item.explicit,
-                isbn: item.isbn.clone(),
-                asin: item.asin.clone(),
-                has_cover: item.has_cover,
-                title_sort: item.title_sort.clone(),
-                author_sort: item.author_sort.clone(),
-            },
-        )
-        .await?;
+    for item in &remote_items {
         if !item.has_audio {
             without_audio.push(item.id.clone());
         }
-        seen.insert(item.id);
+        seen.insert(item.id.clone());
     }
+
+    let writing = Instant::now();
+    match batch_size {
+        Some(size) => {
+            for chunk in remote_items.chunks(size.max(1)) {
+                let started = Instant::now();
+                let mut tx = pool.begin().await.map_err(abs_storage::StorageError::from)?;
+                for item in chunk {
+                    let (item_row, extras) = rows_for(item, server_id, library_id);
+                    items::upsert(&mut *tx, item_row).await?;
+                    items::set_extras(&mut *tx, server_id, &item.id, &extras).await?;
+                }
+                tx.commit().await.map_err(abs_storage::StorageError::from)?;
+                timings.longest_chunk = timings.longest_chunk.max(started.elapsed());
+            }
+        }
+        None => {
+            for item in &remote_items {
+                let started = Instant::now();
+                let (item_row, extras) = rows_for(item, server_id, library_id);
+                items::upsert(pool, item_row).await?;
+                items::set_extras(pool, server_id, &item.id, &extras).await?;
+                timings.longest_chunk = timings.longest_chunk.max(started.elapsed());
+            }
+        }
+    }
+    timings.write += writing.elapsed();
+
+    let tidying = Instant::now();
     items::set_without_audio(pool, server_id, library_id, &without_audio).await?;
+    timings.tidy += tidying.elapsed();
 
     Ok(seen)
 }
@@ -228,13 +319,19 @@ pub async fn sync_all(
     let downloaded: HashSet<String> =
         abs_storage::repo::download_tracks::downloaded_item_ids(pool, server_id).await?.into_iter().collect();
 
+    let mut timings = SyncTimings::default();
     for library in &listed {
         let items_listed = if library.media_type == "podcast" {
             HashSet::new()
         } else {
-            store_items_for_library(pool, &api, server_id, &library.id).await?
+            store_items_for_library(pool, &api, server_id, &library.id, &mut timings).await?
         };
+        let removing = Instant::now();
         remove_unlisted_items(pool, paths, server_id, &library.id, &items_listed, &downloaded).await?;
+        timings.tidy += removing.elapsed();
+    }
+    if timings.libraries > 0 {
+        tracing::info!("{}", timings.line());
     }
 
     for library in libraries::list_for_server(pool, server_id).await? {
@@ -584,6 +681,127 @@ mod tests {
         sync_items_for_library(&pool, &api, &server_id, "lib-1").await.unwrap();
         let extras = items::get_extras(&pool, &server_id, "item-1").await.unwrap();
         assert_eq!((extras.subtitle, extras.size_bytes), (None, None));
+    }
+
+    /// A library of `count` books with distinct data in every field that matters; every seventh
+    /// has no audio (an e-book), every ninth no author.
+    fn big_list(count: usize) -> serde_json::Value {
+        let results: Vec<_> = (0..count)
+            .map(|i| {
+                let mut metadata = serde_json::json!({ "title": format!("Book {i:03}"), "titleIgnorePrefix": format!("Book, {i:03}"), "subtitle": format!("Sub {i}"), "genres": ["G"] });
+                if i % 9 != 0 {
+                    metadata["authorName"] = serde_json::json!(format!("Author {}", i % 10));
+                }
+                let mut media = serde_json::json!({ "duration": 100.0 + i as f64, "size": 1000 + i, "numChapters": i % 5, "tags": [format!("t{i}")], "metadata": metadata });
+                if i % 7 == 0 {
+                    media["numAudioFiles"] = serde_json::json!(0);
+                }
+                serde_json::json!({ "id": format!("item-{i:03}"), "addedAt": 1_700_000_000_000i64 + i as i64, "media": media })
+            })
+            .collect();
+        serde_json::json!({ "results": results })
+    }
+
+    async fn mock_list(server: &MockServer, body: serde_json::Value) {
+        Mock::given(method("GET")).and(path("/api/libraries/lib-1/items")).respond_with(ResponseTemplate::new(200).set_body_json(body)).mount(server).await;
+    }
+
+    /// Everything the sync stores for a library, in a comparable form.
+    async fn stored_snapshot(pool: &SqlitePool, server_id: &str) -> Vec<(String, String, Option<String>, i64, Option<String>, Option<i64>, f64)> {
+        sqlx::query_as("SELECT id, title, author, has_audio, subtitle, size_bytes, duration_seconds FROM items WHERE server_id = ? ORDER BY id")
+            .bind(server_id)
+            .fetch_all(pool)
+            .await
+            .unwrap()
+    }
+
+    /// Batching only changes how the writes are grouped: 250 books (three transactions of 100, 100
+    /// and 50), one at a time, and the whole list in a single transaction all store exactly the same.
+    #[tokio::test]
+    async fn batched_and_unbatched_syncs_store_identical_rows() {
+        let mock_server = MockServer::start().await;
+        mock_list(&mock_server, big_list(250)).await;
+        let api = abs_api::Client::new(&mock_server.uri());
+
+        let mut snapshots = Vec::new();
+        for batch_size in [None, Some(100), Some(1), Some(1000)] {
+            let (pool, server_id) = pool_with_server_and_library(&mock_server.uri(), "lib-1").await;
+            let mut timings = SyncTimings::default();
+            let listed = store_items_for_library_in_batches(&pool, &api, &server_id, "lib-1", batch_size, &mut timings).await.unwrap();
+            assert_eq!(listed.len(), 250);
+            assert_eq!((timings.items, timings.libraries, timings.batched), (250, 1, batch_size.is_some()));
+            let extras = items::get_extras(&pool, &server_id, "item-249").await.unwrap();
+            assert_eq!((extras.subtitle.as_deref(), extras.size_bytes, extras.title_sort.as_deref()), (Some("Sub 249"), Some(1249), Some("Book, 249")));
+            let flagged: (i64,) = sqlx::query_as("SELECT COUNT(*) FROM items WHERE server_id = ? AND has_audio = 0").bind(&server_id).fetch_one(&pool).await.unwrap();
+            assert_eq!(flagged.0, 36, "every seventh of 250 books has no audio");
+            snapshots.push(stored_snapshot(&pool, &server_id).await);
+        }
+        assert_eq!(snapshots[0].len(), 250);
+        assert!(snapshots.iter().all(|snapshot| *snapshot == snapshots[0]), "the grouping of the writes must not change what is stored");
+    }
+
+    /// A write fails in the second transaction: the first stays, the second leaves nothing of any
+    /// of its books (not even the ones before the failing one), the error is reported, and the next
+    /// clean sync completes the rest.
+    #[tokio::test]
+    async fn a_failed_chunk_rolls_back_whole_and_the_next_sync_completes() {
+        let mock_server = MockServer::start().await;
+        mock_list(&mock_server, big_list(250)).await;
+        let api = abs_api::Client::new(&mock_server.uri());
+        let (pool, server_id) = pool_with_server_and_library(&mock_server.uri(), "lib-1").await;
+        // The extras write of book 150 (in the second chunk of 100) fails.
+        sqlx::query("CREATE TRIGGER fail_one BEFORE UPDATE OF subtitle ON items WHEN NEW.id = 'item-150' BEGIN SELECT RAISE(ABORT, 'disk said no'); END")
+            .execute(&pool)
+            .await
+            .unwrap();
+
+        let err = store_items_for_library_in_batches(&pool, &api, &server_id, "lib-1", Some(100), &mut SyncTimings::default()).await.unwrap_err();
+        assert!(err.to_string().contains("disk said no"), "{err}");
+        let stored = stored_snapshot(&pool, &server_id).await;
+        assert_eq!(stored.len(), 100, "the first chunk was committed and the second left nothing behind");
+        assert_eq!(stored.first().map(|row| row.0.as_str()), Some("item-000"));
+        assert_eq!(stored.last().map(|row| row.0.as_str()), Some("item-099"));
+        assert!(stored.iter().all(|row| row.4.is_some()), "no half-written book: every stored book has its extras");
+
+        sqlx::query("DROP TRIGGER fail_one").execute(&pool).await.unwrap();
+        store_items_for_library_in_batches(&pool, &api, &server_id, "lib-1", Some(100), &mut SyncTimings::default()).await.unwrap();
+        assert_eq!(stored_snapshot(&pool, &server_id).await.len(), 250);
+    }
+
+    /// With batching off, the same failure leaves the earlier books written, as it always did.
+    #[tokio::test]
+    async fn without_batching_a_failure_keeps_the_books_before_it() {
+        let mock_server = MockServer::start().await;
+        mock_list(&mock_server, big_list(30)).await;
+        let api = abs_api::Client::new(&mock_server.uri());
+        let (pool, server_id) = pool_with_server_and_library(&mock_server.uri(), "lib-1").await;
+        sqlx::query("CREATE TRIGGER fail_one BEFORE UPDATE OF subtitle ON items WHEN NEW.id = 'item-020' BEGIN SELECT RAISE(ABORT, 'no'); END")
+            .execute(&pool)
+            .await
+            .unwrap();
+        assert!(store_items_for_library_in_batches(&pool, &api, &server_id, "lib-1", None, &mut SyncTimings::default()).await.is_err());
+        assert_eq!(stored_snapshot(&pool, &server_id).await.len(), 21, "books 0 to 20 were written (20 without its extras)");
+    }
+
+    #[test]
+    fn the_timing_line_names_every_step() {
+        let timings = SyncTimings {
+            libraries: 2,
+            items: 249,
+            fetch: Duration::from_millis(2100),
+            write: Duration::from_millis(900),
+            longest_chunk: Duration::from_millis(410),
+            tidy: Duration::from_millis(60),
+            batched: true,
+        };
+        assert_eq!(timings.line(), "library sync timings libraries=2 items=249 fetch_ms=2100 write_ms=900 longest_chunk_ms=410 tidy_ms=60 batched=true");
+        assert!(SyncTimings::default().line().ends_with("batched=false"));
+    }
+
+    #[test]
+    fn the_batch_switch_is_off_only_for_zero() {
+        // Not asserting the real environment (tests share it); the default is batched.
+        assert_eq!(batch_size_from_env().is_some(), std::env::var_os("ABS_SYNC_BATCH").is_none_or(|value| value != "0"));
     }
 
     #[tokio::test]
