@@ -5,6 +5,7 @@ mod download_speed;
 mod downloads;
 mod error_reporting;
 mod external_apps;
+mod gst_ready;
 mod i18n;
 mod icons;
 mod keep_awake;
@@ -116,6 +117,9 @@ fn main() -> adw::glib::ExitCode {
     // exercises this file's setup.
     let runtime = tokio::runtime::Runtime::new().expect("build the Tokio runtime");
     let _runtime_guard = runtime.enter();
+    // GStreamer loads its plugin registry on its own thread while the database opens and GTK
+    // starts; the player waits for it (`gst_ready::wait`), nothing else needs it.
+    gst_ready::start();
     // Every failure opening the app's data is shown in a window (`startup`), not a silent exit.
     let opened = match early_dirs {
         Err(err) => Err(startup::StartupProblem::from_io(&err, &paths.logs_dir())),
@@ -123,11 +127,14 @@ fn main() -> adw::glib::ExitCode {
     };
 
     perf::milestone("database opened");
-    let gstreamer_started = std::time::Instant::now();
-    if let Err(err) = abs_player::init() {
-        tracing::warn!(%err, "GStreamer failed to initialize; playback will be unavailable");
+    // The active server's host name is resolved now, in the background, so the first request of
+    // the session finds the system resolver's cache warm. Nothing waits for it.
+    if let Ok(state) = &opened {
+        if let Some(account) = &state.active_account {
+            let (pool, server_id) = (state.pool.clone(), account.server_id.clone());
+            runtime.spawn(async move { abs_core::warmup::warm_dns(&pool, &server_id).await });
+        }
     }
-    tracing::info!(took_ms = gstreamer_started.elapsed().as_millis() as u64, "GStreamer initialised");
 
     let app = match opened {
         Ok(state) => application::build_application(state),

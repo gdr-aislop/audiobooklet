@@ -97,6 +97,7 @@ pub fn build_application(state: AppState) -> adw::Application {
     // window forward rather than opening another one: a second window would hold a second login
     // session for the same account, and the two would keep invalidating each other's rotating
     // refresh token.
+    app.connect_startup(|_| crate::perf::milestone("GTK started"));
     app.connect_activate(move |app| {
         if present_existing_window(app) {
             return;
@@ -445,6 +446,7 @@ pub(crate) fn show_main(
         };
         crate::widgets::swap_content(&window_for_content, &main_window.root);
         retain_main_window(main_window);
+        crate::perf::milestone("main window shown");
     });
 }
 
@@ -478,7 +480,20 @@ async fn build_main_window(
     let offline_mode = abs_core::settings::load_offline_mode(&pool).await.unwrap_or(false);
     session.set_offline(offline_mode);
     tracing::info!(offline_mode, "loaded the offline mode setting");
+    // Runs the local-address reachability probe now, into the session's shared probe cache, so the
+    // first sync and the first cover fetch reuse its answer instead of each waiting for it. Does
+    // nothing without a local address, and in offline mode.
+    glib::spawn_future_local({
+        let session = session.clone();
+        async move {
+            let _ = session.connection_target().await;
+        }
+    });
     let servers_with_accounts = fetch_servers_with_accounts(&pool).await.map_err(problem)?;
+    crate::perf::milestone("main window data read");
+    // The player is the first thing built that needs GStreamer; its initialisation started before
+    // the database opened and has usually finished by now.
+    crate::gst_ready::wait().await;
     Ok(Some(screens::main_window::build(
         pool,
         paths,
