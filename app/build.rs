@@ -4,12 +4,14 @@
 //! to ask. Falls back to `"unknown"` when this isn't a git checkout (a distro source tarball
 //! build) or `git` isn't on `PATH`, rather than failing the build over a cosmetic detail.
 //!
-//! No `cargo:rerun-if-changed` directive is emitted on purpose: that would restrict reruns to
-//! only the paths named, and getting every case right (`.git/HEAD` for a normal checkout,
-//! whichever ref it points at, a detached HEAD, a worktree's separate `.git` file) isn't worth
-//! it for what's already a rarely-rebuilt, cheap-to-recompute version stamp — emitting nothing
-//! means cargo reruns this script on every build instead, which is exactly what keeps the hash
-//! honest.
+//! When it re-runs: on a new commit or a branch switch (git's `HEAD`, the branch's ref file and
+//! `packed-refs`, whichever exist) and when `data/` changes (the resources below). Emitting no
+//! `rerun-if-changed` at all, as this script once did, does *not* mean "every build": Cargo then
+//! re-runs it only when a file of this crate changes, so a commit that touched only another
+//! crate (`abs-core`, say) kept the previous commit's hash, and a user's log named the wrong build.
+//! Only paths that exist are named: a missing one would make Cargo re-run this script, and so
+//! recompile the whole app, on every build. Without git (a source tarball) nothing is named and
+//! Cargo's own rule applies.
 //!
 //! It also compiles `data/resources.gresource.xml` (the icons the system theme can't be relied on
 //! for, see `crate::icons`) into `$OUT_DIR/audiobooklet.gresource` with `glib-compile-resources`. Unlike
@@ -20,19 +22,45 @@
 use std::process::Command;
 
 fn main() {
-    let hash = Command::new("git")
-        .args(["rev-parse", "--short", "HEAD"])
+    let hash = git(&["rev-parse", "--short", "HEAD"]).unwrap_or_else(|| "unknown".to_string());
+    println!("cargo:rustc-env=ABS_APP_GIT_HASH={hash}");
+    watch_git_head();
+
+    println!("cargo:rerun-if-changed=data");
+    compile_resources();
+}
+
+/// `git <args>`'s trimmed output, or `None` if git isn't there, fails, or prints nothing.
+fn git(args: &[&str]) -> Option<String> {
+    Command::new("git")
+        .args(args)
         .output()
         .ok()
         .filter(|output| output.status.success())
         .and_then(|output| String::from_utf8(output.stdout).ok())
         .map(|s| s.trim().to_string())
         .filter(|s| !s.is_empty())
-        .unwrap_or_else(|| "unknown".to_string());
+}
 
-    println!("cargo:rustc-env=ABS_APP_GIT_HASH={hash}");
-
-    compile_resources();
+/// Asks Cargo to re-run this script when the commit changes: `HEAD` (a branch switch, a detached
+/// checkout, a commit while detached), the checked-out branch's ref (a commit on it) and
+/// `packed-refs` (where git may keep that ref instead). Worktrees keep `HEAD` in their own git
+/// directory and refs in the shared one, hence the two directories.
+fn watch_git_head() {
+    let current = std::env::current_dir().unwrap_or_default();
+    let absolute = |path: String| {
+        let path = std::path::PathBuf::from(path);
+        if path.is_absolute() { path } else { current.join(path) }
+    };
+    let Some(git_dir) = git(&["rev-parse", "--git-dir"]).map(absolute) else { return };
+    let common_dir = git(&["rev-parse", "--git-common-dir"]).map(absolute).unwrap_or_else(|| git_dir.clone());
+    let mut watched = vec![git_dir.join("HEAD"), common_dir.join("packed-refs")];
+    if let Some(branch_ref) = git(&["symbolic-ref", "-q", "HEAD"]) {
+        watched.push(common_dir.join(branch_ref));
+    }
+    for path in watched.into_iter().filter(|path| path.exists()) {
+        println!("cargo:rerun-if-changed={}", path.display());
+    }
 }
 
 fn compile_resources() {
