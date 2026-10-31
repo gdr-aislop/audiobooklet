@@ -97,6 +97,39 @@ pub struct Item {
     /// value into one TEXT column" convention `servers.custom_headers_json` already uses. Decode
     /// via [`Item::genres`] rather than parsing this directly.
     pub genres_json: String,
+    /// The server's own sort keys (`titleIgnorePrefix`: "Hobbit, The"; `authorNameLF`: "Tolkien,
+    /// J.R.R."), `None` until a sync after migration 0013 or when the server doesn't send them.
+    /// Lists sort by these when present.
+    pub title_sort: Option<String>,
+    pub author_sort: Option<String>,
+}
+
+/// What the library list returns beyond [`Item`]'s own fields, kept for Book Details and the
+/// download estimates (migration 0013). Everything is optional: `None` is "the server didn't say".
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize, FromRow)]
+pub struct ItemExtras {
+    pub subtitle: Option<String>,
+    /// The item's total size on the server, all files included (audio and anything else).
+    pub size_bytes: Option<i64>,
+    pub num_chapters: Option<i64>,
+    /// JSON-encoded like [`Item::genres_json`]; decode via [`ItemExtras::tags`].
+    pub tags_json: String,
+    pub published_year: Option<String>,
+    pub publisher: Option<String>,
+    pub language: Option<String>,
+    pub explicit: Option<bool>,
+    pub isbn: Option<String>,
+    pub asin: Option<String>,
+    /// Whether the server has a cover for the item; `None` is unknown, treated as "maybe".
+    pub has_cover: Option<bool>,
+    pub title_sort: Option<String>,
+    pub author_sort: Option<String>,
+}
+
+impl ItemExtras {
+    pub fn tags(&self) -> Vec<String> {
+        serde_json::from_str(&self.tags_json).unwrap_or_default()
+    }
 }
 
 impl Item {

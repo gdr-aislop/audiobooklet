@@ -267,6 +267,42 @@ pub fn transport_error_kind(err: &reqwest::Error) -> &'static str {
     }
 }
 
+/// A field that is kept when it has the expected type and ignored (`None`) when it hasn't, so one
+/// odd value in one book's record can't fail the whole library list, which would fail the sync.
+fn lenient<'de, D, T>(deserializer: D) -> Result<Option<T>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: serde::de::DeserializeOwned,
+{
+    let value = serde_json::Value::deserialize(deserializer)?;
+    Ok(serde_json::from_value(value).ok())
+}
+
+/// Like [`lenient`] for text the server may send as a number (`publishedYear`).
+fn lenient_text<'de, D>(deserializer: D) -> Result<Option<String>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    Ok(match serde_json::Value::deserialize(deserializer)? {
+        serde_json::Value::String(text) => Some(text),
+        serde_json::Value::Number(number) => Some(number.to_string()),
+        _ => None,
+    })
+}
+
+/// A cover path told apart three ways: the key missing or of an odd type (`None`: unknown), `null`
+/// (`Some(None)`: the server says there is no cover) and a path (`Some(Some(path))`).
+fn lenient_cover<'de, D>(deserializer: D) -> Result<Option<Option<String>>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    Ok(match serde_json::Value::deserialize(deserializer)? {
+        serde_json::Value::Null => Some(None),
+        serde_json::Value::String(path) => Some(Some(path)),
+        _ => None,
+    })
+}
+
 #[derive(Debug, Deserialize)]
 struct LibraryItemsResponseBody {
     results: Vec<RawLibraryItem>,
@@ -293,6 +329,15 @@ struct RawMedia {
     num_audio_files: Option<i64>,
     #[serde(rename = "numTracks")]
     num_tracks: Option<i64>,
+    /// The item's total size on the server, every file included.
+    #[serde(default, deserialize_with = "lenient")]
+    size: Option<u64>,
+    #[serde(rename = "numChapters", default, deserialize_with = "lenient")]
+    num_chapters: Option<i64>,
+    #[serde(default, deserialize_with = "lenient")]
+    tags: Option<Vec<String>>,
+    #[serde(rename = "coverPath", default, deserialize_with = "lenient_cover")]
+    cover_path: Option<Option<String>>,
 }
 
 impl RawMedia {
@@ -325,6 +370,26 @@ struct RawMetadata {
     series_name: Option<String>,
     #[serde(default)]
     genres: Vec<String>,
+    #[serde(default, deserialize_with = "lenient")]
+    subtitle: Option<String>,
+    #[serde(rename = "publishedYear", default, deserialize_with = "lenient_text")]
+    published_year: Option<String>,
+    #[serde(default, deserialize_with = "lenient")]
+    publisher: Option<String>,
+    #[serde(default, deserialize_with = "lenient")]
+    language: Option<String>,
+    #[serde(default, deserialize_with = "lenient")]
+    explicit: Option<bool>,
+    #[serde(default, deserialize_with = "lenient")]
+    isbn: Option<String>,
+    #[serde(default, deserialize_with = "lenient")]
+    asin: Option<String>,
+    /// The server's sort key for the title, leading "The"/"A" moved to the end.
+    #[serde(rename = "titleIgnorePrefix", default, deserialize_with = "lenient")]
+    title_sort: Option<String>,
+    /// The author as "Last, First", the server's sort key.
+    #[serde(rename = "authorNameLF", default, deserialize_with = "lenient")]
+    author_sort: Option<String>,
 }
 
 /// Connection-level options applied to every request a minted [`Client`] sends — the transport
@@ -610,6 +675,22 @@ pub struct LibraryItemSummary {
     /// Whether the item has audio this app can play: false for podcasts (episodes aren't
     /// supported) and e-book-only books.
     pub has_audio: bool,
+    /// What the list returns beyond the basics, each `None`/empty when the server didn't send it
+    /// (or sent something of the wrong type): see `abs_storage::models::ItemExtras`.
+    pub subtitle: Option<String>,
+    pub size_bytes: Option<u64>,
+    pub num_chapters: Option<i64>,
+    pub tags: Vec<String>,
+    pub published_year: Option<String>,
+    pub publisher: Option<String>,
+    pub language: Option<String>,
+    pub explicit: Option<bool>,
+    pub isbn: Option<String>,
+    pub asin: Option<String>,
+    /// `Some(false)` only when the server says the item has no cover; `None` when it didn't say.
+    pub has_cover: Option<bool>,
+    pub title_sort: Option<String>,
+    pub author_sort: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -971,6 +1052,19 @@ impl Client {
                     series_name: non_blank(metadata.series_name),
                     genres: metadata.genres,
                     has_audio,
+                    subtitle: non_blank(metadata.subtitle),
+                    size_bytes: media.size,
+                    num_chapters: media.num_chapters.filter(|count| *count >= 0),
+                    tags: media.tags.unwrap_or_default().into_iter().filter(|tag| !tag.trim().is_empty()).collect(),
+                    published_year: non_blank(metadata.published_year),
+                    publisher: non_blank(metadata.publisher),
+                    language: non_blank(metadata.language),
+                    explicit: metadata.explicit,
+                    isbn: non_blank(metadata.isbn),
+                    asin: non_blank(metadata.asin),
+                    has_cover: media.cover_path.map(|path| path.is_some_and(|path| !path.trim().is_empty())),
+                    title_sort: non_blank(metadata.title_sort),
+                    author_sort: non_blank(metadata.author_sort),
                 })
             })
             .collect())
@@ -1833,6 +1927,83 @@ mod tests {
         let all = api.get_all_media_progress().await.unwrap();
         let same_item = all.iter().find(|p| p.library_item_id == item.id).expect("should also appear in the bulk list");
         assert_eq!(same_item.current_time_seconds, 99.0);
+    }
+
+    async fn list_of(results: serde_json::Value) -> Vec<LibraryItemSummary> {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api/libraries/lib-1/items"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({ "results": results })))
+            .mount(&server)
+            .await;
+        Client::new(&server.uri()).get_library_items_with_media("lib-1").await.unwrap()
+    }
+
+    /// Everything the list returns beyond the basics is kept: Book Details facts, the total size,
+    /// the chapter count, tags, the cover flag and the server's sort keys.
+    #[tokio::test]
+    async fn the_library_list_keeps_the_extra_fields() {
+        let items = list_of(serde_json::json!([{
+            "id": "item-1",
+            "media": {
+                "duration": 3600.0,
+                "size": 340_000_000u64,
+                "numChapters": 19,
+                "tags": ["classic", "  ", "fantasy"],
+                "coverPath": "/audiobooks/The Hobbit/cover.jpg",
+                "metadata": {
+                    "title": "The Hobbit", "titleIgnorePrefix": "Hobbit, The",
+                    "authorName": "J.R.R. Tolkien", "authorNameLF": "Tolkien, J.R.R.",
+                    "subtitle": "There and Back Again", "publishedYear": "1937", "publisher": "Allen & Unwin",
+                    "language": "English", "explicit": false, "isbn": "9780261102217", "asin": ""
+                }
+            }
+        }]))
+        .await;
+        let item = &items[0];
+        assert_eq!(item.subtitle.as_deref(), Some("There and Back Again"));
+        assert_eq!((item.size_bytes, item.num_chapters), (Some(340_000_000), Some(19)));
+        assert_eq!(item.tags, ["classic", "fantasy"], "blank tags are dropped");
+        assert_eq!((item.published_year.as_deref(), item.publisher.as_deref(), item.language.as_deref()), (Some("1937"), Some("Allen & Unwin"), Some("English")));
+        assert_eq!((item.explicit, item.isbn.as_deref(), item.asin.as_deref()), (Some(false), Some("9780261102217"), None), "a blank ASIN is none");
+        assert_eq!(item.has_cover, Some(true));
+        assert_eq!((item.title_sort.as_deref(), item.author_sort.as_deref()), (Some("Hobbit, The"), Some("Tolkien, J.R.R.")));
+    }
+
+    /// One book with a field of the wrong type must not cost the library its other books, or even
+    /// its own other fields.
+    #[tokio::test]
+    async fn odd_typed_extra_fields_are_ignored_not_fatal() {
+        let items = list_of(serde_json::json!([
+            {
+                "id": "odd",
+                "media": {
+                    "size": "huge", "numChapters": {"n": 1}, "tags": "not-a-list", "coverPath": 12,
+                    "metadata": { "title": "Odd", "subtitle": 5, "publishedYear": 1999, "publisher": ["x"], "explicit": "yes", "isbn": null,
+                                  "titleIgnorePrefix": [], "authorNameLF": {} }
+                }
+            },
+            { "id": "fine", "media": { "metadata": { "title": "Fine" } } }
+        ]))
+        .await;
+        assert_eq!(items.len(), 2, "the other book is still listed");
+        let odd = &items[0];
+        assert_eq!((odd.title.as_str(), odd.size_bytes, odd.num_chapters, odd.has_cover), ("Odd", None, None, None));
+        assert!(odd.tags.is_empty());
+        assert_eq!(odd.published_year.as_deref(), Some("1999"), "a year sent as a number is still a year");
+        assert_eq!((odd.subtitle.as_deref(), odd.publisher.as_deref(), odd.explicit, odd.isbn.as_deref(), odd.title_sort.as_deref(), odd.author_sort.as_deref()), (None, None, None, None, None, None));
+    }
+
+    /// An older or trimmed response: nothing extra, and nothing claimed. In particular a missing
+    /// `coverPath` is "unknown", never "no cover".
+    #[tokio::test]
+    async fn missing_extra_fields_are_unknown() {
+        let items = list_of(serde_json::json!([{ "id": "item-1", "media": { "metadata": { "title": "Bare" } } }])).await;
+        let item = &items[0];
+        assert_eq!((item.subtitle.clone(), item.size_bytes, item.num_chapters, item.has_cover, item.title_sort.clone(), item.author_sort.clone()), (None, None, None, None, None, None));
+        assert!(item.tags.is_empty());
+        let none = list_of(serde_json::json!([{ "id": "a", "media": { "coverPath": null, "metadata": { "title": "No cover" } } }, { "id": "b", "media": { "coverPath": "  ", "metadata": { "title": "Blank cover" } } }])).await;
+        assert_eq!((none[0].has_cover, none[1].has_cover), (Some(false), Some(false)), "null or blank is the server saying there is no cover");
     }
 
     #[tokio::test]

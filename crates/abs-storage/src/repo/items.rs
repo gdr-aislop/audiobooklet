@@ -4,7 +4,7 @@ use chrono::Utc;
 use sqlx::SqlitePool;
 
 use crate::error::{Result, StorageError};
-use crate::models::Item;
+use crate::models::{Item, ItemExtras};
 
 pub struct UpsertItem<'a> {
     pub id: &'a str,
@@ -61,7 +61,50 @@ pub async fn get(pool: &SqlitePool, server_id: &str, id: &str) -> Result<Item> {
     sqlx::query_as(
         "SELECT id, server_id, library_id, title, author, narrator, description,
                 cover_cache_path, duration_seconds, added_at, synced_at,
-                series_name, genres AS genres_json
+                series_name, genres AS genres_json, title_sort, author_sort
+         FROM items WHERE server_id = ? AND id = ?",
+    )
+    .bind(server_id)
+    .bind(id)
+    .fetch_optional(pool)
+    .await?
+    .ok_or_else(|| StorageError::NotFound(format!("item {id} on server {server_id}")))
+}
+
+/// Saves what the library list returned beyond the basic fields (see [`ItemExtras`]) on an item
+/// [`upsert`] has already written. A separate write so the many callers that only know the basics
+/// stay as they are; replaces every extra (the server is the authority, and a field it stopped
+/// sending is cleared). Changes nothing if the item doesn't exist.
+pub async fn set_extras(pool: &SqlitePool, server_id: &str, id: &str, extras: &ItemExtras) -> Result<()> {
+    sqlx::query(
+        "UPDATE items SET subtitle = ?, size_bytes = ?, num_chapters = ?, tags = ?, published_year = ?,
+            publisher = ?, language = ?, explicit = ?, isbn = ?, asin = ?, has_cover = ?, title_sort = ?, author_sort = ?
+         WHERE server_id = ? AND id = ?",
+    )
+    .bind(&extras.subtitle)
+    .bind(extras.size_bytes)
+    .bind(extras.num_chapters)
+    .bind(&extras.tags_json)
+    .bind(&extras.published_year)
+    .bind(&extras.publisher)
+    .bind(&extras.language)
+    .bind(extras.explicit)
+    .bind(&extras.isbn)
+    .bind(&extras.asin)
+    .bind(extras.has_cover)
+    .bind(&extras.title_sort)
+    .bind(&extras.author_sort)
+    .bind(server_id)
+    .bind(id)
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
+pub async fn get_extras(pool: &SqlitePool, server_id: &str, id: &str) -> Result<ItemExtras> {
+    sqlx::query_as(
+        "SELECT subtitle, size_bytes, num_chapters, tags AS tags_json, published_year, publisher, language,
+                explicit, isbn, asin, has_cover, title_sort, author_sort
          FROM items WHERE server_id = ? AND id = ?",
     )
     .bind(server_id)
@@ -77,7 +120,7 @@ pub async fn list_for_library(pool: &SqlitePool, server_id: &str, library_id: &s
     let items = sqlx::query_as(
         "SELECT id, server_id, library_id, title, author, narrator, description,
                 cover_cache_path, duration_seconds, added_at, synced_at,
-                series_name, genres AS genres_json
+                series_name, genres AS genres_json, title_sort, author_sort
          FROM items WHERE server_id = ? AND library_id = ? AND has_audio = 1 ORDER BY added_at DESC",
     )
     .bind(server_id)
@@ -287,5 +330,64 @@ mod tests {
         let (pool, server_id, _library_id) = pool_with_library().await;
         let err = remove(&pool, &server_id, "no-such-item").await.unwrap_err();
         assert!(matches!(err, StorageError::NotFound(_)));
+    }
+
+    /// A database written by the release before migration 0013 (its tables, a stored item, no
+    /// extras columns) opens with the new columns empty: nothing lost, nothing misread.
+    #[tokio::test]
+    async fn migration_0013_keeps_existing_items_and_leaves_the_extras_unknown() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("db.sqlite3");
+        let pool = connect_and_migrate(&path).await.unwrap();
+        let server_id = servers::add(&pool, "https://a.example").await.unwrap();
+        libraries::upsert(&pool, libraries::UpsertLibrary { id: "lib-1", server_id: &server_id, name: "A", media_type: "book", icon: None, display_order: 1 }).await.unwrap();
+        upsert(&pool, item(&server_id, "lib-1", "item-1", "Project Hail Mary")).await.unwrap();
+        // Take the extras away again, as an older database would have them.
+        sqlx::query("UPDATE items SET subtitle = NULL, size_bytes = NULL, has_cover = NULL, title_sort = NULL, author_sort = NULL, tags = '[]'").execute(&pool).await.unwrap();
+
+        let stored = get(&pool, &server_id, "item-1").await.unwrap();
+        assert_eq!((stored.title.as_str(), stored.title_sort.clone(), stored.author_sort.clone()), ("Project Hail Mary", None, None));
+        assert_eq!(get_extras(&pool, &server_id, "item-1").await.unwrap(), ItemExtras { tags_json: "[]".to_string(), ..Default::default() });
+        assert_eq!(list_for_library(&pool, &server_id, "lib-1").await.unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn extras_round_trip_and_are_replaced_by_the_next_write() {
+        let (pool, server_id, library_id) = pool_with_library().await;
+        upsert(&pool, item(&server_id, &library_id, "item-1", "The Hobbit")).await.unwrap();
+
+        let extras = ItemExtras {
+            subtitle: Some("There and Back Again".to_string()),
+            size_bytes: Some(340_000_000),
+            num_chapters: Some(19),
+            tags_json: serde_json::to_string(&["classic", "fantasy"]).unwrap(),
+            published_year: Some("1937".to_string()),
+            publisher: Some("Allen & Unwin".to_string()),
+            language: Some("English".to_string()),
+            explicit: Some(false),
+            isbn: Some("9780261102217".to_string()),
+            asin: None,
+            has_cover: Some(true),
+            title_sort: Some("Hobbit, The".to_string()),
+            author_sort: Some("Tolkien, J.R.R.".to_string()),
+        };
+        set_extras(&pool, &server_id, "item-1", &extras).await.unwrap();
+        assert_eq!(get_extras(&pool, &server_id, "item-1").await.unwrap(), extras);
+        assert_eq!(extras.tags(), ["classic", "fantasy"]);
+        let item_row = get(&pool, &server_id, "item-1").await.unwrap();
+        assert_eq!((item_row.title_sort.as_deref(), item_row.author_sort.as_deref()), (Some("Hobbit, The"), Some("Tolkien, J.R.R.")));
+        assert_eq!(list_for_library(&pool, &server_id, &library_id).await.unwrap()[0].title_sort.as_deref(), Some("Hobbit, The"));
+
+        // The basic upsert (every other caller) leaves the extras alone.
+        upsert(&pool, item(&server_id, &library_id, "item-1", "The Hobbit")).await.unwrap();
+        assert_eq!(get_extras(&pool, &server_id, "item-1").await.unwrap(), extras);
+
+        // A field the server stops sending is cleared by the next sync's write.
+        set_extras(&pool, &server_id, "item-1", &ItemExtras { tags_json: "[]".to_string(), ..Default::default() }).await.unwrap();
+        assert_eq!(get_extras(&pool, &server_id, "item-1").await.unwrap().subtitle, None);
+
+        // An unknown item is not an error and not created.
+        set_extras(&pool, &server_id, "nope", &extras).await.unwrap();
+        assert!(matches!(get_extras(&pool, &server_id, "nope").await, Err(StorageError::NotFound(_))));
     }
 }

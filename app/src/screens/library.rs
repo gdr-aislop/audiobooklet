@@ -2053,6 +2053,8 @@ pub(crate) mod tests {
             synced_at: chrono::Utc::now(),
             series_name: series_name.map(str::to_string),
             genres_json: "[]".to_string(),
+            title_sort: None,
+            author_sort: None,
         }
     }
 
