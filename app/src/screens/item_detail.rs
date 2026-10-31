@@ -637,6 +637,25 @@ pub fn build(
                             if let Err(err) = abs_core::chapters::sync_item_chapters(&pool, &server_id, &item_id, &target.chapters).await {
                                 tracing::warn!(%err, item_id = %item_id, "couldn't persist chapters locally");
                             }
+                            // The same response lists each audio file with its size, which the download
+                            // menu's "≈340 MB" estimates are added up from. Kept in its own task, after
+                            // everything above and below has had its turn: nothing here waits on it, the
+                            // menu fills in its open popover when it lands. `cache_missing_tracks` only
+                            // adds and fills in, never deletes, so it can't disturb the records of a
+                            // download that exists or starts meanwhile.
+                            glib::spawn_future_local({
+                                let pool = pool.clone();
+                                let server_id = server_id.clone();
+                                let item_id = item_id.clone();
+                                let tracks = target.tracks.clone();
+                                let download_menu = download_menu.clone();
+                                async move {
+                                    match abs_core::tracks::cache_missing_tracks(&pool, &server_id, &item_id, &tracks).await {
+                                        Ok(()) => download_menu.refresh(),
+                                        Err(err) => tracing::warn!(%err, item_id = %item_id, "couldn't cache the item's tracks locally"),
+                                    }
+                                }
+                            });
                             target.chapters.iter().map(|c| (c.title.clone(), c.start_seconds, c.end_seconds)).collect()
                         }
                         Err(err) => {
@@ -1877,6 +1896,122 @@ pub(crate) mod tests {
             "the loading placeholder should be gone once chapters land, with no reopen needed"
         );
 
+        window.destroy();
+    }
+
+    /// Like [`mock_item_with_chapters_delayed`], with the audio file's byte size in its metadata,
+    /// as the real server sends it.
+    async fn mock_item_with_size(mock_server: &MockServer, item_id: &str, seconds: f64, size_bytes: u64, chapters: &[(&str, f64, f64)], delay: Duration) {
+        let chapters_json: Vec<_> = chapters.iter().enumerate().map(|(i, (title, start, end))| serde_json::json!({ "id": i, "start": start, "end": end, "title": title })).collect();
+        Mock::given(method("GET"))
+            .and(path(format!("/api/items/{item_id}")))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_json(serde_json::json!({
+                        "media": { "audioFiles": [{ "ino": "1", "duration": seconds, "metadata": { "size": size_bytes } }], "chapters": chapters_json }
+                    }))
+                    .set_delay(delay),
+            )
+            .mount(mock_server)
+            .await;
+    }
+
+    fn estimates_in(widget: &gtk4::Widget, found: &mut Vec<String>) {
+        if let Some(label) = widget.downcast_ref::<gtk4::Label>() {
+            if label.label().starts_with('≈') {
+                found.push(label.label().to_string());
+            }
+        }
+        let mut child = widget.first_child();
+        while let Some(c) = child {
+            estimates_in(&c, found);
+            child = c.next_sibling();
+        }
+    }
+
+    fn estimate_labels(popover_box: &gtk4::Box) -> Vec<String> {
+        let mut found = Vec::new();
+        estimates_in(popover_box.upcast_ref(), &mut found);
+        found
+    }
+
+    /// Not a `#[test]` itself — see `main.rs`'s `mod tests`. A book that was never downloaded has
+    /// no cached file sizes, so its download menu had no "≈340 MB" estimates until a download had
+    /// started. The page's own request for the chapters carries the sizes; they're now kept, and
+    /// the menu fills them in without waiting for anything: opened before the response, it shows
+    /// its placeholder, and the estimates appear in the open popover once the response lands.
+    pub(crate) fn run_download_menu_gets_sizes_from_the_pages_own_request(runtime: &tokio::runtime::Runtime) {
+        let mock_server = runtime.block_on(MockServer::start());
+        runtime.block_on(mock_item_with_size(
+            &mock_server,
+            "item-1",
+            3600.0,
+            340_000_000,
+            &[("One", 0.0, 1200.0), ("Two", 1200.0, 2400.0), ("Three", 2400.0, 3600.0)],
+            Duration::from_millis(500),
+        ));
+        let pool = runtime.block_on(crate::test_support::pool());
+        let (server, account) = runtime.block_on(account_and_server(&pool, &mock_server.uri()));
+        runtime.block_on(insert_synced_item(&pool, &server.id, "item-1", "Test Item", None, None, None, 3600.0));
+        assert!(runtime.block_on(abs_core::tracks::cached_tracks(&pool, &server.id, "item-1")).unwrap().is_empty(), "nothing is cached to begin with");
+
+        let session = abs_core::auth::Session::new(pool.clone(), &server, &account);
+        let screen = build(pool.clone(), server.clone(), account, session, test_download_manager(pool.clone()), test_controller(pool.clone()), "item-1".to_string(), |_, _| {}, || {}, || {}, |_| {}, || {});
+        let hooks = screen.test_hooks();
+        let window = gtk4::Window::builder().child(&screen.root).build();
+        window.present();
+        pump_until(|| window.is_mapped(), Duration::from_secs(5));
+
+        // Before the response: the placeholder, no estimates, and the page itself already shown.
+        hooks.download_popover.popup();
+        pump_until(|| hooks.download_popover_box.first_child().is_some(), Duration::from_secs(2));
+        assert!(any_label_reads(hooks.download_popover_box.upcast_ref(), "Loading chapters…"));
+        assert!(estimate_labels(&hooks.download_popover_box).is_empty());
+        assert_eq!(hooks.title_label.label(), "Test Item", "the page didn't wait for the request");
+
+        // The response lands: the page's chapters show, and the open menu gains its estimates.
+        pump_until(|| !estimate_labels(&hooks.download_popover_box).is_empty(), Duration::from_secs(10));
+        let estimates = estimate_labels(&hooks.download_popover_box);
+        assert!(!estimates.is_empty() && estimates.iter().all(|text| text.contains("340")), "{estimates:?}");
+        assert!(hooks.chapters_list.row_at_index(2).is_some());
+        let cached = runtime.block_on(abs_core::tracks::cached_tracks(&pool, &server.id, "item-1")).unwrap();
+        assert_eq!(cached.iter().map(|t| (t.ino.as_str(), t.size_bytes)).collect::<Vec<_>>(), [("1", Some(340_000_000))]);
+        window.destroy();
+    }
+
+    /// Not a `#[test]` itself — see `main.rs`'s `mod tests`. Opening the page of a book that is
+    /// already downloaded must keep what the download recorded: caching the sizes never deletes
+    /// track rows (which would cascade into the download's own records).
+    pub(crate) fn run_opening_a_downloaded_book_keeps_its_download_records(runtime: &tokio::runtime::Runtime) {
+        let mock_server = runtime.block_on(MockServer::start());
+        runtime.block_on(mock_item_with_size(&mock_server, "item-1", 3600.0, 340_000_000, &[("One", 0.0, 1800.0), ("Two", 1800.0, 3600.0)], Duration::ZERO));
+        let pool = runtime.block_on(crate::test_support::pool());
+        let (server, account) = runtime.block_on(account_and_server(&pool, &mock_server.uri()));
+        runtime.block_on(insert_synced_item(&pool, &server.id, "item-1", "Test Item", None, None, None, 3600.0));
+        runtime.block_on(abs_storage::repo::tracks::upsert_all(
+            &pool,
+            &server.id,
+            "item-1",
+            &[abs_storage::repo::tracks::NewTrack { ino: "1", duration_seconds: 3600.0, offset_seconds: 0.0, size_bytes: None }],
+        ))
+        .unwrap();
+        runtime.block_on(abs_storage::repo::download_tracks::upsert_pending(&pool, &server.id, "item-1", "1", "/p/1.mp3")).unwrap();
+        runtime.block_on(abs_storage::repo::download_tracks::mark_complete(&pool, &server.id, "item-1", "1", 340_000_000)).unwrap();
+
+        let session = abs_core::auth::Session::new(pool.clone(), &server, &account);
+        let screen = build(pool.clone(), server.clone(), account, session, test_download_manager(pool.clone()), test_controller(pool.clone()), "item-1".to_string(), |_, _| {}, || {}, || {}, |_| {}, || {});
+        let hooks = screen.test_hooks();
+        let window = gtk4::Window::builder().child(&screen.root).build();
+        window.present();
+        pump_until(|| hooks.chapters_list.row_at_index(1).is_some(), Duration::from_secs(10));
+        // Long enough for the detached caching task to have run.
+        pump_until(|| false, Duration::from_millis(500));
+
+        let downloads = runtime.block_on(abs_storage::repo::download_tracks::list_for_item(&pool, &server.id, "item-1")).unwrap();
+        assert_eq!(downloads.len(), 1, "the download's record survives the page opening");
+        assert_eq!(downloads[0].status, abs_storage::models::DownloadStatus::Complete);
+        let cached = runtime.block_on(abs_core::tracks::cached_tracks(&pool, &server.id, "item-1")).unwrap();
+        assert_eq!(cached[0].size_bytes, Some(340_000_000), "the missing size was filled in");
         window.destroy();
     }
 

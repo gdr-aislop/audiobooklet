@@ -48,6 +48,34 @@ pub async fn upsert_all(pool: &SqlitePool, server_id: &str, item_id: &str, track
     Ok(())
 }
 
+/// Adds the tracks an item is not known to have yet and fills in a size a known track lacks,
+/// without ever deleting or rewriting anything: a known track keeps its index, offset and
+/// duration, and a size already stored is kept. For callers that only *learned* about the item's
+/// files (Item Detail's request for its chapters) and so must not use [`upsert_all`]: that starts
+/// with `DELETE FROM tracks`, which cascades to `download_tracks` and would erase the records of a
+/// finished download, or of one that started a moment ago. Idempotent, and safe to run at any time.
+pub async fn cache_missing(pool: &SqlitePool, server_id: &str, item_id: &str, tracks: &[NewTrack<'_>]) -> Result<()> {
+    let mut tx = pool.begin().await?;
+    for (index, track) in tracks.iter().enumerate() {
+        sqlx::query(
+            "INSERT INTO tracks (server_id, item_id, ino, track_index, duration_seconds, offset_seconds, size_bytes)
+             VALUES (?, ?, ?, ?, ?, ?, ?)
+             ON CONFLICT (server_id, item_id, ino) DO UPDATE SET size_bytes = COALESCE(tracks.size_bytes, excluded.size_bytes)",
+        )
+        .bind(server_id)
+        .bind(item_id)
+        .bind(track.ino)
+        .bind(index as i64)
+        .bind(track.duration_seconds)
+        .bind(track.offset_seconds)
+        .bind(track.size_bytes.map(|s| s as i64))
+        .execute(&mut *tx)
+        .await?;
+    }
+    tx.commit().await?;
+    Ok(())
+}
+
 pub async fn list_for_item(pool: &SqlitePool, server_id: &str, item_id: &str) -> Result<Vec<Track>> {
     let tracks = sqlx::query_as(
         "SELECT server_id, item_id, ino, track_index, duration_seconds, offset_seconds, size_bytes
@@ -141,5 +169,39 @@ mod tests {
         items::remove(&pool, &server_id, &item_id).await.unwrap();
 
         assert!(list_for_item(&pool, &server_id, &item_id).await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn cache_missing_adds_new_tracks_and_fills_a_missing_size() {
+        let (pool, server_id, item_id) = pool_with_item().await;
+        cache_missing(&pool, &server_id, &item_id, &two_tracks()).await.unwrap();
+        let tracks = list_for_item(&pool, &server_id, &item_id).await.unwrap();
+        assert_eq!(tracks.iter().map(|t| (t.ino.as_str(), t.track_index, t.size_bytes)).collect::<Vec<_>>(), [("ino-1", 0, Some(1_500_000)), ("ino-2", 1, None)]);
+
+        // The second file's size becomes known later: only that is filled in.
+        let later = vec![
+            NewTrack { ino: "ino-1", duration_seconds: 9.0, offset_seconds: 9.0, size_bytes: Some(7) },
+            NewTrack { ino: "ino-2", duration_seconds: 1800.0, offset_seconds: 1800.0, size_bytes: Some(2_500_000) },
+        ];
+        cache_missing(&pool, &server_id, &item_id, &later).await.unwrap();
+        let tracks = list_for_item(&pool, &server_id, &item_id).await.unwrap();
+        assert_eq!(tracks[0].size_bytes, Some(1_500_000), "a size already stored is kept");
+        assert_eq!((tracks[0].duration_seconds, tracks[0].offset_seconds), (1800.0, 0.0), "nothing else about a known track is rewritten");
+        assert_eq!(tracks[1].size_bytes, Some(2_500_000));
+    }
+
+    #[tokio::test]
+    async fn cache_missing_never_touches_download_records() {
+        let (pool, server_id, item_id) = pool_with_item().await;
+        upsert_all(&pool, &server_id, &item_id, &two_tracks()).await.unwrap();
+        crate::repo::download_tracks::upsert_pending(&pool, &server_id, &item_id, "ino-1", "/p/1.mp3").await.unwrap();
+
+        cache_missing(&pool, &server_id, &item_id, &two_tracks()).await.unwrap();
+        cache_missing(&pool, &server_id, &item_id, &two_tracks()).await.unwrap();
+
+        let downloads = crate::repo::download_tracks::list_for_item(&pool, &server_id, &item_id).await.unwrap();
+        assert_eq!(downloads.len(), 1, "the download's record survives (upsert_all would have cascaded it away)");
+        assert_eq!(downloads[0].file_path, "/p/1.mp3");
+        assert_eq!(list_for_item(&pool, &server_id, &item_id).await.unwrap().len(), 2);
     }
 }
