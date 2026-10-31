@@ -42,6 +42,32 @@ pub async fn cache_missing_tracks(pool: &SqlitePool, server_id: &str, item_id: &
     Ok(())
 }
 
+/// Keeps what the server said about each file's encoding (`ino`, facts), without erasing anything
+/// already known. For diagnostics only: see [`describe_file`].
+pub async fn fill_file_facts(pool: &SqlitePool, server_id: &str, item_id: &str, facts: &[(String, abs_api::AudioFileFacts)]) -> Result<()> {
+    for (ino, facts) in facts {
+        let facts = abs_storage::repo::tracks::FileFacts { codec: facts.codec.clone(), mime_type: facts.mime_type.clone(), bit_rate: facts.bit_rate, channels: facts.channels };
+        abs_storage::repo::tracks::fill_file_facts(pool, server_id, item_id, ino, &facts).await?;
+    }
+    Ok(())
+}
+
+/// A file's encoding in a few words for a log line ("mp3, audio/mpeg, 64 kbps, 2 ch"), `None` when
+/// nothing is known about it. Never fails: a log line isn't worth an error.
+pub async fn describe_file(pool: &SqlitePool, server_id: &str, item_id: &str, ino: &str) -> Option<String> {
+    let facts = abs_storage::repo::tracks::file_facts(pool, server_id, item_id, ino).await.ok().flatten()?;
+    let mut parts: Vec<String> = Vec::new();
+    parts.extend(facts.codec);
+    parts.extend(facts.mime_type);
+    if let Some(rate) = facts.bit_rate {
+        parts.push(format!("{} kbps", rate / 1000));
+    }
+    if let Some(channels) = facts.channels {
+        parts.push(format!("{channels} ch"));
+    }
+    (!parts.is_empty()).then(|| parts.join(", "))
+}
+
 pub async fn cached_tracks(pool: &SqlitePool, server_id: &str, item_id: &str) -> Result<Vec<TrackRef>> {
     let tracks = abs_storage::repo::tracks::list_for_item(pool, server_id, item_id).await?;
     Ok(tracks

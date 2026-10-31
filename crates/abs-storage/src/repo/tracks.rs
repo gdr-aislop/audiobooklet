@@ -76,6 +76,48 @@ pub async fn cache_missing(pool: &SqlitePool, server_id: &str, item_id: &str, tr
     Ok(())
 }
 
+/// A file's encoding as the server reported it (all optional).
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct FileFacts {
+    pub codec: Option<String>,
+    pub mime_type: Option<String>,
+    pub bit_rate: Option<i64>,
+    pub channels: Option<i64>,
+}
+
+/// Records what the server says about a cached track's encoding, keeping anything already known
+/// (a part the server doesn't send this time never erases an earlier one). Changes nothing for a
+/// track that isn't cached.
+pub async fn fill_file_facts(pool: &SqlitePool, server_id: &str, item_id: &str, ino: &str, facts: &FileFacts) -> Result<()> {
+    sqlx::query(
+        "UPDATE tracks SET codec = COALESCE(?, codec), mime_type = COALESCE(?, mime_type),
+            bit_rate = COALESCE(?, bit_rate), channels = COALESCE(?, channels)
+         WHERE server_id = ? AND item_id = ? AND ino = ?",
+    )
+    .bind(&facts.codec)
+    .bind(&facts.mime_type)
+    .bind(facts.bit_rate)
+    .bind(facts.channels)
+    .bind(server_id)
+    .bind(item_id)
+    .bind(ino)
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
+/// What is known about a cached track's encoding, `None` for an unknown track.
+pub async fn file_facts(pool: &SqlitePool, server_id: &str, item_id: &str, ino: &str) -> Result<Option<FileFacts>> {
+    let row: Option<(Option<String>, Option<String>, Option<i64>, Option<i64>)> =
+        sqlx::query_as("SELECT codec, mime_type, bit_rate, channels FROM tracks WHERE server_id = ? AND item_id = ? AND ino = ?")
+            .bind(server_id)
+            .bind(item_id)
+            .bind(ino)
+            .fetch_optional(pool)
+            .await?;
+    Ok(row.map(|(codec, mime_type, bit_rate, channels)| FileFacts { codec, mime_type, bit_rate, channels }))
+}
+
 pub async fn list_for_item(pool: &SqlitePool, server_id: &str, item_id: &str) -> Result<Vec<Track>> {
     let tracks = sqlx::query_as(
         "SELECT server_id, item_id, ino, track_index, duration_seconds, offset_seconds, size_bytes
@@ -203,5 +245,28 @@ mod tests {
         assert_eq!(downloads.len(), 1, "the download's record survives (upsert_all would have cascaded it away)");
         assert_eq!(downloads[0].file_path, "/p/1.mp3");
         assert_eq!(list_for_item(&pool, &server_id, &item_id).await.unwrap().len(), 2);
+    }
+
+    #[tokio::test]
+    async fn file_facts_are_kept_and_never_erased_by_a_later_blank() {
+        let (pool, server_id, item_id) = pool_with_item().await;
+        assert_eq!(file_facts(&pool, &server_id, &item_id, "ino-1").await.unwrap(), None, "unknown track");
+        upsert_all(&pool, &server_id, &item_id, &two_tracks()).await.unwrap();
+        assert_eq!(file_facts(&pool, &server_id, &item_id, "ino-1").await.unwrap(), Some(FileFacts::default()));
+
+        let facts = FileFacts { codec: Some("mp3".into()), mime_type: Some("audio/mpeg".into()), bit_rate: Some(64000), channels: Some(2) };
+        fill_file_facts(&pool, &server_id, &item_id, "ino-1", &facts).await.unwrap();
+        assert_eq!(file_facts(&pool, &server_id, &item_id, "ino-1").await.unwrap(), Some(facts.clone()));
+        // Nothing sent the second time: what was known stays; a new value replaces the old.
+        fill_file_facts(&pool, &server_id, &item_id, "ino-1", &FileFacts { bit_rate: Some(96000), ..Default::default() }).await.unwrap();
+        let now = file_facts(&pool, &server_id, &item_id, "ino-1").await.unwrap().unwrap();
+        assert_eq!((now.codec.as_deref(), now.bit_rate), (Some("mp3"), Some(96000)));
+        // A track that isn't cached is not created.
+        fill_file_facts(&pool, &server_id, &item_id, "nope", &facts).await.unwrap();
+        assert_eq!(file_facts(&pool, &server_id, &item_id, "nope").await.unwrap(), None);
+        // Re-syncing the track list (a download starting on an empty cache) is a plain insert and
+        // leaves no stale facts behind for tracks it replaced.
+        upsert_all(&pool, &server_id, &item_id, &two_tracks()).await.unwrap();
+        assert_eq!(file_facts(&pool, &server_id, &item_id, "ino-1").await.unwrap(), Some(FileFacts::default()));
     }
 }

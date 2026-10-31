@@ -18,6 +18,8 @@ pub struct StreamTarget {
     /// resolve the audio files, so no second network call is needed to get this. Chapter
     /// positions are book-level, spanning across file boundaries.
     pub chapters: Vec<abs_api::ChapterRef>,
+    /// What the server said about each file's encoding, by `ino` (kept for diagnostics only).
+    pub file_facts: Vec<(String, abs_api::AudioFileFacts)>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -68,7 +70,8 @@ pub async fn resolve_stream_target(connection: &crate::connection::ConnectionTar
         offset_seconds += file.duration_seconds;
     }
 
-    Ok(StreamTarget { tracks, duration_seconds: offset_seconds, chapters: info.chapters })
+    let file_facts = info.audio_files.iter().map(|file| (file.ino.clone(), file.facts.clone())).collect();
+    Ok(StreamTarget { tracks, duration_seconds: offset_seconds, chapters: info.chapters, file_facts })
 }
 
 /// Finds which track a book-level position falls into, and how far into that track it is.
@@ -121,7 +124,7 @@ pub async fn offline_stream_target(
         duration_seconds += track.duration_seconds;
     }
     let chapters = crate::chapters::cached_chapters(pool, server_id, item_id).await?;
-    Ok(StreamTarget { tracks, duration_seconds, chapters })
+    Ok(StreamTarget { tracks, duration_seconds, chapters, file_facts: Vec::new() })
 }
 
 /// Pushes local playback progress up to the server, so it shows up in the official apps and

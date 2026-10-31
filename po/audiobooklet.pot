@@ -336,7 +336,9 @@ msgstr ""
 msgid "Removing the download"
 msgstr ""
 
-#: app/src/screens/downloads.rs app/src/widgets/download_scope_menu.rs
+#. TRANSLATORS: {duration} is a length such as "11.8h", {chapters} a count such as "19 chapters".
+#: app/src/screens/downloads.rs app/src/screens/item_detail.rs
+#: app/src/widgets/download_scope_menu.rs
 msgid "{count} chapter"
 msgid_plural "{count} chapters"
 msgstr[0] ""
@@ -539,6 +541,11 @@ msgstr ""
 msgid "{author} · Narrated by {narrator}"
 msgstr ""
 
+#. TRANSLATORS: {duration} is a length such as "11.8h", {chapters} a count such as "19 chapters".
+#: app/src/screens/item_detail.rs
+msgid "{duration} · {chapters}"
+msgstr ""
+
 #: app/src/screens/item_detail.rs
 msgid "Resume"
 msgstr ""
@@ -556,6 +563,25 @@ msgstr[1] ""
 
 #: app/src/screens/item_detail.rs
 msgid "Starting…"
+msgstr ""
+
+#: app/src/screens/item_detail.rs
+msgid "Explicit"
+msgstr ""
+
+#. TRANSLATORS: {isbn} is a book's ISBN number.
+#: app/src/screens/item_detail.rs
+msgid "ISBN {isbn}"
+msgstr ""
+
+#. TRANSLATORS: {asin} is a book's Amazon ASIN identifier.
+#: app/src/screens/item_detail.rs
+msgid "ASIN {asin}"
+msgstr ""
+
+#. TRANSLATORS: {tags} is a comma-separated list of the labels a book carries, e.g. "classic, fantasy".
+#: app/src/screens/item_detail.rs
+msgid "Tags: {tags}"
 msgstr ""
 
 #: app/src/screens/item_detail.rs app/src/screens/player.rs

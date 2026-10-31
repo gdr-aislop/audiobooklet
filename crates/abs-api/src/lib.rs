@@ -19,7 +19,7 @@ pub use client::*;
 
 mod ext;
 pub use ext::{
-    AudioFileRef, ChapterRef, ConnectionBuildError, ConnectionOptions, CoverBytes, DeviceInfo, ItemPlaybackInfo, default_user_agent,
+    AudioFileFacts, AudioFileRef, ChapterRef, ConnectionBuildError, ConnectionOptions, CoverBytes, DeviceInfo, ItemPlaybackInfo, default_user_agent,
     LibraryItemSummary, LibraryItemsError, LibrarySeriesSummary, LocalSession, LocalSessionResult, LocalSessionsSync, LoginError,
     LoginResult, Whoami, SeriesBookSummary, server_date,
     ServerProgress, TrackFileError, TrackFileResponse, error_chain, is_no_answer, is_unreachable_error, is_valid_header_name,

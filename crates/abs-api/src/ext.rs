@@ -710,6 +710,14 @@ struct RawItemMedia {
 struct RawAudioFile {
     ino: Option<String>,
     duration: Option<f64>,
+    #[serde(default, deserialize_with = "lenient")]
+    codec: Option<String>,
+    #[serde(rename = "mimeType", default, deserialize_with = "lenient")]
+    mime_type: Option<String>,
+    #[serde(rename = "bitRate", default, deserialize_with = "lenient")]
+    bit_rate: Option<i64>,
+    #[serde(default, deserialize_with = "lenient")]
+    channels: Option<i64>,
     /// The server wraps the real file facts (path, byte size, timestamps) in a `metadata` object —
     /// only the byte size matters here (it's what download size estimates are computed from), and
     /// it's absent on some endpoints/servers, so everything else is ignored.
@@ -736,6 +744,18 @@ pub struct AudioFileRef {
     /// is missing or omits it. Callers (download size estimates) treat `None` as "unknown",
     /// never as an error or as zero.
     pub size_bytes: Option<u64>,
+    /// What the server knows about the encoding, for diagnosing playback and download problems.
+    pub facts: AudioFileFacts,
+}
+
+/// An audio file's encoding as the server reports it; each part `None` when it didn't say.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct AudioFileFacts {
+    pub codec: Option<String>,
+    pub mime_type: Option<String>,
+    /// Bits per second.
+    pub bit_rate: Option<i64>,
+    pub channels: Option<i64>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -1147,7 +1167,17 @@ impl Client {
     let audio_files = audio_files
         .into_iter()
         .filter_map(|f| {
-            Some(AudioFileRef { ino: f.ino?, duration_seconds: f.duration.unwrap_or(0.0), size_bytes: f.metadata.and_then(|m| m.size) })
+            Some(AudioFileRef {
+                ino: f.ino?,
+                duration_seconds: f.duration.unwrap_or(0.0),
+                size_bytes: f.metadata.and_then(|m| m.size),
+                facts: AudioFileFacts {
+                    codec: non_blank(f.codec),
+                    mime_type: non_blank(f.mime_type),
+                    bit_rate: f.bit_rate.filter(|rate| *rate > 0),
+                    channels: f.channels.filter(|channels| *channels > 0),
+                },
+            })
         })
         .collect();
         // A malformed chapter entry (missing title/start/end) is skipped rather than failing the
@@ -2275,6 +2305,31 @@ mod tests {
         let client = Client::new(&server.uri());
         let err = client.get_item_playback_info("item-1").await.unwrap_err();
         assert!(matches!(err, LibraryItemsError::UnexpectedResponse(_)));
+    }
+
+    /// The encoding facts come with the audio files; odd values are ignored, never fatal.
+    #[tokio::test]
+    async fn get_item_playback_info_keeps_the_encoding_facts_when_they_make_sense() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api/items/item-1"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "media": { "audioFiles": [
+                    { "ino": "1", "duration": 10.0, "codec": "mp3", "mimeType": "audio/mpeg", "bitRate": 64000, "channels": 2 },
+                    { "ino": "2", "duration": 10.0, "codec": 7, "mimeType": "", "bitRate": "fast", "channels": -1 },
+                    { "ino": "3", "duration": 10.0 },
+                ] }
+            })))
+            .mount(&server)
+            .await;
+        let info = Client::new(&server.uri()).get_item_playback_info("item-1").await.unwrap();
+        assert_eq!(info.audio_files.len(), 3, "odd facts never cost a file");
+        assert_eq!(
+            info.audio_files[0].facts,
+            AudioFileFacts { codec: Some("mp3".into()), mime_type: Some("audio/mpeg".into()), bit_rate: Some(64000), channels: Some(2) }
+        );
+        assert_eq!(info.audio_files[1].facts, AudioFileFacts::default());
+        assert_eq!(info.audio_files[2].facts, AudioFileFacts::default());
     }
 
     #[tokio::test]
