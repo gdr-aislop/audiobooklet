@@ -216,6 +216,22 @@ pub fn build(
         .sensitive(false)
         .build();
 
+    // Whether Play was tapped: the audio becoming ready must not re-enable a button that already
+    // says "Starting…".
+    let started = Rc::new(std::cell::Cell::new(false));
+    if !crate::gst_ready::is_ready() {
+        let play_button = play_button.downgrade();
+        let started = started.clone();
+        crate::gst_ready::on_ready(move || {
+            if let Some(play_button) = play_button.upgrade() {
+                // Still hidden: the item hasn't loaded, which enables it itself.
+                if play_button.opacity() >= 1.0 && !started.get() {
+                    play_button.set_sensitive(true);
+                }
+            }
+        });
+    }
+
     let toast_overlay = adw::ToastOverlay::new();
 
     // The 14px gap above the actions row lives on the row itself, never on one of its children: a
@@ -511,6 +527,7 @@ pub fn build(
         let download_menu = download_menu.clone();
         let cover = cover.clone();
         let window_title = window_title.clone();
+        let started = started.clone();
         async move {
             let server_id = server.id.clone();
             let account_id = account.id.clone();
@@ -605,7 +622,9 @@ pub fn build(
             }
             // Its label is final now (a failed read above falls back to "Play"), so show it.
             play_button.set_opacity(1.0);
-            play_button.set_sensitive(true);
+            // Greyed out for the first moments after launch, until the audio is ready (the shell
+            // is built before GStreamer is); `on_ready` below enables it then.
+            play_button.set_sensitive(crate::gst_ready::is_ready() && !started.get());
 
             // Seeds the download menu from whatever chapters are already cached locally (a
             // previous play or download) — the same fallback Pass 2 (chapters) below falls back
@@ -754,6 +773,7 @@ pub fn build(
         let on_play = on_play.clone();
         let item_id = item_id.clone();
         let play_button = play_button.clone();
+        let started = started.clone();
         move |_| {
             // `on_play` (`main_window::start_playback`) resolves asynchronously (network + stream
             // resolution, up to ~16s on a slow server) before it navigates away to the mini
@@ -763,6 +783,7 @@ pub fn build(
             // (`PlayerController::start` constructs `now_playing` — with `last_error` set — even
             // on failure), so this screen is swapped out by the time there's anything to show
             // again; a fresh `build()` next time this screen opens starts from "Play"/"Resume".
+            started.set(true);
             play_button.set_sensitive(false);
             play_button.set_label(&tr("Starting…"));
             on_play(item_id.clone(), None);
@@ -860,7 +881,17 @@ fn refresh_chapter_rows(
     for (index, (title, start, end)) in chapters.iter().enumerate() {
         let is_current = *start <= progress_seconds && progress_seconds < *end;
         let is_downloaded = markers.get(index).copied().unwrap_or(false);
-        let row = adw::ActionRow::builder().title(title.as_str()).activatable(true).build();
+        // Not tappable while the audio isn't ready (the first moments after launch).
+        let audio_ready = crate::gst_ready::is_ready();
+        let row = adw::ActionRow::builder().title(title.as_str()).activatable(audio_ready).build();
+        if !audio_ready {
+            let row = row.downgrade();
+            crate::gst_ready::on_ready(move || {
+                if let Some(row) = row.upgrade() {
+                    row.set_activatable(true);
+                }
+            });
+        }
         row.set_subtitle(&format_duration((end - start).max(0.0)));
         if is_current {
             row.add_css_class("heading");
@@ -1183,6 +1214,52 @@ pub(crate) mod tests {
             )
             .mount(mock_server)
             .await;
+    }
+
+    /// Not a `#[test]` itself — see `main.rs`'s `mod tests`. Right after launch the shell is up
+    /// before GStreamer is: Play and the chapter rows stay disabled until the audio is ready, then
+    /// turn on by themselves.
+    pub(crate) fn run_play_and_chapters_wait_for_the_audio_to_be_ready(runtime: &tokio::runtime::Runtime) {
+        let mock_server = runtime.block_on(MockServer::start());
+        runtime.block_on(mock_item_with_chapters(&mock_server, "item-1", 3600.0, &[("Intro", 0.0, 60.0), ("Chapter One", 60.0, 1800.0)]));
+        let pool = runtime.block_on(crate::test_support::pool());
+        let (server, account) = runtime.block_on(account_and_server(&pool, &mock_server.uri()));
+        runtime.block_on(insert_synced_item(&pool, &server.id, "item-1", "Project Hail Mary", Some("Andy Weir"), None, None, 3600.0));
+        let session = abs_core::auth::Session::new(pool.clone(), &server, &account);
+
+        crate::gst_ready::hold_for_test(true);
+        let played = Rc::new(std::cell::Cell::new(0));
+        let screen = build(
+            pool.clone(),
+            server,
+            account,
+            session,
+            test_download_manager(pool.clone()),
+            test_controller(pool.clone()),
+            "item-1".to_string(),
+            {
+                let played = played.clone();
+                move |_, _| played.set(played.get() + 1)
+            },
+            || {},
+            || {},
+            |_| {},
+            || {},
+        );
+        let hooks = screen.test_hooks();
+        let window = gtk4::Window::builder().child(&screen.root).default_width(360).default_height(720).build();
+        window.present();
+        pump_until(|| hooks.play_button.opacity() >= 1.0 && hooks.chapters_list.row_at_index(1).is_some(), Duration::from_secs(10));
+        pump_until(|| false, Duration::from_millis(100));
+        assert!(!hooks.play_button.is_sensitive(), "Play is disabled until the audio is ready");
+        let row = hooks.chapters_list.row_at_index(1).unwrap();
+        assert!(!row.is_activatable(), "chapter rows are not tappable until the audio is ready");
+
+        crate::gst_ready::hold_for_test(false);
+        pump_until(|| hooks.play_button.is_sensitive() && row.is_activatable(), Duration::from_secs(5));
+        assert!(hooks.play_button.is_sensitive() && row.is_activatable(), "both turn on once the audio is ready");
+        assert_eq!(played.get(), 0, "nothing was started meanwhile");
+        window.close();
     }
 
     /// Not a `#[test]` itself — see `main.rs`'s `mod tests`. The "downloaded" legend above the

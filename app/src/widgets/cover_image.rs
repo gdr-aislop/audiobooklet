@@ -184,6 +184,7 @@ impl Drop for InFlightDecode {
         let line = DECODE_BURST.with(|burst| burst.borrow_mut().finish_one(self.result.take(), Instant::now()));
         if let Some(line) = line {
             tracing::info!("{line}");
+            tracing::info!("{} {}", TEXTURE_CACHE.with(|cache| cache.borrow().report()), live_cover_report());
         }
     }
 }
@@ -198,26 +199,83 @@ struct LruTextureCache {
     /// the least-recently-shown entry is always what gets evicted first.
     order: VecDeque<(PathBuf, i32)>,
     entries: HashMap<(PathBuf, i32), gtk4::gdk::Texture>,
+    stats: CacheStats,
+    /// The last few entries thrown out, oldest first, so a decode of one of them again can be
+    /// told from a first decode (see [`CacheStats::redecodes`]). Bounded by `EVICTED_MEMORY`.
+    evicted: VecDeque<(PathBuf, i32)>,
+}
+
+/// How many evicted entries are remembered to recognise a re-decode.
+const EVICTED_MEMORY: usize = 1024;
+
+/// What the texture cache has done since the app started — logged with each decode burst, to see
+/// from the phone whether the budget is too small for what is on screen instead of guessing.
+#[derive(Default, Clone, Debug, PartialEq, Eq)]
+struct CacheStats {
+    hits: u64,
+    misses: u64,
+    inserts: u64,
+    evictions: u64,
+    evicted_bytes: u64,
+    /// Decodes of an entry this cache had already held and evicted: the direct measure of thrashing.
+    redecodes: u64,
 }
 
 impl LruTextureCache {
     fn new(budget_bytes: usize) -> Self {
-        Self { budget_bytes, used_bytes: 0, order: VecDeque::new(), entries: HashMap::new() }
+        Self { budget_bytes, used_bytes: 0, order: VecDeque::new(), entries: HashMap::new(), stats: CacheStats::default(), evicted: VecDeque::new() }
+    }
+
+    /// Drops the least recently used entry; false when there is none.
+    fn evict_oldest(&mut self) -> bool {
+        let Some(oldest) = self.order.pop_front() else { return false };
+        if let Some(removed) = self.entries.remove(&oldest) {
+            let bytes = texture_bytes(&removed);
+            self.used_bytes = self.used_bytes.saturating_sub(bytes);
+            self.stats.evictions += 1;
+            self.stats.evicted_bytes += bytes as u64;
+            self.evicted.push_back(oldest);
+            while self.evicted.len() > EVICTED_MEMORY {
+                self.evicted.pop_front();
+            }
+        }
+        true
+    }
+
+    /// One line for the log: sizes, the counters, and how many entries there are of each size.
+    fn report(&self) -> String {
+        let mut by_size: std::collections::BTreeMap<i32, usize> = std::collections::BTreeMap::new();
+        for (_, size) in self.entries.keys() {
+            *by_size.entry(*size).or_default() += 1;
+        }
+        let sizes: Vec<String> = by_size.iter().map(|(size, count)| format!("{size}px:{count}")).collect();
+        format!(
+            "cover texture cache entries={} used_kb={} budget_kb={} hits={} misses={} inserts={} evictions={} evicted_kb={} redecodes={} entries_by_size=[{}]",
+            self.entries.len(),
+            self.used_bytes / 1024,
+            self.budget_bytes / 1024,
+            self.stats.hits,
+            self.stats.misses,
+            self.stats.inserts,
+            self.stats.evictions,
+            self.stats.evicted_bytes / 1024,
+            self.stats.redecodes,
+            sizes.join(",")
+        )
     }
 
     /// Changes the budget and evicts (least recently used first) down to it.
     fn set_budget(&mut self, budget_bytes: usize) {
         self.budget_bytes = budget_bytes;
-        while self.used_bytes > self.budget_bytes {
-            let Some(oldest) = self.order.pop_front() else { break };
-            if let Some(removed) = self.entries.remove(&oldest) {
-                self.used_bytes = self.used_bytes.saturating_sub(texture_bytes(&removed));
-            }
-        }
+        while self.used_bytes > self.budget_bytes && self.evict_oldest() {}
     }
 
     fn get(&mut self, key: &(PathBuf, i32)) -> Option<gtk4::gdk::Texture> {
-        let texture = self.entries.get(key).cloned()?;
+        let Some(texture) = self.entries.get(key).cloned() else {
+            self.stats.misses += 1;
+            return None;
+        };
+        self.stats.hits += 1;
         self.touch(key);
         Some(texture)
     }
@@ -238,16 +296,34 @@ impl LruTextureCache {
             return;
         }
         let byte_size = texture_bytes(&texture);
+        if let Some(at) = self.evicted.iter().position(|gone| *gone == key) {
+            self.evicted.remove(at);
+            self.stats.redecodes += 1;
+        }
+        self.stats.inserts += 1;
         self.entries.insert(key.clone(), texture);
         self.order.push_back(key);
         self.used_bytes += byte_size;
-        while self.used_bytes > self.budget_bytes {
-            let Some(oldest) = self.order.pop_front() else { break };
-            if let Some(removed) = self.entries.remove(&oldest) {
-                self.used_bytes = self.used_bytes.saturating_sub(texture_bytes(&removed));
-            }
-        }
+        while self.used_bytes > self.budget_bytes && self.evict_oldest() {}
     }
+}
+
+/// How many `CoverImage` widgets exist, how many of them are on screen, and the display's scale
+/// factor: with the cache's own numbers, tells "the cache is too small" from "far more covers are
+/// built than are ever shown".
+fn live_cover_report() -> String {
+    let (mut live, mut mapped, mut scale) = (0usize, 0usize, 0i32);
+    LIVE_COVERS.with(|covers| {
+        for cover in covers.borrow().iter() {
+            let Some(overlay) = cover.overlay.upgrade() else { continue };
+            live += 1;
+            if overlay.is_mapped() {
+                mapped += 1;
+            }
+            scale = scale.max(overlay.scale_factor());
+        }
+    });
+    format!("live_covers={live} mapped_covers={mapped} scale_factor={scale}")
 }
 
 fn texture_bytes(texture: &gtk4::gdk::Texture) -> usize {
@@ -841,6 +917,41 @@ pub(crate) mod tests {
         recheck_a.set_path(Some(&paths[0]));
         pump_until(|| recheck_a.picture.is_visible(), Duration::from_secs(5));
         assert!(recheck_a.picture.is_visible(), "\"a\" was recently touched, so it should still be cached even after the file is gone");
+        let _ = runtime;
+    }
+
+    /// Not a `#[test]` itself — see `main.rs`'s `mod tests`. The cache counts hits, misses,
+    /// evictions and re-decodes, and says so in one line.
+    pub(crate) fn run_cache_counts_hits_misses_evictions_and_redecodes(runtime: &tokio::runtime::Runtime) {
+        let texture = || -> gtk4::gdk::Texture {
+            gtk4::gdk::MemoryTexture::new(64, 64, gtk4::gdk::MemoryFormat::R8g8b8a8, &glib::Bytes::from_owned(vec![0u8; 64 * 64 * 4]), 64 * 4).into()
+        };
+        let key = |name: &str| (PathBuf::from(name), 64);
+        let mut cache = LruTextureCache::new(2 * 64 * 64 * 4);
+        assert!(cache.get(&key("a")).is_none());
+        cache.insert(key("a"), texture());
+        cache.insert(key("b"), texture());
+        cache.insert(key("c"), texture()); // evicts a
+        cache.insert(key("a"), texture()); // evicts b; a had been held and thrown out: a re-decode
+        assert!(cache.get(&key("c")).is_some());
+        assert!(cache.get(&key("b")).is_none());
+        assert_eq!(
+            cache.stats,
+            CacheStats { hits: 1, misses: 2, inserts: 4, evictions: 2, evicted_bytes: 2 * 64 * 64 * 4, redecodes: 1 }
+        );
+        let line = cache.report();
+        for expected in ["entries=2", "used_kb=32", "budget_kb=32", "hits=1", "misses=2", "evictions=2", "redecodes=1", "entries_by_size=[64px:2]"] {
+            assert!(line.contains(expected), "{expected} missing from {line}");
+        }
+        assert!(!line.contains("a.png") && !line.contains('/'), "no paths in the line: {line}");
+
+        // What it remembers having evicted is bounded.
+        let mut small = LruTextureCache::new(64 * 64 * 4);
+        for index in 0..EVICTED_MEMORY + 50 {
+            small.insert(key(&format!("cover-{index}")), texture());
+        }
+        assert_eq!(small.evicted.len(), EVICTED_MEMORY);
+        assert!(live_cover_report().starts_with("live_covers="));
         let _ = runtime;
     }
 

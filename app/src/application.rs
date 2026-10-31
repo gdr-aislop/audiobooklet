@@ -141,20 +141,27 @@ pub(crate) fn present_existing_window(app: &adw::Application) -> bool {
 }
 
 fn build_window(app: &adw::Application, state: &AppState) {
-    let window = new_window(app);
+    let mut steps = crate::perf::Steps::new("window build steps", "startup");
+    steps.step("window");
+    let window = create_window(app);
+    steps.step("icons");
+    crate::icons::register(&WidgetExt::display(&window));
+    steps.step("frame_probe");
     crate::perf::watch_frames(&window);
+    steps.step("open_in");
     open_in(&window, state);
+    steps.step("present");
     window.present();
+    steps.finish("presented", None);
     crate::perf::milestone("main window presented");
 }
 
+fn create_window(app: &adw::Application) -> adw::ApplicationWindow {
+    adw::ApplicationWindow::builder().application(app).title(APP_NAME).default_width(390).default_height(760).build()
+}
+
 fn new_window(app: &adw::Application) -> adw::ApplicationWindow {
-    let window = adw::ApplicationWindow::builder()
-        .application(app)
-        .title(APP_NAME)
-        .default_width(390)
-        .default_height(760)
-        .build();
+    let window = create_window(app);
     crate::icons::register(&WidgetExt::display(&window));
     window
 }
@@ -163,14 +170,19 @@ fn new_window(app: &adw::Application) -> adw::ApplicationWindow {
 fn open_in(window: &adw::ApplicationWindow, state: &AppState) {
     // Before any window content builds — the theme is a global, so the Welcome screen (and every
     // sheet/popover) gets it too, not just the signed-in shell.
+    let mut steps = crate::perf::Steps::new("window content setup steps", "startup");
+    steps.step("theme");
     apply_theme(state.theme);
+    steps.step("keys");
     if let Some(app) = window.application().and_downcast::<adw::Application>() {
         add_keyboard_support(&app, window);
     }
+    steps.step("content");
     match &state.active_account {
         None => show_welcome(window, state.pool.clone(), state.paths.clone(), state.playback_settings, None),
         Some(_) => show_main(window, state.pool.clone(), state.paths.clone(), state.playback_settings),
     }
+    steps.finish("scheduled", None);
 }
 
 /// The application when the app's local data couldn't be opened at startup (see
@@ -491,9 +503,6 @@ async fn build_main_window(
     });
     let servers_with_accounts = fetch_servers_with_accounts(&pool).await.map_err(problem)?;
     crate::perf::milestone("main window data read");
-    // The player is the first thing built that needs GStreamer; its initialisation started before
-    // the database opened and has usually finished by now.
-    crate::gst_ready::wait().await;
     Ok(Some(screens::main_window::build(
         pool,
         paths,

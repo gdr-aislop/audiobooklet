@@ -240,7 +240,36 @@ pub fn build(
     let _slow = crate::perf::SlowJob::new("main window build");
     let mut steps = crate::perf::Steps::new("main window build steps", "startup");
     steps.step("backend_and_mini_bar");
-    let mini_bar = player::build_mini_bar(pool.clone(), paths.clone(), player::real_backend());
+    // The shell doesn't wait for GStreamer: until it is ready the player holds the silent backend,
+    // Item Detail's Play/chapter taps are disabled (`gst_ready::is_ready`), and the real backend
+    // is swapped in the moment it is. Nothing is loaded before then, so no playback is lost.
+    let audio_ready = std::rc::Rc::new(std::cell::Cell::new(crate::gst_ready::is_ready()));
+    let backend = if audio_ready.get() { player::real_backend() } else { player::silent_backend() };
+    let mini_bar = player::build_mini_bar(pool.clone(), paths.clone(), backend);
+    // Idempotent; true once the real backend is in. Also called by `start_playback`, in case a
+    // tap lands before the swap's own callback has run.
+    let ensure_audio: std::rc::Rc<dyn Fn() -> bool> = {
+        let controller = mini_bar.controller.clone();
+        let audio_ready = audio_ready.clone();
+        let built = std::time::Instant::now();
+        std::rc::Rc::new(move || {
+            if audio_ready.get() {
+                return true;
+            }
+            if !crate::gst_ready::is_ready() || controller.is_retired() {
+                return false;
+            }
+            audio_ready.set(controller.replace_backend(player::real_backend()));
+            tracing::info!(waited_ms = built.elapsed().as_millis() as u64, swapped = audio_ready.get(), "audio backend ready");
+            audio_ready.get()
+        })
+    };
+    if !audio_ready.get() {
+        let ensure_audio = ensure_audio.clone();
+        crate::gst_ready::on_ready(move || {
+            ensure_audio();
+        });
+    }
     steps.step("mpris");
 
     // MPRIS registration is best-effort — no session bus (a bare console, a locked-down sandbox)
@@ -602,7 +631,14 @@ pub fn build(
         let controller = mini_bar.controller.clone();
         let session = session.clone();
         let open_player = open_player.clone();
+        let ensure_audio = ensure_audio.clone();
         move |request: PlayRequest, start_chapter: Option<usize>| {
+            if !ensure_audio() {
+                // Item Detail's Play and chapter rows are disabled until the audio is ready, so
+                // this is a safety net, not a path a tap can take.
+                tracing::warn!("asked to play before the audio was ready; ignored");
+                return;
+            }
             // The default speed is read at call time, not captured — a "Default speed" change in
             // Settings applies to the next playback without rebuilding the shell.
             // A tapped chapter is part of the start itself — it used to be a seek applied once

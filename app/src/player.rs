@@ -3024,6 +3024,29 @@ impl PlayerController {
         self.inner.borrow_mut().on_progress_sync = Some(Rc::new(listener));
     }
 
+    /// Whether `retire` has run: the shell that owned this controller is gone.
+    pub fn is_retired(&self) -> bool {
+        self.inner.borrow().retired
+    }
+
+    /// Swaps the audio backend for `backend` — the shell is built before GStreamer is ready, on
+    /// the silent backend, and gets the real one here once it is. Refused (the old backend stays)
+    /// when anything is loaded or starting: Play is disabled until the swap, so this is only a
+    /// safety net against pulling a pipeline out from under a track. Returns whether it swapped.
+    pub fn replace_backend(&self, backend: Box<dyn abs_player::AudioBackend>) -> bool {
+        let mut inner = self.inner.borrow_mut();
+        if inner.now_playing.is_some() || inner.pending_start.is_some() {
+            tracing::warn!("didn't swap the audio backend: something is loaded or starting");
+            return false;
+        }
+        inner.backend = backend;
+        inner.load_generation += 1;
+        // The previous backend was told this already; the new one starts from its defaults.
+        let burst_buffering = inner.burst_buffering;
+        inner.backend.set_burst_buffering(burst_buffering);
+        true
+    }
+
     pub fn set_burst_buffering(&self, enabled: bool) {
         let mut inner = self.inner.borrow_mut();
         inner.burst_buffering = enabled;
@@ -4161,6 +4184,12 @@ impl abs_player::AudioBackend for NullBackend {
     }
 }
 
+/// The backend that does nothing, for the shell built before GStreamer is ready; see
+/// [`PlayerController::replace_backend`].
+pub fn silent_backend() -> Box<dyn abs_player::AudioBackend> {
+    Box::new(NullBackend)
+}
+
 /// The real, production audio backend — `GstBackend::new()` (the system default
 /// `autoaudiosink`), falling back to `NullBackend` if GStreamer can't build a pipeline at all.
 pub fn real_backend() -> Box<dyn abs_player::AudioBackend> {
@@ -4627,6 +4656,31 @@ pub(crate) mod tests {
         let err = snapshot.last_error.expect("a failed load must populate last_error");
         assert_eq!(err.kind, abs_player::PlaybackErrorKind::Unavailable);
 
+        controller.stop();
+    }
+
+    /// Not a `#[test]` itself — see `main.rs`'s `mod tests`. The shell starts on the silent
+    /// backend and gets the real one when GStreamer is ready: the swap takes while nothing is
+    /// loaded and is refused once something is.
+    pub(crate) fn run_replace_backend_swaps_when_idle_and_refuses_while_something_is_loaded(runtime: &tokio::runtime::Runtime) {
+        let mock_server = runtime.block_on(MockServer::start());
+        runtime.block_on(mock_playable_item(&mock_server, "item-1", 3));
+        let pool = runtime.block_on(pool());
+        let (server, account) = runtime.block_on(account_and_server(&pool, &mock_server.uri()));
+        runtime.block_on(insert_synced_item(&pool, &server.id, "item-1", "Test Item"));
+
+        let controller = PlayerController::new(pool.clone(), crate::test_support::test_paths(), silent_backend(), |_| {});
+        assert!(!controller.is_retired());
+        assert!(controller.replace_backend(test_backend()), "idle: the real backend takes over");
+
+        controller.start(
+            abs_core::auth::Session::new(pool.clone(), &server, &account),
+            PlayRequest { item_id: "item-1".to_string(), title: "Test Book".to_string(), author: None },
+            1.0,
+        );
+        pump_until(|| controller.snapshot().is_some_and(|s| !s.is_loading), Duration::from_secs(10));
+        assert!(controller.snapshot().is_some_and(|s| s.last_error.is_none()), "the swapped-in backend plays");
+        assert!(!controller.replace_backend(silent_backend()), "something is loaded: the swap is refused");
         controller.stop();
     }
 
