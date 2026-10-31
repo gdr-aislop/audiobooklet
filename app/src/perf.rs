@@ -7,6 +7,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 use adw::glib;
+use gtk4::prelude::*;
 
 /// How often the watchdog's timer is meant to fire.
 const WATCHDOG_INTERVAL: Duration = Duration::from_millis(100);
@@ -34,6 +35,126 @@ pub(crate) fn main_loop_blocked_total() -> Duration {
 
 fn add_blocked(blocked: Duration) {
     MAIN_LOOP_BLOCKED_MS.fetch_add(blocked.as_millis() as u64, Ordering::Relaxed);
+}
+
+/// When the process started, so startup can be read as a timeline instead of guessed from the
+/// timestamps of unrelated lines.
+static PROCESS_START: std::sync::OnceLock<Instant> = std::sync::OnceLock::new();
+
+/// Call as the very first thing in `main`.
+pub(crate) fn mark_process_start() {
+    let _ = PROCESS_START.set(Instant::now());
+}
+
+pub(crate) fn since_process_start() -> Duration {
+    PROCESS_START.get().map(Instant::elapsed).unwrap_or_default()
+}
+
+/// One log line saying how far into startup `what` happened: `startup milestone=… since_start_ms=…`.
+pub(crate) fn milestone(what: &str) {
+    tracing::info!(milestone = what, since_start_ms = since_process_start().as_millis() as u64, "startup milestone");
+}
+
+/// Frames the probe has seen, for the scenario that checks it is attached.
+#[cfg(test)]
+pub(crate) static FRAMES_PROBED: AtomicU64 = AtomicU64::new(0);
+
+/// A frame (one pass of the frame clock: animations, layout, painting) slower than this is logged.
+const SLOW_FRAME_AFTER: Duration = Duration::from_millis(150);
+
+/// When each phase of one frame began, as the frame clock announced them.
+#[derive(Debug, Default, Clone, Copy)]
+struct FrameMarks {
+    before_paint: Option<Instant>,
+    update: Option<Instant>,
+    layout: Option<Instant>,
+    paint: Option<Instant>,
+}
+
+/// How long the phases of one frame took.
+#[derive(Debug, PartialEq, Eq)]
+struct FramePhases {
+    /// Animations, tick callbacks and CSS.
+    update: Duration,
+    /// Working out sizes and positions.
+    layout: Duration,
+    /// Building the render tree and drawing it.
+    paint: Duration,
+    total: Duration,
+}
+
+impl FrameMarks {
+    /// The phases, given when the frame ended; `None` unless every phase was seen (a frame that
+    /// only repainted has no update/layout of its own).
+    fn phases(&self, end: Instant) -> Option<FramePhases> {
+        let (before, update, layout, paint) = (self.before_paint?, self.update?, self.layout?, self.paint?);
+        Some(FramePhases {
+            update: layout.saturating_duration_since(update),
+            layout: paint.saturating_duration_since(layout),
+            paint: end.saturating_duration_since(paint),
+            total: end.saturating_duration_since(before),
+        })
+    }
+}
+
+impl FramePhases {
+    fn line(&self) -> String {
+        format!("update_ms={} layout_ms={} paint_ms={} total_ms={}", self.update.as_millis(), self.layout.as_millis(), self.paint.as_millis(), self.total.as_millis())
+    }
+}
+
+/// Logs the frames that take long, and when the first frame was painted, for `widget`'s window:
+/// which of updating, laying out and painting is what holds the main loop for half a second at a
+/// time. The frame clock only exists once the widget is realized, so this waits for that.
+pub(crate) fn watch_frames(widget: &impl IsA<gtk4::Widget>) {
+    let attached = std::rc::Rc::new(std::cell::Cell::new(false));
+    let attach = {
+        let attached = attached.clone();
+        move |widget: &gtk4::Widget| {
+            if attached.get() {
+                return;
+            }
+            let Some(clock) = widget.frame_clock() else { return };
+            attached.set(true);
+            attach_frame_probe(&clock);
+        }
+    };
+    attach(widget.upcast_ref());
+    let attach = attach.clone();
+    widget.connect_realize(move |widget| attach(widget.upcast_ref()));
+}
+
+fn attach_frame_probe(clock: &gtk4::gdk::FrameClock) {
+    let marks = std::rc::Rc::new(std::cell::Cell::new(FrameMarks::default()));
+    let first_frame_logged = std::rc::Rc::new(std::cell::Cell::new(false));
+    clock.connect_before_paint({
+        let marks = marks.clone();
+        move |_| marks.set(FrameMarks { before_paint: Some(Instant::now()), ..FrameMarks::default() })
+    });
+    clock.connect_update({
+        let marks = marks.clone();
+        move |_| marks.set(FrameMarks { update: Some(Instant::now()), ..marks.get() })
+    });
+    clock.connect_layout({
+        let marks = marks.clone();
+        move |_| marks.set(FrameMarks { layout: Some(Instant::now()), ..marks.get() })
+    });
+    clock.connect_paint({
+        let marks = marks.clone();
+        move |_| marks.set(FrameMarks { paint: Some(Instant::now()), ..marks.get() })
+    });
+    clock.connect_after_paint(move |_| {
+        #[cfg(test)]
+        FRAMES_PROBED.fetch_add(1, Ordering::Relaxed);
+        if !first_frame_logged.replace(true) {
+            milestone("first frame painted");
+        }
+        let phases = marks.get().phases(Instant::now());
+        marks.set(FrameMarks::default());
+        if let Some(phases) = phases.filter(|phases| phases.total >= SLOW_FRAME_AFTER) {
+            tracing::warn!("a slow frame {}", phases.line());
+        }
+    });
 }
 
 /// Starts the main-loop watchdog. Call once, from the main thread, after GTK is up.
@@ -142,8 +263,47 @@ pub(crate) fn summary(
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
+
+    /// Not a `#[test]` itself — see `main.rs`'s `mod tests`. The probe attaches to a real window's
+    /// frame clock (once it is realized) and sees its frames.
+    pub(crate) fn run_the_frame_probe_sees_frames(_runtime: &tokio::runtime::Runtime) {
+        let window = gtk4::Window::builder().default_width(200).default_height(100).child(&gtk4::Label::new(Some("frames"))).build();
+        let before = FRAMES_PROBED.load(Ordering::Relaxed);
+        watch_frames(&window);
+        window.present();
+        crate::test_support::pump_until(|| FRAMES_PROBED.load(Ordering::Relaxed) > before, Duration::from_secs(5));
+        assert!(FRAMES_PROBED.load(Ordering::Relaxed) > before, "the probe saw no frame of a presented window");
+        window.close();
+    }
+
+    /// Where a frame's time went, from the moments each phase was announced.
+    #[test]
+    fn a_frames_phases_are_the_gaps_between_the_announcements() {
+        let t0 = Instant::now();
+        let at = |ms: u64| t0 + Duration::from_millis(ms);
+        let marks = FrameMarks { before_paint: Some(at(0)), update: Some(at(2)), layout: Some(at(40)), paint: Some(at(300)) };
+        let phases = marks.phases(at(560)).unwrap();
+        assert_eq!(
+            phases,
+            FramePhases { update: Duration::from_millis(38), layout: Duration::from_millis(260), paint: Duration::from_millis(260), total: Duration::from_millis(560) }
+        );
+        assert_eq!(phases.line(), "update_ms=38 layout_ms=260 paint_ms=260 total_ms=560");
+        // A frame that only repainted announced no update or layout of its own: nothing to report.
+        assert_eq!(FrameMarks { before_paint: Some(at(0)), paint: Some(at(3)), ..FrameMarks::default() }.phases(at(9)), None);
+        assert_eq!(FrameMarks::default().phases(at(1)), None);
+        // Announcements out of order can't underflow.
+        let odd = FrameMarks { before_paint: Some(at(10)), update: Some(at(5)), layout: Some(at(4)), paint: Some(at(3)) }.phases(at(2)).unwrap();
+        assert_eq!((odd.update, odd.layout, odd.paint, odd.total), (Duration::ZERO, Duration::ZERO, Duration::ZERO, Duration::ZERO));
+    }
+
+    #[test]
+    fn the_process_clock_counts_after_it_is_marked() {
+        // Not asserting an exact value: the process-wide clock is shared by every test.
+        mark_process_start();
+        assert!(since_process_start() < Duration::from_secs(60));
+    }
 
     #[test]
     fn only_a_big_lateness_is_a_stall() {

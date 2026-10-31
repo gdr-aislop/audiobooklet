@@ -24,6 +24,7 @@ use std::cell::RefCell;
 use std::collections::{HashMap, VecDeque};
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
+use std::time::{Duration, Instant};
 
 use adw::glib;
 use adw::prelude::*;
@@ -63,6 +64,128 @@ thread_local! {
     /// screen. Pruned whenever it is walked and when it grows.
     static LIVE_COVERS: RefCell<Vec<WeakCover>> = const { RefCell::new(Vec::new()) };
     static DECODE_SEMAPHORE: Rc<tokio::sync::Semaphore> = Rc::new(tokio::sync::Semaphore::new(MAX_CONCURRENT_COVER_DECODES));
+    /// What the covers decoding right now have cost so far; see [`DecodeBurst`].
+    static DECODE_BURST: RefCell<DecodeBurst> = RefCell::new(DecodeBurst::default());
+}
+
+/// Where one cover decode spent its time, measured on the decode thread.
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+struct DecodeTimings {
+    /// Reading the cached file.
+    read: Duration,
+    /// Decoding the image (JPEG, PNG or WebP) at its full size.
+    decode: Duration,
+    /// Scaling to the slot's size and cropping.
+    resize: Duration,
+    source_width: u32,
+    source_height: u32,
+    file_bytes: u64,
+}
+
+/// The decodes of one burst (a screen's covers appearing, a scroll bringing new ones into view):
+/// from the first one starting until none is left in flight. One log line per burst says how long
+/// they took altogether, to decide whether covers are worth caching at the size they're shown at.
+/// The per-phase times are summed over the decode threads (up to [`MAX_CONCURRENT_COVER_DECODES`]
+/// at once), so they can add up to more than the burst's wall time.
+#[derive(Debug, Default)]
+struct DecodeBurst {
+    started: Option<Instant>,
+    in_flight: usize,
+    decoded: usize,
+    failed: usize,
+    read: Duration,
+    decode: Duration,
+    resize: Duration,
+    /// Turning the pixels into a texture and showing it, on the main thread. The upload to the
+    /// graphics side happens later, when the texture is first painted, and isn't measured here.
+    main_thread: Duration,
+    file_bytes: u64,
+    largest_source: (u32, u32),
+    largest_target: i32,
+    cache_hits: usize,
+}
+
+impl DecodeBurst {
+    fn start_one(&mut self, now: Instant) {
+        if self.in_flight == 0 {
+            self.started = Some(now);
+        }
+        self.in_flight += 1;
+    }
+
+    /// One decode ended (`None`: it failed). Returns the summary line when it was the last of the
+    /// burst, and starts the next burst's tally.
+    fn finish_one(&mut self, result: Option<(DecodeTimings, Duration, i32)>, now: Instant) -> Option<String> {
+        self.in_flight = self.in_flight.saturating_sub(1);
+        match result {
+            Some((timings, main_thread, target)) => {
+                self.decoded += 1;
+                self.read += timings.read;
+                self.decode += timings.decode;
+                self.resize += timings.resize;
+                self.main_thread += main_thread;
+                self.file_bytes += timings.file_bytes;
+                if u64::from(timings.source_width) * u64::from(timings.source_height) > u64::from(self.largest_source.0) * u64::from(self.largest_source.1) {
+                    self.largest_source = (timings.source_width, timings.source_height);
+                }
+                self.largest_target = self.largest_target.max(target);
+            }
+            None => self.failed += 1,
+        }
+        if self.in_flight > 0 || self.decoded + self.failed == 0 {
+            return None;
+        }
+        let wall = self.started.map(|started| now.saturating_duration_since(started)).unwrap_or_default();
+        let line = self.line(wall);
+        *self = Self::default();
+        Some(line)
+    }
+
+    fn line(&self, wall: Duration) -> String {
+        format!(
+            "covers decoded count={} failed={} wall_ms={} read_ms={} decode_ms={} resize_ms={} main_thread_ms={} source_kb={} largest_source={}x{} target_px={} cache_hits_before={}",
+            self.decoded,
+            self.failed,
+            wall.as_millis(),
+            self.read.as_millis(),
+            self.decode.as_millis(),
+            self.resize.as_millis(),
+            self.main_thread.as_millis(),
+            self.file_bytes / 1024,
+            self.largest_source.0,
+            self.largest_source.1,
+            self.largest_target,
+            self.cache_hits
+        )
+    }
+}
+
+/// Counts one decode in flight; when dropped it reports how it ended and logs the burst's summary
+/// if it was the last. A guard so that no way out of the decode task (an error, a panic, the
+/// future being dropped) can leave the count too high.
+struct InFlightDecode {
+    result: Option<(DecodeTimings, Duration, i32)>,
+}
+
+impl InFlightDecode {
+    fn begin() -> Self {
+        DECODE_BURST.with(|burst| burst.borrow_mut().start_one(Instant::now()));
+        Self { result: None }
+    }
+
+    /// This decode succeeded; reported when the guard is dropped, at the end of the task.
+    fn complete(&mut self, timings: DecodeTimings, main_thread: Duration, target: i32) {
+        self.result = Some((timings, main_thread, target));
+    }
+}
+
+impl Drop for InFlightDecode {
+    fn drop(&mut self) {
+        let line = DECODE_BURST.with(|burst| burst.borrow_mut().finish_one(self.result.take(), Instant::now()));
+        if let Some(line) = line {
+            tracing::info!("{line}");
+        }
+    }
 }
 
 /// Keyed by `(path, size)`, not just `path` — different screens request different sizes for the
@@ -372,6 +495,7 @@ impl CoverImage {
         let key = (path.to_path_buf(), decode_pixels);
 
         if let Some(texture) = TEXTURE_CACHE.with(|cache| cache.borrow_mut().get(&key)) {
+            DECODE_BURST.with(|burst| burst.borrow_mut().cache_hits += 1);
             self.show_texture(texture);
             return;
         }
@@ -383,6 +507,7 @@ impl CoverImage {
         let last_path = self.last_path.clone();
         let requested = path.to_path_buf();
         let size = decode_pixels;
+        let mut in_flight = InFlightDecode::begin();
         glib::spawn_future_local(async move {
             let semaphore = DECODE_SEMAPHORE.with(|semaphore| semaphore.clone());
             let _permit = semaphore.acquire().await.expect("cover-decode semaphore is never closed");
@@ -393,7 +518,7 @@ impl CoverImage {
             })
             .await;
 
-            let (bytes, side) = match decoded {
+            let (bytes, side, timings) = match decoded {
                 Ok(Ok(result)) => result,
                 Ok(Err(err)) => {
                     tracing::warn!(%err, ?requested, "couldn't decode the cached cover image");
@@ -405,6 +530,7 @@ impl CoverImage {
                 }
             };
 
+            let on_main_thread = Instant::now();
             let texture: gtk4::gdk::Texture =
                 gtk4::gdk::MemoryTexture::new(side as i32, side as i32, gtk4::gdk::MemoryFormat::R8g8b8a8, &gtk4::glib::Bytes::from_owned(bytes), (side * 4) as usize).into();
 
@@ -418,6 +544,7 @@ impl CoverImage {
                 picture.set_visible(true);
                 placeholder.set_visible(false);
             }
+            in_flight.complete(timings, on_main_thread.elapsed(), size);
         });
     }
 
@@ -460,10 +587,15 @@ fn ensure_cover_css() {
 /// (a GObject) deliberately — constructing/touching one off the thread that owns the GTK main
 /// context is exactly the kind of thing that can crash unpredictably under Wayland/EGL, so the
 /// `gdk::MemoryTexture` itself is always built back on the main thread, in `set_path`.
-fn decode_and_crop_to_cover(path: &Path, side: i32) -> Result<(Vec<u8>, u32), image::ImageError> {
+fn decode_and_crop_to_cover(path: &Path, side: i32) -> Result<(Vec<u8>, u32, DecodeTimings), image::ImageError> {
     let side = side as u32;
+    let reading = Instant::now();
     let bytes = std::fs::read(path)?;
+    let read = reading.elapsed();
+    let decoding = Instant::now();
     let decoded = image::load_from_memory(&bytes)?;
+    let decode = decoding.elapsed();
+    let resizing = Instant::now();
     let (width, height) = (decoded.width(), decoded.height());
     let scale = (side as f64 / width as f64).max(side as f64 / height as f64);
     let scaled_width = ((width as f64 * scale).ceil() as u32).max(side);
@@ -472,7 +604,8 @@ fn decode_and_crop_to_cover(path: &Path, side: i32) -> Result<(Vec<u8>, u32), im
     let x = (scaled_width - side) / 2;
     let y = (scaled_height - side) / 2;
     let cropped = scaled.crop_imm(x, y, side, side).into_rgba8();
-    Ok((cropped.into_raw(), side))
+    let timings = DecodeTimings { read, decode, resize: resizing.elapsed(), source_width: width, source_height: height, file_bytes: bytes.len() as u64 };
+    Ok((cropped.into_raw(), side, timings))
 }
 
 #[cfg(test)]
@@ -480,6 +613,50 @@ pub(crate) mod tests {
     use super::*;
     use crate::test_support::pump_until;
     use std::time::Duration;
+
+    fn timings(read: u64, decode: u64, resize: u64, width: u32, height: u32, bytes: u64) -> DecodeTimings {
+        DecodeTimings { read: Duration::from_millis(read), decode: Duration::from_millis(decode), resize: Duration::from_millis(resize), source_width: width, source_height: height, file_bytes: bytes }
+    }
+
+    /// One summary per burst, at the moment the last decode in flight ends, with the phases summed.
+    #[test]
+    fn a_burst_of_decodes_is_summarised_once_when_the_last_one_ends() {
+        let t0 = Instant::now();
+        let mut burst = DecodeBurst::default();
+        burst.cache_hits = 7;
+        for _ in 0..3 {
+            burst.start_one(t0);
+        }
+        assert_eq!(burst.finish_one(Some((timings(5, 100, 20, 1200, 1200, 300 * 1024), Duration::from_millis(2), 264)), t0 + Duration::from_millis(150)), None);
+        assert_eq!(burst.finish_one(None, t0 + Duration::from_millis(200)), None, "a failure counts as an ending too");
+        let line = burst
+            .finish_one(Some((timings(3, 80, 10, 600, 900, 100 * 1024), Duration::from_millis(1), 132)), t0 + Duration::from_millis(250))
+            .expect("the last one ends the burst");
+        assert_eq!(
+            line,
+            "covers decoded count=2 failed=1 wall_ms=250 read_ms=8 decode_ms=180 resize_ms=30 main_thread_ms=3 source_kb=400 largest_source=1200x1200 target_px=264 cache_hits_before=7"
+        );
+        // The next burst starts from nothing.
+        burst.start_one(t0);
+        let next = burst.finish_one(Some((timings(1, 2, 3, 10, 10, 1024), Duration::ZERO, 64)), t0 + Duration::from_millis(5)).unwrap();
+        assert!(next.starts_with("covers decoded count=1 failed=0 wall_ms=5 ") && next.ends_with("cache_hits_before=0"), "{next}");
+    }
+
+    /// However a decode task ends (it failed, it finished, it was dropped before doing anything),
+    /// the number in flight comes back down, so a burst can always end.
+    #[test]
+    fn the_guard_keeps_the_in_flight_count_right_however_the_task_ends() {
+        let in_flight = || DECODE_BURST.with(|burst| burst.borrow().in_flight);
+        assert_eq!(in_flight(), 0);
+        {
+            let _never_ran = InFlightDecode::begin();
+            let mut done = InFlightDecode::begin();
+            assert_eq!(in_flight(), 2);
+            done.complete(DecodeTimings::default(), Duration::ZERO, 64);
+        }
+        assert_eq!(in_flight(), 0, "both ended, one successfully and one without a result");
+        assert_eq!(DECODE_BURST.with(|burst| burst.borrow().decoded + burst.borrow().failed), 0, "and the tally was reset with the burst's summary");
+    }
 
     /// Not a `#[test]` itself — see `main.rs`'s `mod tests` for why every fast GTK-touching
     /// scenario in this binary has to run from one single entry point.
