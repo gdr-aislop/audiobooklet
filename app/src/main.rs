@@ -271,6 +271,8 @@ mod tests {
         (item_detail_tab_walks_from_the_header_through_the_page, crate::screens::item_detail::tests::run_tab_walks_from_the_header_through_the_page),
         (item_detail_an_unspaced_title_and_author_fit_a_phone, crate::screens::item_detail::tests::run_an_unspaced_title_and_author_fit_a_phone),
         (item_detail_downloaded_legend_sits_over_the_row_checkmarks, crate::screens::item_detail::tests::run_the_downloaded_legend_sits_over_the_row_checkmarks),
+        (item_detail_download_menu_gets_sizes_from_the_pages_own_request, crate::screens::item_detail::tests::run_download_menu_gets_sizes_from_the_pages_own_request),
+        (item_detail_opening_a_downloaded_book_keeps_its_download_records, crate::screens::item_detail::tests::run_opening_a_downloaded_book_keeps_its_download_records),
         (item_detail_empty_narrator_falls_back_to_author_only, crate::screens::item_detail::tests::run_empty_narrator_falls_back_to_author_only),
         (item_detail_partially_listened_book_shows_resume_and_progress, crate::screens::item_detail::tests::run_partially_listened_book_shows_resume_and_progress),
         (item_detail_description_truncation_and_more_toggle, crate::screens::item_detail::tests::run_description_truncation_and_more_toggle),

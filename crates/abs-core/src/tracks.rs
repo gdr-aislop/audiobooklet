@@ -29,6 +29,19 @@ pub async fn sync_item_tracks(pool: &SqlitePool, server_id: &str, item_id: &str,
     Ok(())
 }
 
+/// Like [`sync_item_tracks`], but only adds what's missing and fills in unknown sizes; see
+/// `abs_storage::repo::tracks::cache_missing` for why a caller that merely saw the item's files must
+/// use this one (it can never delete a download's records, so it's safe even while a download of the
+/// item starts).
+pub async fn cache_missing_tracks(pool: &SqlitePool, server_id: &str, item_id: &str, tracks: &[StreamTrack]) -> Result<()> {
+    let new_tracks: Vec<abs_storage::repo::tracks::NewTrack> = tracks
+        .iter()
+        .map(|t| abs_storage::repo::tracks::NewTrack { ino: &t.ino, duration_seconds: t.duration_seconds, offset_seconds: t.offset_seconds, size_bytes: t.size_bytes })
+        .collect();
+    abs_storage::repo::tracks::cache_missing(pool, server_id, item_id, &new_tracks).await?;
+    Ok(())
+}
+
 pub async fn cached_tracks(pool: &SqlitePool, server_id: &str, item_id: &str) -> Result<Vec<TrackRef>> {
     let tracks = abs_storage::repo::tracks::list_for_item(pool, server_id, item_id).await?;
     Ok(tracks
