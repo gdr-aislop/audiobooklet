@@ -234,6 +234,13 @@ fn headphone_availability(sink_ports: &[libpulse_binding::context::introspect::S
 
 impl PulseRouteWatcher {
     pub fn new() -> Result<Self, RouteWatchError> {
+        Self::new_with_server(None)
+    }
+
+    /// [`Self::new`] against a named audio server (`None`: the default one, as `PULSE_SERVER`
+    /// and the usual sockets say). Lets a test point at an unreachable server without touching the
+    /// process environment, which other threads (GStreamer's) read.
+    pub fn new_with_server(server: Option<String>) -> Result<Self, RouteWatchError> {
         let sender: EventSender = std::sync::Arc::new(std::sync::Mutex::new(None));
         let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
         let (init_tx, init_rx) = std::sync::mpsc::channel::<Result<(), RouteWatchError>>();
@@ -250,7 +257,7 @@ impl PulseRouteWatcher {
                     if stop_for_thread.load(std::sync::atomic::Ordering::Relaxed) {
                         return;
                     }
-                    match watch_connection(&mut init_tx, &sender_for_thread, &mut backoff, &stop_for_thread) {
+                    match watch_connection(server.as_deref(), &mut init_tx, &sender_for_thread, &mut backoff, &stop_for_thread) {
                         ConnectionEnd::Quit => return,
                         ConnectionEnd::Failed(reason) => {
                             if init_tx.take().is_some() {
@@ -299,6 +306,7 @@ impl Drop for PulseRouteWatcher {
 /// at the same moment. The classifier is fresh per connection: after a reconnect nothing is
 /// known, so the first scan reports the state of the world the same way startup does.
 fn watch_connection(
+    server: Option<&str>,
     init_tx: &mut Option<std::sync::mpsc::Sender<Result<(), RouteWatchError>>>,
     sender: &EventSender,
     backoff: &mut std::time::Duration,
@@ -326,7 +334,7 @@ fn watch_connection(
             let _ = signal_tx.send(Signal::StateChanged);
         }
     })));
-    if context.connect(None, FlagSet::NOFLAGS, None).is_err() {
+    if context.connect(server, FlagSet::NOFLAGS, None).is_err() {
         return ConnectionEnd::Failed("connecting to the audio server failed".into());
     }
     context.set_subscribe_callback(Some(Box::new({
@@ -705,10 +713,9 @@ mod tests {
 
     #[test]
     fn new_returns_at_once_even_when_the_audio_server_is_unreachable() {
-        // The environment is process-wide, but no other test in this crate reads PULSE_SERVER.
-        std::env::set_var("PULSE_SERVER", "unix:/nonexistent/abs-test-pulse");
+        // The server is passed in, not set through the environment: GStreamer's threads read it.
         let started = std::time::Instant::now();
-        let watcher = PulseRouteWatcher::new().expect("the thread starts; the missing server is logged there");
+        let watcher = PulseRouteWatcher::new_with_server(Some("unix:/nonexistent/abs-test-pulse".into())).expect("the thread starts; the missing server is logged there");
         assert!(started.elapsed() < std::time::Duration::from_millis(250), "new() waited {:?}", started.elapsed());
         drop(watcher);
     }

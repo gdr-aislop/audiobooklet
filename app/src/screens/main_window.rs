@@ -341,6 +341,8 @@ pub fn build(
             let pool = pool.clone();
             let session = session.clone();
             watcher.start(Box::new(move || {
+                // Whatever the local-address probe saw before the network changed is stale.
+                session.forget_probe();
                 // Offline mode ignores the network coming back; switching it off catches up.
                 if session.is_offline() {
                     return;

@@ -58,7 +58,8 @@ pub fn init_in_background(took: impl FnOnce(Duration, &std::result::Result<(), S
     init_in_background_with(|| init().map_err(|err| err.to_string()), took)
 }
 
-fn init_in_background_with(
+#[doc(hidden)]
+pub fn init_in_background_with(
     work: impl FnOnce() -> std::result::Result<(), String> + Send + 'static,
     took: impl FnOnce(Duration, &std::result::Result<(), String>) + Send + 'static,
 ) -> GstInit {
@@ -269,6 +270,9 @@ impl GstBackend {
     }
 
     fn build(sink_element_name: Option<&str>) -> Result<Self> {
+        // The player is built once the app has awaited `init_in_background`; building a pipeline
+        // while the plugin registry is still loading would race it.
+        debug_assert!(unsafe { gst::ffi::gst_is_initialized() } != 0, "GStreamer isn't initialised yet");
         let pipeline = gst::ElementFactory::make("playbin").build()?;
         let connection_properties = std::sync::Arc::new(std::sync::Mutex::new(ConnectionProperties::default()));
         connect_source_setup(&pipeline, connection_properties.clone());
@@ -578,6 +582,15 @@ mod tests {
         assert_eq!(outcome, Ok(()));
         // And GStreamer is really usable afterwards.
         assert!(gst::ElementFactory::make("fakesink").build().is_ok());
+    }
+
+    #[test]
+    fn a_panicking_initialisation_reaches_the_waiter_as_an_error_and_never_counts_as_finished() {
+        let init = init_in_background_with(|| panic!("plugin blew up"), |_, _| {});
+        let outcome = futures::executor::block_on(init.wait());
+        assert!(outcome.unwrap_err().contains("ended without a result"));
+        // Not "finished": the thread died before it could say so. Exit handling bounds its wait.
+        assert!(!init.is_finished());
     }
 
     #[test]
