@@ -138,6 +138,15 @@ async fn fetch_and_cache_cover_with(
     if let Some(cached) = cached_cover_path(pool, server_id, item_id).await {
         return (Some(cached), CoverOutcome::Cached);
     }
+    // What the library list said about this item's cover (`None`: it didn't, or an older server).
+    // "No cover" costs no request at all, and "has one" overrides the memory of an earlier 404, so
+    // a cover added on the server shows up at the next sync instead of up to a day later.
+    let server_says_cover = abs_storage::repo::items::get_extras(pool, server_id, item_id).await.ok().and_then(|extras| extras.has_cover);
+    if server_says_cover == Some(false) {
+        tracing::debug!(item_id, "the server's list says this item has no cover; not asking");
+        return (None, CoverOutcome::KnownMissing);
+    }
+    let recheck_after = if server_says_cover == Some(true) { None } else { recheck_after };
     let marker = paths.missing_cover_marker_path(server_id, item_id);
     if let Some(recheck_after) = recheck_after {
         let age = tokio::fs::metadata(&marker).await.ok().and_then(|m| m.modified().ok()).and_then(|at| at.elapsed().ok());
@@ -636,5 +645,53 @@ mod tests {
         assert!(!missing(&paths, &server_id, "item-1"), "only a 404 means there is no cover");
         fetch_and_cache_cover(&paths, &pool, &connection, "token", &server_id, "item-1").await;
         assert_eq!(cover_requests(&mock_server.received_requests().await.unwrap()), 2, "a failure is retried next time");
+    }
+
+    async fn set_has_cover(pool: &SqlitePool, server_id: &str, item_id: &str, has_cover: Option<bool>) {
+        let mut extras = abs_storage::repo::items::get_extras(pool, server_id, item_id).await.unwrap();
+        extras.has_cover = has_cover;
+        abs_storage::repo::items::set_extras(pool, server_id, item_id, &extras).await.unwrap();
+    }
+
+    /// The list said there is no cover: not one request, however the fetch is started.
+    #[tokio::test]
+    async fn an_item_the_list_says_has_no_cover_is_not_asked_for() {
+        let mock_server = MockServer::start().await;
+        Mock::given(method("GET")).and(path("/api/items/item-1/cover")).respond_with(ResponseTemplate::new(404)).mount(&mock_server).await;
+        let (_tmp, paths) = test_paths();
+        let (pool, server_id) = pool_with_synced_items(&["item-1"]).await;
+        set_has_cover(&pool, &server_id, "item-1", Some(false)).await;
+        let connection = ConnectionTarget::direct(&mock_server.uri());
+
+        assert!(fetch_and_cache_cover(&paths, &pool, &connection, "token", &server_id, "item-1").await.is_none());
+        fetch_and_cache_covers(&paths, &pool, &connection, "token", &server_id, vec!["item-1".into()], false).await;
+        fetch_and_cache_covers(&paths, &pool, &connection, "token", &server_id, vec!["item-1".into()], true).await;
+        assert_eq!(cover_requests(&mock_server.received_requests().await.unwrap()), 0);
+    }
+
+    /// The cover appears on the server after an earlier 404 was remembered: once the list says it
+    /// has one, it is fetched at once, not after the day's memory runs out.
+    #[tokio::test]
+    async fn a_cover_added_on_the_server_overrides_the_no_cover_memory() {
+        let mock_server = MockServer::start().await;
+        Mock::given(method("GET")).and(path("/api/items/item-1/cover")).respond_with(ResponseTemplate::new(404)).up_to_n_times(1).mount(&mock_server).await;
+        Mock::given(method("GET"))
+            .and(path("/api/items/item-1/cover"))
+            .respond_with(ResponseTemplate::new(200).insert_header("Content-Type", "image/png").set_body_bytes(PNG_1X1.to_vec()))
+            .mount(&mock_server)
+            .await;
+        let (_tmp, paths) = test_paths();
+        let (pool, server_id) = pool_with_synced_items(&["item-1"]).await;
+        let connection = ConnectionTarget::direct(&mock_server.uri());
+
+        assert!(fetch_and_cache_cover(&paths, &pool, &connection, "token", &server_id, "item-1").await.is_none());
+        assert!(missing(&paths, &server_id, "item-1"));
+        // Unknown: the memory still holds.
+        fetch_and_cache_covers(&paths, &pool, &connection, "token", &server_id, vec!["item-1".into()], false).await;
+        assert_eq!(cover_requests(&mock_server.received_requests().await.unwrap()), 1);
+        // The list now says it has a cover.
+        set_has_cover(&pool, &server_id, "item-1", Some(true)).await;
+        fetch_and_cache_covers(&paths, &pool, &connection, "token", &server_id, vec!["item-1".into()], false).await;
+        assert!(cached_cover_path(&pool, &server_id, "item-1").await.is_some());
     }
 }

@@ -201,6 +201,8 @@ pub(crate) mod tests {
             synced_at: chrono::Utc::now(),
             series_name: None,
             genres_json: "[]".to_string(),
+            title_sort: None,
+            author_sort: None,
         }
     }
 

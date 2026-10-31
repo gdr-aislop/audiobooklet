@@ -153,6 +153,7 @@ pub fn build(
                 current_chapter_index,
                 &chapter_ranges,
                 &[],
+                None,
                 free_space,
                 &next_count,
                 &toast_overlay,
@@ -174,6 +175,9 @@ pub fn build(
                     let server_id = session.server_id().to_string();
                     let availability = abs_core::download_tracks::item_offline_availability(&pool, &server_id, &item_id).await.unwrap_or(OfflineAvailability::None);
                     let tracks = abs_core::tracks::cached_tracks(&pool, &server_id, &item_id).await.unwrap_or_default();
+                    // The book's total size from the library list: an estimate for "Entire book"
+                    // until the files' own sizes are cached.
+                    let book_size = abs_storage::repo::items::get_extras(&pool, &server_id, &item_id).await.ok().and_then(|extras| extras.size_bytes).and_then(|size| u64::try_from(size).ok());
                     if generation.get() != my_generation {
                         // A newer `repopulate()` call has already started (and, since its own
                         // synchronous pass runs before any `.await` point, already rendered) —
@@ -193,6 +197,7 @@ pub fn build(
                         current_chapter_index,
                         &chapter_ranges,
                         &tracks,
+                        book_size,
                         free_space,
                         &next_count,
                         &toast_overlay,
@@ -264,7 +269,18 @@ pub(crate) const OFFLINE_DOWNLOAD_TOAST: &str = tr_noop("Offline mode is on — 
 /// cached yet, or nothing to fetch (a disabled row shouldn't advertise "≈0 B"). No chapters at
 /// all means every scope degenerates to the whole book — the same fallback
 /// `DownloadManager::start_download` applies — so the estimate is every cached track.
-fn estimate_bytes_for(tracks: &[TrackRef], chapter_ranges: &[(f64, f64)], scope: DownloadScope, current_chapter_index: usize) -> Option<u64> {
+fn estimate_bytes_for(tracks: &[TrackRef], chapter_ranges: &[(f64, f64)], scope: DownloadScope, current_chapter_index: usize, book_size: Option<u64>) -> Option<u64> {
+    let from_files = estimate_bytes_from_files(tracks, chapter_ranges, scope, current_chapter_index);
+    // The files aren't listed yet (a book never opened or downloaded before): the book's total
+    // size from the library list stands in for the whole-book scope only. It counts every file of
+    // the item, a cover or an e-book included, so it can read a little high, which "≈" allows.
+    match (from_files, scope) {
+        (None, DownloadScope::EntireBook) => book_size.filter(|size| *size > 0),
+        (estimate, _) => estimate,
+    }
+}
+
+fn estimate_bytes_from_files(tracks: &[TrackRef], chapter_ranges: &[(f64, f64)], scope: DownloadScope, current_chapter_index: usize) -> Option<u64> {
     if chapter_ranges.is_empty() {
         if tracks.is_empty() || tracks.iter().any(|t| t.size_bytes.is_none()) {
             return None;
@@ -346,6 +362,7 @@ fn populate_download_popover_rows(
     current_chapter_index: usize,
     chapter_ranges: &[(f64, f64)],
     tracks: &[TrackRef],
+    book_size: Option<u64>,
     free_space: Option<u64>,
     next_count: &Rc<Cell<u32>>,
     toast_overlay: &adw::ToastOverlay,
@@ -365,7 +382,7 @@ fn populate_download_popover_rows(
     // the estimate is of exactly what would be fetched. The fallbacks (no chapters at all ->
     // whole book; nothing to fetch or no cached sizes -> no estimate) live in
     // `estimate_bytes_for` above.
-    let estimate_for = |scope: DownloadScope| estimate_bytes_for(tracks, chapter_ranges, scope, current_chapter_index);
+    let estimate_for = |scope: DownloadScope| estimate_bytes_for(tracks, chapter_ranges, scope, current_chapter_index, book_size);
 
     let add_scope_row = |label: &str, scope: DownloadScope| {
         let inner = gtk4::Box::builder().orientation(gtk4::Orientation::Vertical).spacing(2).halign(gtk4::Align::Start).build();
@@ -497,7 +514,7 @@ fn populate_download_popover_rows(
             let chapter_ranges = chapter_ranges.to_vec();
             Rc::new(move || {
                 let scope = DownloadScope::NextChapters(next_count.get());
-                match (estimate_bytes_for(tracks.as_slice(), chapter_ranges.as_slice(), scope, current_chapter_index), free_space) {
+                match (estimate_bytes_for(tracks.as_slice(), chapter_ranges.as_slice(), scope, current_chapter_index, None), free_space) {
                     (Some(bytes), Some(free)) if bytes > free => {
                         next_subtitle.set_label(&tr("Not enough free space"));
                         next_subtitle.remove_css_class("dim-label");
@@ -1036,6 +1053,51 @@ pub(crate) mod tests {
 
     /// The popover's size-estimate subtitles, in row order — the labels starting with the spec's
     /// "≈" (rows without an estimable size simply have no such label).
+    /// The book's total size stands in for "Entire book" only, only while the files' own sizes
+    /// aren't cached, and never over them.
+    #[test]
+    fn the_books_total_size_only_stands_in_for_the_whole_book() {
+        let sized = [TrackRef { ino: "1".into(), track_index: 0, duration_seconds: 10.0, offset_seconds: 0.0, size_bytes: Some(1_000_000) }];
+        let unsized_ = [TrackRef { ino: "1".into(), track_index: 0, duration_seconds: 10.0, offset_seconds: 0.0, size_bytes: None }];
+        let chapters = [(0.0, 5.0), (5.0, 10.0)];
+        let total = Some(340_000_000);
+        // No files known: the whole book is the book's size; nothing else is guessed.
+        assert_eq!(estimate_bytes_for(&[], &chapters, DownloadScope::EntireBook, 0, total), Some(340_000_000));
+        for scope in [DownloadScope::CurrentChapter, DownloadScope::NextChapters(2), DownloadScope::RemainingChapters] {
+            assert_eq!(estimate_bytes_for(&[], &chapters, scope, 0, total), None, "{scope:?}");
+        }
+        assert_eq!(estimate_bytes_for(&unsized_, &chapters, DownloadScope::EntireBook, 0, total), Some(340_000_000), "files without sizes don't count");
+        // The files' own sizes win.
+        assert_eq!(estimate_bytes_for(&sized, &chapters, DownloadScope::EntireBook, 0, total), Some(1_000_000));
+        // Unknown or zero: no estimate, as before.
+        assert_eq!(estimate_bytes_for(&[], &chapters, DownloadScope::EntireBook, 0, None), None);
+        assert_eq!(estimate_bytes_for(&[], &chapters, DownloadScope::EntireBook, 0, Some(0)), None);
+    }
+
+    /// Not a `#[test]` itself — see `main.rs`'s `mod tests`. A book whose files aren't cached yet but
+    /// whose total size the library list gave: "Entire book" shows it, the rest show no estimate.
+    pub(crate) fn run_entire_book_shows_the_list_size_before_the_files_are_known(runtime: &tokio::runtime::Runtime) {
+        let mock_server = runtime.block_on(wiremock::MockServer::start());
+        runtime.block_on(crate::downloads::tests::mock_three_track_item(&mock_server, "item-1"));
+        let pool = runtime.block_on(crate::test_support::pool());
+        let (server, account) = runtime.block_on(crate::player::tests::account_and_server(&pool, &mock_server.uri()));
+        runtime.block_on(crate::player::tests::insert_synced_item(&pool, &server.id, "item-1", "Test Item"));
+        runtime
+            .block_on(abs_storage::repo::items::set_extras(&pool, &server.id, "item-1", &abs_storage::models::ItemExtras { size_bytes: Some(340_000_000), tags_json: "[]".into(), ..Default::default() }))
+            .unwrap();
+        assert!(runtime.block_on(abs_core::tracks::cached_tracks(&pool, &server.id, "item-1")).unwrap().is_empty());
+
+        let session = abs_core::auth::Session::new(pool.clone(), &server, &account);
+        let chapter_ranges = vec![(0.0, 5.0), (5.0, 10.0), (10.0, 15.0)];
+        let menu = build(pool.clone(), test_download_manager(pool.clone()), session, "item-1".to_string(), move || chapter_ranges.clone(), || true, || 0, || None, adw::ToastOverlay::new(), Rc::new(|| {}));
+        let window = mapped_window(&menu.widget);
+        menu.popover.popup();
+        pump_until(|| estimate_texts(&menu.popover_box) == ["≈340.0 MB".to_string()], Duration::from_secs(3));
+        assert_eq!(estimate_texts(&menu.popover_box), ["≈340.0 MB"], "only the whole book has an estimate");
+        assert!(button_labeled(&menu.popover_box, "Current chapter").is_some(), "the other rows are still there, and usable");
+        window.destroy();
+    }
+
     fn estimate_texts(container: &gtk4::Box) -> Vec<String> {
         for_each_descendant_labels(container).into_iter().filter(|text| text.starts_with('≈')).collect()
     }

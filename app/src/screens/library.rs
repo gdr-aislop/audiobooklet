@@ -1583,10 +1583,15 @@ fn render_from_current_data(widgets: &LibraryWidgets) {
         })
         .collect();
 
+    // The server's own sort keys ("Hobbit, The", "Tolkien, J.R.R.") order the lists when it sent one
+    // for every book that needs one; a library only partly covered (books not synced since the
+    // keys were first kept) sorts exactly as before, so the two kinds of key never mix.
+    let server_title_keys = server_title_keys(&visible);
+    let server_author_keys = server_author_keys(&visible);
     match sort {
         SortKey::DateAdded => visible.sort_by_key(|item| std::cmp::Reverse(item.added_at)),
-        SortKey::Title => visible.sort_by_key(|a| a.title.to_lowercase()),
-        SortKey::Author => visible.sort_by_cached_key(|item| author_sort_key(item)),
+        SortKey::Title => visible.sort_by_cached_key(|item| (title_sort_key(item, server_title_keys), item.title.to_lowercase())),
+        SortKey::Author => visible.sort_by_cached_key(|item| author_sort_key(item, server_author_keys)),
         SortKey::Duration => visible.sort_by(|a, b| b.duration_seconds.total_cmp(&a.duration_seconds)),
         // Played before never-played; within played, newest last-listen first. `updated_at`
         // carries the *true* last-listened time (the server's own `lastUpdate` on import), so
@@ -1607,7 +1612,7 @@ fn render_from_current_data(widgets: &LibraryWidgets) {
     // group key makes same-key items contiguous without disturbing their relative order from
     // the sort above, so each bucket is still internally sorted by `sort`.
     if grouping != Grouping::None {
-        visible.sort_by_key(|item| group_key_for(item, grouping).sort_rank());
+        visible.sort_by_cached_key(|item| group_order_key(item, grouping, server_author_keys));
     }
     let book_count = visible.len();
     let mut groups: Vec<(GroupKey, Vec<&Item>)> = Vec::new();
@@ -1929,12 +1934,45 @@ fn group_key_for(item: &Item, grouping: Grouping) -> GroupKey {
 }
 
 /// Alphabetical by author, case-insensitively, with books without one after every named one
-/// rather than ahead of "A".
-fn author_sort_key(item: &Item) -> (bool, String) {
+/// rather than ahead of "A". With `server_keys`, by the server's "Last, First" key (so "Tolkien,
+/// J.R.R." files under T), falling back to the name as shown for a book without one.
+fn author_sort_key(item: &Item, server_keys: bool) -> (bool, String) {
     match named(&item.author) {
-        Some(author) => (false, author.to_lowercase()),
+        Some(author) => {
+            let key = if server_keys { named(&item.author_sort).unwrap_or(author) } else { author };
+            (false, key.to_lowercase())
+        }
         None => (true, String::new()),
     }
+}
+
+/// The title sort key: the server's ("Hobbit, The", so a leading "The" doesn't file under T) when
+/// `server_keys`, else the title as shown.
+fn title_sort_key(item: &Item, server_keys: bool) -> String {
+    if server_keys { named(&item.title_sort).unwrap_or(&item.title) } else { &item.title }.to_lowercase()
+}
+
+/// Whether every book has the server's title sort key.
+fn server_title_keys(items: &[&Item]) -> bool {
+    !items.is_empty() && items.iter().all(|item| named(&item.title_sort).is_some())
+}
+
+/// Whether every book that has an author has the server's "Last, First" key for it.
+fn server_author_keys(items: &[&Item]) -> bool {
+    let mut with_author = items.iter().filter(|item| named(&item.author).is_some()).peekable();
+    with_author.peek().is_some() && with_author.all(|item| named(&item.author_sort).is_some())
+}
+
+/// The order of the group headers: by the group's name as shown, or, grouped by author with the
+/// server's keys, by surname first. Books with the same author as shown always share a key, so a
+/// group is never split, and the label breaks any tie so two authors can't interleave.
+fn group_order_key(item: &Item, grouping: Grouping, server_author_keys: bool) -> (u8, String, String) {
+    let (rank, label) = group_key_for(item, grouping).sort_rank();
+    let surname = match (grouping, rank) {
+        (Grouping::ByAuthor, 0) if server_author_keys => named(&item.author_sort).map(str::to_lowercase).unwrap_or_default(),
+        _ => String::new(),
+    };
+    (rank, surname, label)
 }
 
 /// An author or series name, or `None` when there isn't one. Audiobookshelf sends `""` for a book
@@ -2053,6 +2091,8 @@ pub(crate) mod tests {
             synced_at: chrono::Utc::now(),
             series_name: series_name.map(str::to_string),
             genres_json: "[]".to_string(),
+            title_sort: None,
+            author_sort: None,
         }
     }
 
@@ -2073,9 +2113,89 @@ pub(crate) mod tests {
     fn sorting_by_author_puts_books_without_one_last() {
         let books = [stored_item(Some(""), None), stored_item(Some("zola"), None), stored_item(None, None), stored_item(Some("Asimov"), None)];
         let mut sorted: Vec<&Item> = books.iter().collect();
-        sorted.sort_by_cached_key(|item| author_sort_key(item));
+        sorted.sort_by_cached_key(|item| author_sort_key(item, false));
         let authors: Vec<Option<&str>> = sorted.iter().map(|item| item.author.as_deref()).collect();
         assert_eq!(authors, [Some("Asimov"), Some("zola"), Some(""), None]);
+    }
+
+    fn keyed(title: &str, title_sort: Option<&str>, author: Option<&str>, author_sort: Option<&str>) -> Item {
+        let mut item = stored_item(author, None);
+        item.title = title.to_string();
+        item.title_sort = title_sort.map(str::to_string);
+        item.author_sort = author_sort.map(str::to_string);
+        item
+    }
+
+    fn titles<'a>(sorted: &[&'a Item]) -> Vec<&'a str> {
+        sorted.iter().map(|item| item.title.as_str()).collect()
+    }
+
+    /// "The Hobbit" files under H and Tolkien under T when the server sent its keys for every book.
+    #[test]
+    fn the_servers_sort_keys_order_titles_and_authors() {
+        let books = [
+            keyed("The Hobbit", Some("Hobbit, The"), Some("J.R.R. Tolkien"), Some("Tolkien, J.R.R.")),
+            keyed("Dune", Some("Dune"), Some("Frank Herbert"), Some("Herbert, Frank")),
+            keyed("A Wizard of Earthsea", Some("Wizard of Earthsea, A"), Some("Ursula K. Le Guin"), Some("Le Guin, Ursula K.")),
+            keyed("Anonymous", Some("Anonymous"), None, None),
+        ];
+        let all: Vec<&Item> = books.iter().collect();
+        assert!(server_title_keys(&all) && server_author_keys(&all), "a book without an author doesn't count against the author keys");
+
+        let mut by_title = all.clone();
+        by_title.sort_by_cached_key(|item| (title_sort_key(item, true), item.title.to_lowercase()));
+        assert_eq!(titles(&by_title), ["Anonymous", "Dune", "The Hobbit", "A Wizard of Earthsea"]);
+        let mut by_title_as_shown = all.clone();
+        by_title_as_shown.sort_by_cached_key(|item| (title_sort_key(item, false), item.title.to_lowercase()));
+        assert_eq!(titles(&by_title_as_shown), ["A Wizard of Earthsea", "Anonymous", "Dune", "The Hobbit"], "without the keys, by the title as shown, as before");
+
+        let mut by_author = all.clone();
+        by_author.sort_by_cached_key(|item| author_sort_key(item, true));
+        assert_eq!(titles(&by_author), ["Dune", "A Wizard of Earthsea", "The Hobbit", "Anonymous"], "Herbert, Le Guin, Tolkien, then no author");
+    }
+
+    /// Keys on only some books must not be used: one library sorted two ways at once.
+    #[test]
+    fn partial_server_keys_are_not_used() {
+        let books = [keyed("The Hobbit", Some("Hobbit, The"), Some("J.R.R. Tolkien"), Some("Tolkien, J.R.R.")), keyed("Dune", None, Some("Frank Herbert"), None)];
+        let all: Vec<&Item> = books.iter().collect();
+        assert!(!server_title_keys(&all) && !server_author_keys(&all));
+        for blank in [Some(""), Some("  ")] {
+            let blanks = [keyed("A", blank, Some("X"), blank)];
+            let all: Vec<&Item> = blanks.iter().collect();
+            assert!(!server_title_keys(&all) && !server_author_keys(&all), "{blank:?} is no key");
+        }
+        assert!(!server_title_keys(&[]) && !server_author_keys(&[]));
+    }
+
+    /// Grouped by author, the headers follow the surname order and an author's books stay together
+    /// under one header, whatever order the books arrive in.
+    #[test]
+    fn author_groups_follow_the_servers_surname_order_without_splitting() {
+        let books = [
+            keyed("Two Towers", None, Some("J.R.R. Tolkien"), Some("Tolkien, J.R.R.")),
+            keyed("Dune", None, Some("Frank Herbert"), Some("Herbert, Frank")),
+            keyed("Hobbit", None, Some("J.R.R. Tolkien"), Some("Tolkien, J.R.R.")),
+            keyed("Untitled", None, None, None),
+            keyed("Earthsea", None, Some("Ursula K. Le Guin"), Some("Le Guin, Ursula K.")),
+        ];
+        let all: Vec<&Item> = books.iter().collect();
+        let keys = server_author_keys(&all);
+        assert!(keys);
+        let mut grouped = all.clone();
+        grouped.sort_by_cached_key(|item| group_order_key(item, Grouping::ByAuthor, keys));
+        let order: Vec<(String, &str)> = grouped.iter().map(|item| (group_key_for(item, Grouping::ByAuthor).label().to_string(), item.title.as_str())).collect();
+        let labels: Vec<&str> = order.iter().map(|(label, _)| label.as_str()).collect();
+        assert_eq!(&labels[..2], ["Frank Herbert", "Ursula K. Le Guin"]);
+        assert_eq!(&labels[2..4], ["J.R.R. Tolkien", "J.R.R. Tolkien"], "Tolkien's books are adjacent");
+        assert!(labels[4].contains("Unknown") || labels[4] == "Unknown author", "{labels:?}: no author last");
+
+        // Without server keys: by the name as shown, as before.
+        let mut plain = all.clone();
+        plain.sort_by_cached_key(|item| group_order_key(item, Grouping::ByAuthor, false));
+        let plain_labels: Vec<String> = plain.iter().map(|item| group_key_for(item, Grouping::ByAuthor).label().to_string()).collect();
+        assert_eq!(plain_labels[0], "Frank Herbert");
+        assert_eq!(plain_labels[1], "J.R.R. Tolkien");
     }
 
     /// Seeds the library/items/progress rows a scenario's progress-dependent assertions read,

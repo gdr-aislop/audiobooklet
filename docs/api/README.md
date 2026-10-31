@@ -160,6 +160,20 @@ progress endpoints (`GET /api/items/:id`, `POST /api/items/:id/play`, `PATCH /ap
 implemented. If upstream ever documents one of these in the OpenAPI spec, the generated method
 takes over and the hand-written one in `ext.rs` is deleted.
 
+## What the library list carries
+
+`GET /api/libraries/:id/items` (hand-written, `get_library_items_with_media`) returns each book's
+minified record, and everything useful in it is kept (migration 0013, `items` columns; the sync
+writes them with `items::set_extras`): `subtitle`, total `size`, `numChapters`, `tags`, `coverPath`
+(whether the server has a cover), `publishedYear`, `publisher`, `language`, `explicit`, `isbn`,
+`asin`, and the server's own sort keys `titleIgnorePrefix` ("Hobbit, The") and `authorNameLF`
+("Tolkien, J.R.R."). Each is parsed leniently — a field of the wrong type is ignored, never fails the
+list — and a missing field means "unknown", which every reader treats as it did before the field
+was kept. The audio files' `codec`, `mimeType`, `bitRate` and `channels` come from the item request
+and land in `tracks`, for diagnostics (they appear in the log when a track download fails). Not
+kept, on purpose: `updatedAt`/`lastUpdate` (delta sync) and `isMissing`/`isInvalid` — each changes
+what the app does and is its own piece of work.
+
 ## Listening sessions
 
 Playback progress goes to the server as **local listening sessions** — `POST

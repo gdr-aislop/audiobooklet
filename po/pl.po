@@ -348,7 +348,9 @@ msgstr "Usuń"
 msgid "Removing the download"
 msgstr "Usuwanie pobranego pliku"
 
-#: app/src/screens/downloads.rs app/src/widgets/download_scope_menu.rs
+#. TRANSLATORS: {duration} is a length such as "11.8h", {chapters} a count such as "19 chapters".
+#: app/src/screens/downloads.rs app/src/screens/item_detail.rs
+#: app/src/widgets/download_scope_menu.rs
 msgid "{count} chapter"
 msgid_plural "{count} chapters"
 msgstr[0] "{count} rozdział"
@@ -554,6 +556,11 @@ msgstr "Usuwanie postępu słuchania"
 msgid "{author} · Narrated by {narrator}"
 msgstr "{author} · czyta {narrator}"
 
+#. TRANSLATORS: {duration} is a length such as "11.8h", {chapters} a count such as "19 chapters".
+#: app/src/screens/item_detail.rs
+msgid "{duration} · {chapters}"
+msgstr "{duration} · {chapters}"
+
 #: app/src/screens/item_detail.rs
 msgid "Resume"
 msgstr "Wznów"
@@ -573,6 +580,25 @@ msgstr[2] "{series} ({count} książek)"
 #: app/src/screens/item_detail.rs
 msgid "Starting…"
 msgstr "Uruchamianie…"
+
+#: app/src/screens/item_detail.rs
+msgid "Explicit"
+msgstr "Treści dla dorosłych"
+
+#. TRANSLATORS: {isbn} is a book's ISBN number.
+#: app/src/screens/item_detail.rs
+msgid "ISBN {isbn}"
+msgstr "ISBN {isbn}"
+
+#. TRANSLATORS: {asin} is a book's Amazon ASIN identifier.
+#: app/src/screens/item_detail.rs
+msgid "ASIN {asin}"
+msgstr "ASIN {asin}"
+
+#. TRANSLATORS: {tags} is a comma-separated list of the labels a book carries, e.g. "classic, fantasy".
+#: app/src/screens/item_detail.rs
+msgid "Tags: {tags}"
+msgstr "Tagi: {tags}"
 
 #: app/src/screens/item_detail.rs app/src/screens/player.rs
 #: app/src/widgets/download_scope_menu.rs app/src/widgets/item_card.rs

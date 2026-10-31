@@ -271,6 +271,7 @@ mod tests {
         (item_detail_tab_walks_from_the_header_through_the_page, crate::screens::item_detail::tests::run_tab_walks_from_the_header_through_the_page),
         (item_detail_an_unspaced_title_and_author_fit_a_phone, crate::screens::item_detail::tests::run_an_unspaced_title_and_author_fit_a_phone),
         (item_detail_downloaded_legend_sits_over_the_row_checkmarks, crate::screens::item_detail::tests::run_the_downloaded_legend_sits_over_the_row_checkmarks),
+        (item_detail_shows_the_subtitle_facts_and_chapter_count, crate::screens::item_detail::tests::run_shows_the_subtitle_facts_and_chapter_count),
         (item_detail_download_menu_gets_sizes_from_the_pages_own_request, crate::screens::item_detail::tests::run_download_menu_gets_sizes_from_the_pages_own_request),
         (item_detail_opening_a_downloaded_book_keeps_its_download_records, crate::screens::item_detail::tests::run_opening_a_downloaded_book_keeps_its_download_records),
         (item_detail_empty_narrator_falls_back_to_author_only, crate::screens::item_detail::tests::run_empty_narrator_falls_back_to_author_only),
@@ -420,6 +421,7 @@ mod tests {
         (player_screen_download_progress_strip_reveals_while_downloading, crate::screens::player::tests::run_download_progress_strip_reveals_while_downloading),
 
         (download_scope_menu_shows_a_loading_placeholder_until_chapters_are_ready, crate::widgets::download_scope_menu::tests::run_shows_a_loading_placeholder_until_chapters_are_ready),
+        (download_scope_menu_entire_book_shows_the_list_size_before_the_files_are_known, crate::widgets::download_scope_menu::tests::run_entire_book_shows_the_list_size_before_the_files_are_known),
         (download_scope_menu_stepper_defaults_clamps_and_steps, crate::widgets::download_scope_menu::tests::run_stepper_defaults_clamps_and_steps),
 
         (download_scope_menu_next_chapters_row_uses_the_stepper_count, crate::widgets::download_scope_menu::tests::run_next_chapters_row_uses_the_stepper_count),

@@ -1,6 +1,7 @@
 //! Pulls server state into the local cache.
 
 use abs_storage::repo::items::{self, UpsertItem};
+use abs_storage::models::ItemExtras;
 use abs_storage::repo::libraries::{self, UpsertLibrary};
 use abs_api::error_chain;
 use abs_storage::AppPaths;
@@ -131,6 +132,27 @@ async fn store_items_for_library(
                 added_at,
                 series_name: item.series_name.as_deref(),
                 genres: &item.genres,
+            },
+        )
+        .await?;
+        items::set_extras(
+            pool,
+            server_id,
+            &item.id,
+            &ItemExtras {
+                subtitle: item.subtitle.clone(),
+                size_bytes: item.size_bytes.and_then(|size| i64::try_from(size).ok()),
+                num_chapters: item.num_chapters,
+                tags_json: serde_json::to_string(&item.tags).unwrap_or_else(|_| "[]".to_string()),
+                published_year: item.published_year.clone(),
+                publisher: item.publisher.clone(),
+                language: item.language.clone(),
+                explicit: item.explicit,
+                isbn: item.isbn.clone(),
+                asin: item.asin.clone(),
+                has_cover: item.has_cover,
+                title_sort: item.title_sort.clone(),
+                author_sort: item.author_sort.clone(),
             },
         )
         .await?;
@@ -525,6 +547,43 @@ mod tests {
         let stored = items::list_for_library(&pool, &server_id, "lib-1").await.unwrap();
         assert_eq!(stored[0].series_name.as_deref(), Some("Sword of Truth"));
         assert_eq!(stored[0].genres(), vec!["Fantasy".to_string(), "Sci-Fi".to_string()]);
+    }
+
+    /// The extras the list carries end up in storage, a later sync replaces them, and an item
+    /// whose record carries none ends up with everything unknown rather than stale values.
+    #[tokio::test]
+    async fn sync_items_for_library_keeps_and_refreshes_the_extras() {
+        let mock_server = MockServer::start().await;
+        let record = |size: serde_json::Value, subtitle: serde_json::Value| {
+            serde_json::json!({ "results": [{
+                "id": "item-1", "addedAt": 1_700_000_000_000i64,
+                "media": { "duration": 3600.0, "size": size, "numChapters": 12, "tags": ["a"], "coverPath": null,
+                    "metadata": { "title": "The Hobbit", "titleIgnorePrefix": "Hobbit, The", "authorName": "J.R.R. Tolkien",
+                                  "authorNameLF": "Tolkien, J.R.R.", "subtitle": subtitle, "publishedYear": 1937 } }
+            }] })
+        };
+        let first = Mock::given(method("GET")).and(path("/api/libraries/lib-1/items"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(record(serde_json::json!(5_000_000), serde_json::json!("There and Back Again"))))
+            .up_to_n_times(1);
+        first.mount(&mock_server).await;
+        let (pool, server_id) = pool_with_server_and_library(&mock_server.uri(), "lib-1").await;
+        let api = abs_api::Client::new(&mock_server.uri());
+        sync_items_for_library(&pool, &api, &server_id, "lib-1").await.unwrap();
+
+        let extras = items::get_extras(&pool, &server_id, "item-1").await.unwrap();
+        assert_eq!((extras.subtitle.as_deref(), extras.size_bytes, extras.num_chapters), (Some("There and Back Again"), Some(5_000_000), Some(12)));
+        assert_eq!((extras.tags(), extras.has_cover, extras.published_year.as_deref()), (vec!["a".to_string()], Some(false), Some("1937")));
+        let stored = items::get(&pool, &server_id, "item-1").await.unwrap();
+        assert_eq!((stored.title_sort.as_deref(), stored.author_sort.as_deref()), (Some("Hobbit, The"), Some("Tolkien, J.R.R.")));
+
+        // The server changes the subtitle and stops sending a size.
+        Mock::given(method("GET")).and(path("/api/libraries/lib-1/items"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(record(serde_json::Value::Null, serde_json::Value::Null)))
+            .mount(&mock_server)
+            .await;
+        sync_items_for_library(&pool, &api, &server_id, "lib-1").await.unwrap();
+        let extras = items::get_extras(&pool, &server_id, "item-1").await.unwrap();
+        assert_eq!((extras.subtitle, extras.size_bytes), (None, None));
     }
 
     #[tokio::test]

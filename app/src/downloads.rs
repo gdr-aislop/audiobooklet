@@ -323,6 +323,9 @@ impl DownloadManager {
                         if let Err(err) = abs_core::tracks::sync_item_tracks(&pool, &server_id, &item_id, &target.tracks).await {
                             tracing::warn!(%err, item_id, "couldn't persist tracks locally");
                         }
+                        if let Err(err) = abs_core::tracks::fill_file_facts(&pool, &server_id, &item_id, &target.file_facts).await {
+                            tracing::debug!(%err, item_id, "couldn't keep the audio files' encoding facts");
+                        }
                         if let Err(err) = abs_core::chapters::sync_item_chapters(&pool, &server_id, &item_id, &target.chapters).await {
                             tracing::warn!(%err, item_id, "couldn't persist chapters locally");
                         }
@@ -468,6 +471,12 @@ impl DownloadManager {
                     tracing::warn!(%err, item_id = %item_id, ino = %ino, "download_track returned an error");
                     TrackDownloadOutcome::Failed(err.to_string())
                 });
+            if let TrackDownloadOutcome::Failed(reason) = &outcome {
+                // What the server says the file is, for a bug report: a codec or bit rate that
+                // explains an unusually large or odd file.
+                let encoding = abs_core::tracks::describe_file(&pool, &server_id, &item_id, &ino).await;
+                tracing::info!(item_id = %item_id, ino = %ino, %reason, encoding = encoding.as_deref().unwrap_or("unknown"), "a track download failed");
+            }
 
             drop(permit);
             Self::finish_track(&inner_rc, &server_id, &item_id, outcome);

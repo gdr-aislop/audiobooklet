@@ -37,7 +37,7 @@ use sqlx::SqlitePool;
 use abs_storage::models::{Account, Server};
 
 use crate::downloads::DownloadManager;
-use crate::i18n::{ntr_args, tr, tr_args};
+use crate::i18n::{ntr, ntr_args, tr, tr_args};
 use crate::widgets::cover_image::CoverImage;
 use crate::widgets::download_scope_menu;
 use crate::widgets::item_options_menu;
@@ -52,6 +52,8 @@ pub struct ItemDetailScreen {
 pub struct TestHooks {
     pub back_button: gtk4::Button,
     pub title_label: gtk4::Label,
+    pub subtitle_label: gtk4::Label,
+    pub facts_label: gtk4::Label,
     pub author_label: gtk4::Label,
     pub series_button: gtk4::Button,
     pub series_button_label: gtk4::Label,
@@ -172,6 +174,8 @@ pub fn build(
     // header's last button — `can_focus(false)` keeps GTK from asking the label at all.
     title_label.set_focusable(false);
     title_label.set_can_focus(false);
+    // The subtitle, when the server has one, in the same clamped, wrapping style as the title.
+    let subtitle_label = gtk4::Label::builder().wrap(true).wrap_mode(gtk4::pango::WrapMode::WordChar).max_width_chars(1).justify(gtk4::Justification::Center).css_classes(["heading"]).margin_top(2).visible(false).build();
     let author_label = gtk4::Label::builder().wrap(true).wrap_mode(gtk4::pango::WrapMode::WordChar).max_width_chars(1).justify(gtk4::Justification::Center).css_classes(["dim-label"]).margin_top(4).visible(false).build();
     // One widget, whose *text* changes in place from the plain series name (Pass 1, local) to
     // "Name, N/M" (Pass 2, once the network call resolves) — never swapped for a different widget
@@ -182,6 +186,21 @@ pub fn build(
     let series_button_label = gtk4::Label::builder().max_width_chars(1).ellipsize(gtk4::pango::EllipsizeMode::End).build();
     series_button.set_child(Some(&series_button_label));
     let duration_label = gtk4::Label::builder().css_classes(["caption", "dim-label"]).margin_top(4).build();
+    // Year, publisher, language, explicit, ISBN/ASIN and tags, small and dim under the description;
+    // hidden when the server sent none of them. Clamped like every server-controlled label here.
+    let facts_label = gtk4::Label::builder()
+        .wrap(true)
+        .wrap_mode(gtk4::pango::WrapMode::WordChar)
+        .max_width_chars(1)
+        .justify(gtk4::Justification::Center)
+        .css_classes(["caption", "dim-label"])
+        .margin_top(12)
+        .selectable(true)
+        .visible(false)
+        .build();
+    // Selectable so an ISBN can be copied, but never focusable (see `title_label`).
+    facts_label.set_focusable(false);
+    facts_label.set_can_focus(false);
 
     let progress_bar = gtk4::ProgressBar::builder().margin_top(10).visible(false).build();
     crate::a11y::name(&progress_bar, &tr("Progress"));
@@ -271,12 +290,14 @@ pub fn build(
     let content = gtk4::Box::builder().orientation(gtk4::Orientation::Vertical).margin_start(20).margin_end(20).margin_bottom(24).build();
     content.append(cover.widget());
     content.append(&title_label);
+    content.append(&subtitle_label);
     content.append(&author_label);
     content.append(&series_button);
     content.append(&duration_label);
     content.append(&progress_bar);
     content.append(&actions_row);
     content.append(&description_section);
+    content.append(&facts_label);
     content.append(&chapters_section);
 
     let scroller = gtk4::ScrolledWindow::builder().hscrollbar_policy(gtk4::PolicyType::Never).vexpand(true).child(&content).build();
@@ -464,6 +485,8 @@ pub fn build(
     glib::spawn_future_local({
         let pool = pool.clone();
         let title_label = title_label.clone();
+        let subtitle_label = subtitle_label.clone();
+        let facts_label = facts_label.clone();
         let author_label = author_label.clone();
         let series_button = series_button.clone();
         let series_button_label = series_button_label.clone();
@@ -497,6 +520,9 @@ pub fn build(
             // if the item somehow isn't cached (shouldn't happen: a card is only tappable once
             // its item is synced), rather than leaving the page blank.
             let item = abs_storage::repo::items::get(&pool, &server_id, &item_id).await.ok();
+            // What the library list carried beyond the basics (all optional, all local). Read here,
+            // before anything is painted, so the page still appears in one go.
+            let extras = abs_storage::repo::items::get_extras(&pool, &server_id, &item_id).await.unwrap_or_default();
             title_label.set_label(&crate::widgets::breakable(item.as_ref().map(|i| i.title.as_str()).unwrap_or(&item_id)));
             crate::a11y::name(&window_title, item.as_ref().map(|i| i.title.as_str()).unwrap_or(&item_id));
             if let Some(item) = &item {
@@ -524,7 +550,23 @@ pub fn build(
                         move |_| on_open_series(series_name.clone())
                     });
                 }
-                duration_label.set_label(&format_duration(item.duration_seconds));
+                if let Some(subtitle) = extras.subtitle.as_deref().filter(|subtitle| !subtitle.trim().is_empty()) {
+                    subtitle_label.set_label(&crate::widgets::breakable(subtitle));
+                    subtitle_label.set_visible(true);
+                }
+                let duration_text = match extras.num_chapters.filter(|count| *count > 0).and_then(|count| u32::try_from(count).ok()) {
+                    Some(count) => {
+                        // TRANSLATORS: {duration} is a length such as "11.8h", {chapters} a count such as "19 chapters".
+                        tr_args("{duration} · {chapters}", &[("duration", &format_duration(item.duration_seconds)), ("chapters", &ntr("{count} chapter", "{count} chapters", count))])
+                    }
+                    None => format_duration(item.duration_seconds),
+                };
+                duration_label.set_label(&duration_text);
+                let facts = book_facts(&extras);
+                if !facts.is_empty() {
+                    facts_label.set_label(&facts);
+                    facts_label.set_visible(true);
+                }
                 let about: Vec<String> = [author_label.label().to_string(), series_button_label.label().to_string(), format_duration(item.duration_seconds)]
                     .into_iter()
                     .filter(|part| !part.is_empty())
@@ -648,9 +690,15 @@ pub fn build(
                                 let server_id = server_id.clone();
                                 let item_id = item_id.clone();
                                 let tracks = target.tracks.clone();
+                                let file_facts = target.file_facts.clone();
                                 let download_menu = download_menu.clone();
                                 async move {
-                                    match abs_core::tracks::cache_missing_tracks(&pool, &server_id, &item_id, &tracks).await {
+                                    let saved = abs_core::tracks::cache_missing_tracks(&pool, &server_id, &item_id, &tracks).await;
+                                    let saved = match saved {
+                                        Ok(()) => abs_core::tracks::fill_file_facts(&pool, &server_id, &item_id, &file_facts).await,
+                                        Err(err) => Err(err),
+                                    };
+                                    match saved {
                                         Ok(()) => download_menu.refresh(),
                                         Err(err) => tracing::warn!(%err, item_id = %item_id, "couldn't cache the item's tracks locally"),
                                     }
@@ -728,6 +776,8 @@ pub fn build(
             cover: cover.clone(),
             back_button,
             title_label,
+            subtitle_label,
+            facts_label,
             author_label,
             series_button,
             series_button_label,
@@ -756,6 +806,38 @@ pub fn build(
 /// two filled it in.
 fn current_chapter_index_for(chapter_ranges: &[(f64, f64)], progress_seconds: f64) -> usize {
     chapter_ranges.iter().position(|(start, end)| *start <= progress_seconds && progress_seconds < *end).unwrap_or(0)
+}
+
+/// The small print under the description: "1937 · Allen & Unwin · English · Explicit · ISBN … ·
+/// ASIN …", then the tags on their own line. Empty when the server sent none of it.
+fn book_facts(extras: &abs_storage::models::ItemExtras) -> String {
+    let mut parts: Vec<String> = Vec::new();
+    for text in [&extras.published_year, &extras.publisher, &extras.language].into_iter().flatten() {
+        if !text.trim().is_empty() {
+            parts.push(text.trim().to_string());
+        }
+    }
+    if extras.explicit == Some(true) {
+        parts.push(tr("Explicit"));
+    }
+    if let Some(isbn) = extras.isbn.as_deref().filter(|isbn| !isbn.trim().is_empty()) {
+        // TRANSLATORS: {isbn} is a book's ISBN number.
+        parts.push(tr_args("ISBN {isbn}", &[("isbn", isbn.trim())]));
+    }
+    if let Some(asin) = extras.asin.as_deref().filter(|asin| !asin.trim().is_empty()) {
+        // TRANSLATORS: {asin} is a book's Amazon ASIN identifier.
+        parts.push(tr_args("ASIN {asin}", &[("asin", asin.trim())]));
+    }
+    let mut text = parts.join(" · ");
+    let tags: Vec<String> = extras.tags().into_iter().filter(|tag| !tag.trim().is_empty()).collect();
+    if !tags.is_empty() {
+        if !text.is_empty() {
+            text.push('\n');
+        }
+        // TRANSLATORS: {tags} is a comma-separated list of the labels a book carries, e.g. "classic, fantasy".
+        text.push_str(&tr_args("Tags: {tags}", &[("tags", &tags.join(", "))]));
+    }
+    text
 }
 
 /// Rebuilds `chapters_list`'s rows from scratch — the "currently playing" heading and the
@@ -1147,6 +1229,80 @@ pub(crate) mod tests {
             assert!(offset == 0.0, "the legend's checkmark is {offset}px to the right of the rows' checkmarks");
         }
         window.close();
+    }
+
+    /// Not a `#[test]` itself — see `main.rs`'s `mod tests`. What the library list carried beyond
+    /// the basics shows on the page, from the local cache, and a book with none of it looks as it
+    /// always did; long values stay inside a 360 px phone.
+    pub(crate) fn run_shows_the_subtitle_facts_and_chapter_count(runtime: &tokio::runtime::Runtime) {
+        let mock_server = runtime.block_on(MockServer::start());
+        runtime.block_on(mock_item_with_chapters(&mock_server, "item-1", 3600.0, &[("Intro", 0.0, 60.0), ("Chapter One", 60.0, 3600.0)]));
+        runtime.block_on(mock_item_with_chapters(&mock_server, "item-2", 3600.0, &[("Intro", 0.0, 60.0)]));
+        let pool = runtime.block_on(crate::test_support::pool());
+        let (server, account) = runtime.block_on(account_and_server(&pool, &mock_server.uri()));
+        runtime.block_on(insert_synced_item(&pool, &server.id, "item-1", "The Hobbit", Some("J.R.R. Tolkien"), None, Some("A hobbit."), 3600.0));
+        runtime.block_on(insert_synced_item(&pool, &server.id, "item-2", "Plain Book", Some("Someone"), None, None, 3600.0));
+        runtime
+            .block_on(abs_storage::repo::items::set_extras(
+                &pool,
+                &server.id,
+                "item-1",
+                &abs_storage::models::ItemExtras {
+                    subtitle: Some("There.and.Back.Again.A.Hobbits.Holiday.Written.By.Himself".to_string()),
+                    num_chapters: Some(19),
+                    tags_json: serde_json::to_string(&["classic", "fantasy"]).unwrap(),
+                    published_year: Some("1937".to_string()),
+                    publisher: Some("Allen & Unwin".to_string()),
+                    language: Some("English".to_string()),
+                    explicit: Some(true),
+                    isbn: Some("9780261102217".to_string()),
+                    asin: Some("B007978NPG".to_string()),
+                    ..Default::default()
+                },
+            ))
+            .unwrap();
+
+        let open = |item_id: &str| {
+            let session = abs_core::auth::Session::new(pool.clone(), &server, &account);
+            let screen = build(pool.clone(), server.clone(), account.clone(), session, test_download_manager(pool.clone()), test_controller(pool.clone()), item_id.to_string(), |_, _| {}, || {}, || {}, |_| {}, || {});
+            let window = gtk4::Window::builder().child(&screen.root).default_width(360).default_height(720).build();
+            window.present();
+            (screen, window)
+        };
+
+        let (screen, window) = open("item-1");
+        let hooks = screen.test_hooks();
+        pump_until(|| hooks.title_label.label() == "The Hobbit" && hooks.facts_label.is_visible(), Duration::from_secs(5));
+        assert!(hooks.subtitle_label.is_visible());
+        assert_eq!(hooks.subtitle_label.label().replace('\u{200b}', ""), "There.and.Back.Again.A.Hobbits.Holiday.Written.By.Himself");
+        assert_eq!(hooks.duration_label.label(), "1.0h · 19 chapters");
+        assert_eq!(
+            hooks.facts_label.label(),
+            "1937 · Allen & Unwin · English · Explicit · ISBN 9780261102217 · ASIN B007978NPG\nTags: classic, fantasy"
+        );
+        pump_until(|| hooks.chapters_list.row_at_index(1).is_some(), Duration::from_secs(10));
+        let (min_width, ..) = screen.root.measure(gtk4::Orientation::Horizontal, -1);
+        assert!(min_width <= 360, "the page needs {min_width}px of width, wider than a 360px phone");
+        window.close();
+
+        // Nothing sent: nothing shown, and the duration reads as before.
+        let (screen, window) = open("item-2");
+        let hooks = screen.test_hooks();
+        pump_until(|| hooks.title_label.label() == "Plain Book", Duration::from_secs(5));
+        pump_until(|| hooks.chapters_list.row_at_index(0).is_some(), Duration::from_secs(10));
+        assert!(!hooks.subtitle_label.is_visible() && !hooks.facts_label.is_visible());
+        assert_eq!(hooks.duration_label.label(), "1.0h");
+        window.close();
+    }
+
+    #[test]
+    fn book_facts_shows_only_what_there_is() {
+        use abs_storage::models::ItemExtras;
+        assert_eq!(book_facts(&ItemExtras::default()), "");
+        assert_eq!(book_facts(&ItemExtras { tags_json: "[]".into(), published_year: Some(" ".into()), isbn: Some("".into()), ..Default::default() }), "");
+        assert_eq!(book_facts(&ItemExtras { tags_json: "[\"a\", \" \"]".into(), ..Default::default() }), "Tags: a");
+        assert_eq!(book_facts(&ItemExtras { explicit: Some(false), publisher: Some("Tor".into()), ..Default::default() }), "Tor");
+        assert_eq!(book_facts(&ItemExtras { explicit: Some(true), tags_json: "not json".into(), ..Default::default() }), "Explicit", "bad stored tags are no tags");
     }
 
     /// Not a `#[test]` itself — see `main.rs`'s `mod tests`. A title or author taken from a folder
@@ -1908,7 +2064,7 @@ pub(crate) mod tests {
             .respond_with(
                 ResponseTemplate::new(200)
                     .set_body_json(serde_json::json!({
-                        "media": { "audioFiles": [{ "ino": "1", "duration": seconds, "metadata": { "size": size_bytes } }], "chapters": chapters_json }
+                        "media": { "audioFiles": [{ "ino": "1", "duration": seconds, "codec": "mp3", "mimeType": "audio/mpeg", "bitRate": 64000, "channels": 2, "metadata": { "size": size_bytes } }], "chapters": chapters_json }
                     }))
                     .set_delay(delay),
             )
@@ -1978,6 +2134,8 @@ pub(crate) mod tests {
         assert!(hooks.chapters_list.row_at_index(2).is_some());
         let cached = runtime.block_on(abs_core::tracks::cached_tracks(&pool, &server.id, "item-1")).unwrap();
         assert_eq!(cached.iter().map(|t| (t.ino.as_str(), t.size_bytes)).collect::<Vec<_>>(), [("1", Some(340_000_000))]);
+        pump_until(|| runtime.block_on(abs_core::tracks::describe_file(&pool, &server.id, "item-1", "1")).is_some(), Duration::from_secs(3));
+        assert_eq!(runtime.block_on(abs_core::tracks::describe_file(&pool, &server.id, "item-1", "1")).as_deref(), Some("mp3, audio/mpeg, 64 kbps, 2 ch"));
         window.destroy();
     }
 
