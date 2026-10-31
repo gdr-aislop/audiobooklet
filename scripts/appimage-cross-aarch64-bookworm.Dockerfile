@@ -14,7 +14,7 @@ ENV DEBIAN_FRONTEND=noninteractive
 # gobject-introspection:arm64 (needs python3:arm64, not co-installable with the amd64
 # python3). Nothing here needs GObject introspection, so satisfy those dependencies with
 # empty arm64 stub packages (equivs) at the exact candidate version.
-ARG GIR_STUBS="gir1.2-gtk-4.0 gir1.2-adw-1 gir1.2-gstreamer-1.0 gir1.2-gst-plugins-base-1.0 gir1.2-gdkpixbuf-2.0"
+ARG GIR_STUBS="libgirepository1.0-dev gir1.2-gtk-4.0 gir1.2-adw-1 gir1.2-gstreamer-1.0 gir1.2-gst-plugins-base-1.0 gir1.2-gdkpixbuf-2.0"
 RUN dpkg --add-architecture arm64 && apt-get update && apt-get install -y --no-install-recommends \
         build-essential pkg-config git curl ca-certificates file equivs \
         gcc-aarch64-linux-gnu libc6-dev-arm64-cross libglib2.0-dev-bin \
