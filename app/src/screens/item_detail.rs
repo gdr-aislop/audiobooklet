@@ -251,9 +251,13 @@ pub fn build(
     // Chapters (ui-spec: `AdwActionRow`s, tap to seek) — populated once chapters resolve (see
     // below); a "downloaded" legend sits in the section header (ID-15) so the offline glyph's
     // meaning doesn't need to be inferred from a single unlabeled icon.
-    let chapters_legend = gtk4::Box::builder().orientation(gtk4::Orientation::Horizontal).spacing(4).margin_bottom(4).build();
-    chapters_legend.append(&gtk4::Image::builder().icon_name("object-select-symbolic").css_classes(["dim-label"]).build());
+    // Right-aligned, text first, so its checkmark sits over the rows' own checkmarks (the rows'
+    // right-hand suffix), allowing for the little padding a row keeps at its end (checked by
+    // `run_the_downloaded_legend_sits_over_the_row_checkmarks`).
+    let chapters_legend =
+        gtk4::Box::builder().orientation(gtk4::Orientation::Horizontal).spacing(4).margin_bottom(4).margin_end(3).halign(gtk4::Align::End).build();
     chapters_legend.append(&gtk4::Label::builder().label(tr("downloaded")).css_classes(["caption", "dim-label"]).build());
+    chapters_legend.append(&gtk4::Image::builder().icon_name("object-select-symbolic").css_classes(["dim-label"]).build());
     let chapters_list = gtk4::ListBox::builder().selection_mode(gtk4::SelectionMode::None).css_classes(["boxed-list"]).build();
     // One Tab stop for the whole list (a long book has dozens of chapters); Up/Down move inside.
     crate::a11y::focus_group(&chapters_list);
@@ -1078,6 +1082,52 @@ pub(crate) mod tests {
             )
             .mount(mock_server)
             .await;
+    }
+
+    /// Not a `#[test]` itself — see `main.rs`'s `mod tests`. The "downloaded" legend above the
+    /// chapter list sits at the right, its checkmark over the checkmarks the rows carry.
+    pub(crate) fn run_the_downloaded_legend_sits_over_the_row_checkmarks(runtime: &tokio::runtime::Runtime) {
+        fn checkmarks(widget: &gtk4::Widget, found: &mut Vec<gtk4::Image>) {
+            if let Some(image) = widget.downcast_ref::<gtk4::Image>() {
+                if image.icon_name().as_deref() == Some("object-select-symbolic") {
+                    found.push(image.clone());
+                }
+            }
+            let mut child = widget.first_child();
+            while let Some(c) = child {
+                checkmarks(&c, found);
+                child = c.next_sibling();
+            }
+        }
+        let mock_server = runtime.block_on(MockServer::start());
+        runtime.block_on(mock_item_with_chapters(&mock_server, "item-1", 3600.0, &[("Intro", 0.0, 60.0), ("Chapter One", 60.0, 1800.0)]));
+        let pool = runtime.block_on(crate::test_support::pool());
+        let (server, account) = runtime.block_on(account_and_server(&pool, &mock_server.uri()));
+        runtime.block_on(insert_synced_item(&pool, &server.id, "item-1", "Project Hail Mary", Some("Andy Weir"), None, None, 3600.0));
+        let session = abs_core::auth::Session::new(pool.clone(), &server, &account);
+        let screen = build(pool.clone(), server, account, session, test_download_manager(pool.clone()), test_controller(pool.clone()), "item-1".to_string(), |_, _| {}, || {}, || {}, |_| {}, || {});
+        let hooks = screen.test_hooks();
+        let window = gtk4::Window::builder().child(&screen.root).default_width(360).default_height(720).build();
+        window.present();
+        pump_until(|| hooks.chapters_list.row_at_index(1).is_some(), Duration::from_secs(10));
+
+        let chapters = vec![("Intro".to_string(), 0.0, 60.0), ("Chapter One".to_string(), 60.0, 1800.0)];
+        let on_play: Rc<dyn Fn(String, Option<usize>)> = Rc::new(|_, _| {});
+        refresh_chapter_rows(&hooks.chapters_list, &chapters, 0.0, &[true, true], &on_play, "item-1");
+        pump_until(|| false, Duration::from_millis(400));
+
+        let mut found = Vec::new();
+        checkmarks(screen.root.upcast_ref(), &mut found);
+        let centre = |image: &gtk4::Image| image.compute_bounds(&window).map(|r| r.x() + r.width() / 2.0).expect("a laid-out checkmark");
+        let (rows, legend): (Vec<_>, Vec<_>) = found.iter().partition(|image| image.is_ancestor(&hooks.chapters_list));
+        assert_eq!((legend.len(), rows.len()), (1, 2), "one legend checkmark and one per downloaded row");
+        assert!(centre(legend[0]) > 180.0, "the legend is on the right half of the 360px screen");
+        for row in rows {
+            let offset = centre(legend[0]) - centre(row);
+            let offset = if offset.abs() <= 3.0 { 0.0 } else { offset };
+            assert!(offset == 0.0, "the legend's checkmark is {offset}px to the right of the rows' checkmarks");
+        }
+        window.close();
     }
 
     /// Not a `#[test]` itself — see `main.rs`'s `mod tests`. A title or author taken from a folder
