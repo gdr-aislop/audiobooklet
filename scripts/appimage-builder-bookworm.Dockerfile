@@ -22,7 +22,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         glib-networking dconf-gsettings-backend gsettings-desktop-schemas \
         librsvg2-common librsvg2-bin adwaita-icon-theme \
         gstreamer1.0-plugins-base gstreamer1.0-plugins-good \
-        gstreamer1.0-libav gstreamer1.0-pulseaudio \
+        gstreamer1.0-libav gstreamer1.0-pulseaudio gstreamer1.0-tools \
         libsoup-3.0-0 \
     && rm -rf /var/lib/apt/lists/*
 

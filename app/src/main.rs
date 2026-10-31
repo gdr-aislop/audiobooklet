@@ -117,9 +117,6 @@ fn main() -> adw::glib::ExitCode {
     // exercises this file's setup.
     let runtime = tokio::runtime::Runtime::new().expect("build the Tokio runtime");
     let _runtime_guard = runtime.enter();
-    // GStreamer loads its plugin registry on its own thread while the database opens and GTK
-    // starts; the player waits for it (`gst_ready::wait`), nothing else needs it.
-    gst_ready::start();
     // Every failure opening the app's data is shown in a window (`startup`), not a silent exit.
     let opened = match early_dirs {
         Err(err) => Err(startup::StartupProblem::from_io(&err, &paths.logs_dir())),
@@ -144,11 +141,23 @@ fn main() -> adw::glib::ExitCode {
             application::build_problem_application(problem, Some(paths))
         }
     };
+    // GStreamer loads its plugin registry on its own thread while GTK starts and the window is
+    // built; the player waits for it (`gst_ready::wait`), nothing else needs it. Started only here,
+    // after the last `i18n::init` (it sets LANGUAGE and the locale): GStreamer and its plugins read
+    // the environment from C, which a concurrent `setenv` would race.
+    gst_ready::start();
     perf::milestone("starting the GTK application");
     let exit_code = app.run();
     // While thread-local storage is still intact: the shell's teardown (the player retiring)
     // must not run inside `exit()`'s thread-local destructors.
     application::release_main_window();
+    // `exit()` runs destructors while any thread still inside GStreamer's initialisation would be
+    // using what they free (quitting within the first seconds), so it is let finish first; and a
+    // lookup stuck in the resolver must not hold the quit up.
+    gst_ready::wait_blocking(std::time::Duration::from_secs(3));
+    // Dropping the runtime would wait for every blocking task, a stuck name lookup included.
+    drop(_runtime_guard);
+    runtime.shutdown_timeout(std::time::Duration::from_millis(500));
     log_handle.flush();
     exit_code
 }
@@ -175,6 +184,19 @@ fn main() -> adw::glib::ExitCode {
 /// GTK init on a second thread; they exist to be picked one-per-process by the driver or by hand.)
 #[cfg(test)]
 mod tests {
+    /// GStreamer's thread reads the environment from C; `i18n::init` writes it (`setenv`,
+    /// `setlocale`). They must not overlap, so the thread starts only after the last `i18n::init`
+    /// call in `main` — this keeps a later edit from moving it back above the database open.
+    #[test]
+    fn gstreamer_starts_after_the_last_language_init_in_main() {
+        let source = include_str!("main.rs");
+        let main_body = &source[source.find("fn main()").unwrap()..source.find("mod tests {").unwrap()];
+        let start = main_body.find("gst_ready::start();").expect("main starts GStreamer");
+        let last_init = main_body.rfind("i18n::init(").expect("main inits the language on the problem path");
+        assert!(last_init < start, "gst_ready::start() must come after every i18n::init in main");
+        assert_eq!(main_body.matches("gst_ready::start();").count(), 1);
+    }
+
     /// Boots one scenario in "a process that owns GTK": init, then a shared Tokio runtime whose
     /// thread-local guard must outlive the scenario (see `main`'s runtime-guard comment — same
     /// requirement, same failure mode if dropped early: sqlx/reqwest calls made from
@@ -451,6 +473,9 @@ mod tests {
         (player_screen_reset_progress_button_resets_position_and_seeks, crate::screens::player::tests::run_reset_progress_button_resets_position_and_seeks),
         (cover_image_rendering, crate::widgets::cover_image::tests::run),
         (cover_image_decodes_at_the_requested_size_not_the_source_size, crate::widgets::cover_image::tests::run_decodes_at_the_requested_size_not_the_source_size),
+        (cover_image_cache_counts_hits_misses_evictions_and_redecodes, crate::widgets::cover_image::tests::run_cache_counts_hits_misses_evictions_and_redecodes),
+        (item_detail_play_and_chapters_wait_for_the_audio_to_be_ready, crate::screens::item_detail::tests::run_play_and_chapters_wait_for_the_audio_to_be_ready),
+        (player_replace_backend_swaps_when_idle_and_refuses_while_something_is_loaded, crate::player::tests::run_replace_backend_swaps_when_idle_and_refuses_while_something_is_loaded),
         (cover_image_cache_hit_avoids_re_reading_disk, crate::widgets::cover_image::tests::run_cache_hit_avoids_re_reading_disk),
         (cover_image_low_memory_mode_turns_covers_off_and_back_on, crate::widgets::cover_image::tests::run_low_memory_mode_turns_covers_off_and_back_on),
         (low_memory_mode_state_notifies_and_persists, crate::low_memory_mode::tests::run_low_memory_mode_state_notifies_and_persists),

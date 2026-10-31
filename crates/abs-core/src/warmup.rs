@@ -95,8 +95,8 @@ where
             };
             let took_ms = started.elapsed().as_millis() as u64;
             match outcome {
-                Ok(addresses) => tracing::info!(target = target.label(), took_ms, addresses, "dns warm-up"),
-                Err(reason) => tracing::info!(target = target.label(), took_ms, %reason, "dns warm-up failed"),
+                Ok(addresses) => tracing::info!(address = target.label(), took_ms, addresses, "dns warm-up"),
+                Err(reason) => tracing::info!(address = target.label(), took_ms, %reason, "dns warm-up failed"),
             }
         }
     });
@@ -233,6 +233,34 @@ mod tests {
         let logged = String::from_utf8(buffer.0.lock().unwrap().clone()).unwrap();
         assert!(logged.contains("dns warm-up"), "{logged}");
         assert!(logged.contains("remote") && logged.contains("local"), "{logged}");
+        assert!(!logged.contains("secret"), "{logged}");
+    }
+
+    /// The real resolver's own error text must not name the host either (the fake above can't
+    /// show that). `.invalid` never resolves (RFC 6761), with or without a network.
+    #[tokio::test]
+    async fn the_real_resolvers_failure_text_carries_no_host_name() {
+        use std::io::Write;
+        #[derive(Clone, Default)]
+        struct Buffer(Arc<Mutex<Vec<u8>>>);
+        impl Write for Buffer {
+            fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+                self.0.lock().unwrap().extend_from_slice(bytes);
+                Ok(bytes.len())
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+        let buffer = Buffer::default();
+        let writer = buffer.clone();
+        let subscriber = tracing_subscriber::fmt().with_writer(move || writer.clone()).with_ansi(false).finish();
+        let (pool, id) = pool_with_server("https://secret-host.invalid", None).await;
+        let guard = tracing::subscriber::set_default(subscriber);
+        warm_dns(&pool, &id).await;
+        drop(guard);
+        let logged = String::from_utf8(buffer.0.lock().unwrap().clone()).unwrap();
+        assert!(logged.contains("dns warm-up"), "{logged}");
         assert!(!logged.contains("secret"), "{logged}");
     }
 }

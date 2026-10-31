@@ -117,6 +117,9 @@ struct SessionInner {
     /// connection it was made for, and so tests sharing a process can't leak verdicts to each
     /// other through a global cache.
     probe_cache: tokio::sync::Mutex<Option<CachedProbe>>,
+    /// Bumped by [`Session::forget_probe`]; a cached probe from an earlier count is not trusted,
+    /// including one still in flight when the network changed.
+    probe_epoch: std::sync::atomic::AtomicU64,
     /// The last `abs_api::Client` minted for this session, plus the exact `(ConnectionTarget,
     /// access token)` it was minted for — see [`Session::api_client`].
     client_cache: tokio::sync::Mutex<Option<CachedClient>>,
@@ -176,6 +179,8 @@ struct CachedProbe {
     address: String,
     reachable: bool,
     at: std::time::Instant,
+    /// [`Session::forget_probe`]'s count when the probe started; a later count makes it stale.
+    epoch: u64,
 }
 
 /// A minted `abs_api::Client`, tagged with exactly what it was minted for — comparing these two
@@ -213,6 +218,7 @@ impl Session {
                 }),
                 stored_token: std::sync::Mutex::new(account.token.clone()),
                 probe_cache: tokio::sync::Mutex::new(None),
+                probe_epoch: std::sync::atomic::AtomicU64::new(0),
                 client_cache: tokio::sync::Mutex::new(None),
                 offline: std::sync::atomic::AtomicBool::new(false),
                 keep_awake: std::sync::OnceLock::new(),
@@ -264,6 +270,14 @@ impl Session {
         self.inner.offline.store(offline, std::sync::atomic::Ordering::SeqCst);
     }
 
+    /// Drops the remembered local-address probe, so the next [`Session::connection_target`] probes
+    /// again. For when the network changed (Wi-Fi came back, another access point): a verdict
+    /// reached before that — "unreachable" while still connecting — would otherwise hold for up
+    /// to a minute.
+    pub fn forget_probe(&self) {
+        self.inner.probe_epoch.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    }
+
     pub fn is_offline(&self) -> bool {
         self.inner.offline.load(std::sync::atomic::Ordering::SeqCst)
     }
@@ -299,9 +313,10 @@ impl Session {
         };
 
         let mut cache = self.inner.probe_cache.lock().await;
+        let epoch = self.inner.probe_epoch.load(std::sync::atomic::Ordering::SeqCst);
         let cached_reachable = cache
             .as_ref()
-            .filter(|probe| probe.address == local_address && probe.at.elapsed() < PROBE_TTL)
+            .filter(|probe| probe.address == local_address && probe.epoch == epoch && probe.at.elapsed() < PROBE_TTL)
             .map(|probe| probe.reachable);
         let reachable = match cached_reachable {
             Some(reachable) => reachable,
@@ -309,7 +324,7 @@ impl Session {
                 // Holding the lock across the probe (a tokio mutex, so this is legal) makes
                 // concurrent callers wait for — and then reuse — one shared probe result.
                 let reachable = crate::connection::probe_reachable(&local_address).await;
-                *cache = Some(CachedProbe { address: local_address.clone(), reachable, at: std::time::Instant::now() });
+                *cache = Some(CachedProbe { address: local_address.clone(), reachable, at: std::time::Instant::now(), epoch });
                 reachable
             }
         };
@@ -775,6 +790,29 @@ mod tests {
 
         session.set_offline(false);
         assert!(session.connection_target().await.is_ok());
+    }
+
+    #[tokio::test]
+    async fn forgetting_the_probe_makes_the_next_connection_target_probe_again() {
+        let mock_server = MockServer::start().await;
+        let (pool, account, server_id) = pool_with_account(&mock_server.uri(), "token", None).await;
+        // A listener standing in for the server on the local network.
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let local = format!("http://{}", listener.local_addr().unwrap());
+        abs_storage::repo::servers::set_local_network_address(&pool, &server_id, Some(&local)).await.unwrap();
+        let session = session_for(&pool, &account).await;
+
+        let first = session.connection_target().await.unwrap();
+        assert!(first.base_url.starts_with(&local), "reachable: {}", first.base_url);
+
+        // The local server goes away; the cached verdict still holds...
+        drop(listener);
+        assert!(session.connection_target().await.unwrap().base_url.starts_with(&local), "cached for the TTL");
+
+        // ...until the network changes.
+        session.forget_probe();
+        let after = session.connection_target().await.unwrap();
+        assert!(after.base_url.starts_with(&mock_server.uri()), "probed again, now unreachable: {}", after.base_url);
     }
 
     #[tokio::test]
