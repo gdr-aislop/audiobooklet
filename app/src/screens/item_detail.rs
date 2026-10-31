@@ -1962,7 +1962,9 @@ pub(crate) mod tests {
         window.present();
         pump_until(|| window.is_mapped(), Duration::from_secs(5));
 
-        // Before the response: the placeholder, no estimates, and the page itself already shown.
+        // Before the response: the page itself is already shown (from the local cache), the menu
+        // has its placeholder and no estimates.
+        pump_until(|| hooks.title_label.label() == "Test Item", Duration::from_secs(2));
         hooks.download_popover.popup();
         pump_until(|| hooks.download_popover_box.first_child().is_some(), Duration::from_secs(2));
         assert!(any_label_reads(hooks.download_popover_box.upcast_ref(), "Loading chapters…"));
