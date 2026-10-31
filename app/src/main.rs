@@ -26,6 +26,7 @@ mod widgets;
 use adw::prelude::*;
 
 fn main() -> adw::glib::ExitCode {
+    perf::mark_process_start();
     // Checked before *everything* else, including `--version` — a real user never passes this
     // flag; it exists only so this same binary can re-exec itself as the crash-dump IPC server
     // (see `crash_reporting`'s module doc comment). The spawned server must never run `setup()`,
@@ -121,9 +122,12 @@ fn main() -> adw::glib::ExitCode {
         Ok(()) => runtime.block_on(startup::open(paths.clone())),
     };
 
+    perf::milestone("database opened");
+    let gstreamer_started = std::time::Instant::now();
     if let Err(err) = abs_player::init() {
         tracing::warn!(%err, "GStreamer failed to initialize; playback will be unavailable");
     }
+    tracing::info!(took_ms = gstreamer_started.elapsed().as_millis() as u64, "GStreamer initialised");
 
     let app = match opened {
         Ok(state) => application::build_application(state),
@@ -133,6 +137,7 @@ fn main() -> adw::glib::ExitCode {
             application::build_problem_application(problem, Some(paths))
         }
     };
+    perf::milestone("starting the GTK application");
     let exit_code = app.run();
     // While thread-local storage is still intact: the shell's teardown (the player retiring)
     // must not run inside `exit()`'s thread-local destructors.
@@ -271,6 +276,7 @@ mod tests {
         (item_detail_tab_walks_from_the_header_through_the_page, crate::screens::item_detail::tests::run_tab_walks_from_the_header_through_the_page),
         (item_detail_an_unspaced_title_and_author_fit_a_phone, crate::screens::item_detail::tests::run_an_unspaced_title_and_author_fit_a_phone),
         (item_detail_downloaded_legend_sits_over_the_row_checkmarks, crate::screens::item_detail::tests::run_the_downloaded_legend_sits_over_the_row_checkmarks),
+        (perf_the_frame_probe_sees_frames, crate::perf::tests::run_the_frame_probe_sees_frames),
         (item_detail_shows_the_subtitle_facts_and_chapter_count, crate::screens::item_detail::tests::run_shows_the_subtitle_facts_and_chapter_count),
         (item_detail_download_menu_gets_sizes_from_the_pages_own_request, crate::screens::item_detail::tests::run_download_menu_gets_sizes_from_the_pages_own_request),
         (item_detail_opening_a_downloaded_book_keeps_its_download_records, crate::screens::item_detail::tests::run_opening_a_downloaded_book_keeps_its_download_records),

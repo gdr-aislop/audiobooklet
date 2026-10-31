@@ -101,6 +101,7 @@ pub fn build_application(state: AppState) -> adw::Application {
         if present_existing_window(app) {
             return;
         }
+        crate::perf::milestone("application activated");
         build_window(app, &state);
         crate::perf::start_main_loop_watchdog();
     });
@@ -140,8 +141,10 @@ pub(crate) fn present_existing_window(app: &adw::Application) -> bool {
 
 fn build_window(app: &adw::Application, state: &AppState) {
     let window = new_window(app);
+    crate::perf::watch_frames(&window);
     open_in(&window, state);
     window.present();
+    crate::perf::milestone("main window presented");
 }
 
 fn new_window(app: &adw::Application) -> adw::ApplicationWindow {

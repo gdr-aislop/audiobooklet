@@ -114,6 +114,21 @@ pub async fn get_extras(pool: &SqlitePool, server_id: &str, id: &str) -> Result<
     .ok_or_else(|| StorageError::NotFound(format!("item {id} on server {server_id}")))
 }
 
+/// What the cover fetch needs to know about one item: the cached file's path, and whether the
+/// server's list said it has a cover at all.
+#[derive(Debug, Clone, PartialEq, Eq, sqlx::FromRow)]
+pub struct CoverState {
+    pub id: String,
+    pub cover_cache_path: Option<String>,
+    pub has_cover: Option<bool>,
+}
+
+/// [`CoverState`] of every item of a server, in one query. A cover batch used to read each item's
+/// whole row (descriptions included) one at a time just to learn this, 249 reads for 249 books.
+pub async fn cover_states_for_server(pool: &SqlitePool, server_id: &str) -> Result<Vec<CoverState>> {
+    Ok(sqlx::query_as("SELECT id, cover_cache_path, has_cover FROM items WHERE server_id = ?").bind(server_id).fetch_all(pool).await?)
+}
+
 /// A library's items that can be played: podcasts and e-book-only items (`has_audio = 0`) are
 /// left out, so no list in the app shows them.
 pub async fn list_for_library(pool: &SqlitePool, server_id: &str, library_id: &str) -> Result<Vec<Item>> {
@@ -389,5 +404,30 @@ mod tests {
         // An unknown item is not an error and not created.
         set_extras(&pool, &server_id, "nope", &extras).await.unwrap();
         assert!(matches!(get_extras(&pool, &server_id, "nope").await, Err(StorageError::NotFound(_))));
+    }
+
+    #[tokio::test]
+    async fn cover_states_come_back_for_every_item_of_the_server_in_one_read() {
+        let (pool, server_id, library_id) = pool_with_library().await;
+        for id in ["a", "b", "c"] {
+            upsert(&pool, item(&server_id, &library_id, id, "T")).await.unwrap();
+        }
+        set_cover_cache_path(&pool, &server_id, "a", Some("/covers/a.jpg")).await.unwrap();
+        set_extras(&pool, &server_id, "b", &ItemExtras { has_cover: Some(false), tags_json: "[]".into(), ..Default::default() }).await.unwrap();
+        // Another server's items are not included.
+        let other = servers::add(&pool, "https://b.example").await.unwrap();
+        libraries::upsert(&pool, libraries::UpsertLibrary { id: "lib-1", server_id: &other, name: "A", media_type: "book", icon: None, display_order: 1 }).await.unwrap();
+        upsert(&pool, item(&other, "lib-1", "z", "T")).await.unwrap();
+
+        let mut states = cover_states_for_server(&pool, &server_id).await.unwrap();
+        states.sort_by(|a, b| a.id.cmp(&b.id));
+        assert_eq!(
+            states,
+            [
+                CoverState { id: "a".into(), cover_cache_path: Some("/covers/a.jpg".into()), has_cover: None },
+                CoverState { id: "b".into(), cover_cache_path: None, has_cover: Some(false) },
+                CoverState { id: "c".into(), cover_cache_path: None, has_cover: None },
+            ]
+        );
     }
 }

@@ -63,7 +63,7 @@ pub async fn fetch_and_cache_cover(
     item_id: &str,
 ) -> Option<PathBuf> {
     let api = connection.api_client_with_timeout(access_token, COVER_FETCH_TIMEOUT).ok()?;
-    fetch_and_cache_cover_with(&api, paths, pool, server_id, item_id, Some(NO_COVER_RECHECK_AFTER)).await.0
+    fetch_and_cache_cover_with(&api, paths, pool, server_id, item_id, Some(NO_COVER_RECHECK_AFTER), CoverKnowledge::Lookup).await.0
 }
 
 /// Fetches covers for a whole batch of items over one shared HTTP client — one mint, one
@@ -106,10 +106,27 @@ async fn fetch_and_cache_covers_with_recheck(
         }
     };
 
+    // What is already known about every item, in one query: asking per item (the whole row, its
+    // description included) was about a second of a Library load on a phone, before any cover was
+    // even looked at. If the read fails, each item looks for itself as before.
+    let reading = std::time::Instant::now();
+    let states: Option<std::collections::HashMap<String, abs_storage::repo::items::CoverState>> = abs_storage::repo::items::cover_states_for_server(pool, server_id)
+        .await
+        .ok()
+        .map(|states| states.into_iter().map(|state| (state.id.clone(), state)).collect());
+    let state_read = reading.elapsed();
+    let states = &states;
+
     let outcomes: Vec<CoverOutcome> = futures::stream::iter(item_ids.into_iter().map(|item_id| {
         // Cheap `Client` clone (Arc'd internals) — every future shares the same pool.
         let api = api.clone();
-        async move { fetch_and_cache_cover_with(&api, paths, pool, server_id, &item_id, recheck_after).await.1 }
+        async move {
+            let known = match states {
+                Some(states) => CoverKnowledge::Prefetched(states.get(&item_id)),
+                None => CoverKnowledge::Lookup,
+            };
+            fetch_and_cache_cover_with(&api, paths, pool, server_id, &item_id, recheck_after, known).await.1
+        }
     }))
     .buffer_unordered(COVER_FETCH_CONCURRENCY)
     .collect()
@@ -117,9 +134,18 @@ async fn fetch_and_cache_covers_with_recheck(
     let count = |wanted: CoverOutcome| outcomes.iter().filter(|o| **o == wanted).count();
     let (fetched, no_cover, known_missing, failed) =
         (count(CoverOutcome::Fetched), count(CoverOutcome::NoCover), count(CoverOutcome::KnownMissing), count(CoverOutcome::Failed));
-    if fetched + no_cover + failed > 0 {
-        tracing::info!(fetched, without_cover = no_cover, known_without_cover = known_missing, failed, "covers fetched; items without a cover aren't asked about again for a day");
-    }
+    let cached = count(CoverOutcome::Cached);
+    tracing::info!(
+        items = outcomes.len(),
+        state_read_ms = state_read.as_millis() as u64,
+        total_ms = reading.elapsed().as_millis() as u64,
+        already_cached = cached,
+        fetched,
+        without_cover = no_cover,
+        known_without_cover = known_missing,
+        failed,
+        "covers checked; items without a cover aren't asked about again for a day"
+    );
 }
 
 /// The per-item work behind both entry points — everything after client minting, so a batch
@@ -134,14 +160,22 @@ async fn fetch_and_cache_cover_with(
     server_id: &str,
     item_id: &str,
     recheck_after: Option<Duration>,
+    known: CoverKnowledge<'_>,
 ) -> (Option<PathBuf>, CoverOutcome) {
-    if let Some(cached) = cached_cover_path(pool, server_id, item_id).await {
+    let cached = match known {
+        CoverKnowledge::Lookup => cached_cover_path(pool, server_id, item_id).await,
+        CoverKnowledge::Prefetched(state) => cached_path_if_present(state.and_then(|state| state.cover_cache_path.as_deref())).await,
+    };
+    if let Some(cached) = cached {
         return (Some(cached), CoverOutcome::Cached);
     }
     // What the library list said about this item's cover (`None`: it didn't, or an older server).
     // "No cover" costs no request at all, and "has one" overrides the memory of an earlier 404, so
     // a cover added on the server shows up at the next sync instead of up to a day later.
-    let server_says_cover = abs_storage::repo::items::get_extras(pool, server_id, item_id).await.ok().and_then(|extras| extras.has_cover);
+    let server_says_cover = match known {
+        CoverKnowledge::Lookup => abs_storage::repo::items::get_extras(pool, server_id, item_id).await.ok().and_then(|extras| extras.has_cover),
+        CoverKnowledge::Prefetched(state) => state.and_then(|state| state.has_cover),
+    };
     if server_says_cover == Some(false) {
         tracing::debug!(item_id, "the server's list says this item has no cover; not asking");
         return (None, CoverOutcome::KnownMissing);
@@ -288,9 +322,23 @@ pub async fn fetch_original_cover(
 /// `fetch_and_cache_cover_with` uses it as its cache hit.
 pub async fn cached_cover_path(pool: &SqlitePool, server_id: &str, item_id: &str) -> Option<PathBuf> {
     let item = abs_storage::repo::items::get(pool, server_id, item_id).await.ok()?;
-    let existing = Path::new(item.cover_cache_path.as_deref()?).to_path_buf();
+    cached_path_if_present(item.cover_cache_path.as_deref()).await
+}
+
+/// The recorded cover path if the file is still there (see [`cached_cover_path`]).
+async fn cached_path_if_present(recorded: Option<&str>) -> Option<PathBuf> {
+    let existing = Path::new(recorded?).to_path_buf();
     tokio::fs::metadata(&existing).await.ok()?;
     Some(existing)
+}
+
+/// How [`fetch_and_cache_cover_with`] learns what is already known about an item.
+#[derive(Clone, Copy)]
+enum CoverKnowledge<'a> {
+    /// Ask the database about this one item (a single cover: the player).
+    Lookup,
+    /// Already read for the whole batch in one query; `None`: the item isn't stored.
+    Prefetched(Option<&'a abs_storage::repo::items::CoverState>),
 }
 
 #[cfg(test)]
@@ -693,5 +741,35 @@ mod tests {
         set_has_cover(&pool, &server_id, "item-1", Some(true)).await;
         fetch_and_cache_covers(&paths, &pool, &connection, "token", &server_id, vec!["item-1".into()], false).await;
         assert!(cached_cover_path(&pool, &server_id, "item-1").await.is_some());
+    }
+
+    /// The batch reads what is known in one go, and must treat a recorded path whose file has gone
+    /// like no cover at all, serve a present one without any request, and not trip over an id the
+    /// database doesn't have.
+    #[tokio::test]
+    async fn a_batch_uses_the_prefetched_state_for_present_stale_and_unknown_items() {
+        let mock_server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api/items/stale/cover"))
+            .respond_with(ResponseTemplate::new(200).insert_header("Content-Type", "image/png").set_body_bytes(PNG_1X1.to_vec()))
+            .mount(&mock_server)
+            .await;
+        Mock::given(method("GET")).and(path("/api/items/unknown/cover")).respond_with(ResponseTemplate::new(404)).mount(&mock_server).await;
+        let (_tmp, paths) = test_paths();
+        let (pool, server_id) = pool_with_synced_items(&["present", "stale"]).await;
+        let present_file = paths.covers_dir().join(&server_id).join("present.png");
+        std::fs::create_dir_all(present_file.parent().unwrap()).unwrap();
+        std::fs::write(&present_file, PNG_1X1).unwrap();
+        items::set_cover_cache_path(&pool, &server_id, "present", Some(&present_file.to_string_lossy())).await.unwrap();
+        items::set_cover_cache_path(&pool, &server_id, "stale", Some("/no/such/cover.png")).await.unwrap();
+
+        fetch_and_cache_covers(&paths, &pool, &ConnectionTarget::direct(&mock_server.uri()), "token", &server_id, vec!["present".into(), "stale".into(), "unknown".into()], false).await;
+
+        let requests = mock_server.received_requests().await.unwrap();
+        let asked: Vec<&str> = requests.iter().map(|r| r.url.path()).collect();
+        assert!(!asked.contains(&"/api/items/present/cover"), "a present cached cover is served from disk: {asked:?}");
+        assert!(asked.contains(&"/api/items/stale/cover"), "a recorded path whose file is gone is fetched again: {asked:?}");
+        assert!(asked.contains(&"/api/items/unknown/cover"), "an id the database doesn't have is still handled: {asked:?}");
+        assert!(cached_cover_path(&pool, &server_id, "stale").await.is_some(), "and the new file is recorded");
     }
 }
