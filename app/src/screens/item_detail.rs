@@ -520,6 +520,9 @@ pub fn build(
             // if the item somehow isn't cached (shouldn't happen: a card is only tappable once
             // its item is synced), rather than leaving the page blank.
             let item = abs_storage::repo::items::get(&pool, &server_id, &item_id).await.ok();
+            // What the library list carried beyond the basics (all optional, all local). Read here,
+            // before anything is painted, so the page still appears in one go.
+            let extras = abs_storage::repo::items::get_extras(&pool, &server_id, &item_id).await.unwrap_or_default();
             title_label.set_label(&crate::widgets::breakable(item.as_ref().map(|i| i.title.as_str()).unwrap_or(&item_id)));
             crate::a11y::name(&window_title, item.as_ref().map(|i| i.title.as_str()).unwrap_or(&item_id));
             if let Some(item) = &item {
@@ -547,8 +550,6 @@ pub fn build(
                         move |_| on_open_series(series_name.clone())
                     });
                 }
-                // What the library list carried beyond the basics (all optional, all local).
-                let extras = abs_storage::repo::items::get_extras(&pool, &server_id, &item_id).await.unwrap_or_default();
                 if let Some(subtitle) = extras.subtitle.as_deref().filter(|subtitle| !subtitle.trim().is_empty()) {
                     subtitle_label.set_label(&crate::widgets::breakable(subtitle));
                     subtitle_label.set_visible(true);
