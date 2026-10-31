@@ -35,9 +35,12 @@ RUN dpkg --add-architecture arm64 && apt-get update && apt-get install -y --no-i
 ENV RUSTUP_HOME=/usr/local/rustup \
     CARGO_HOME=/usr/local/cargo \
     PATH=/usr/local/cargo/bin:$PATH
-RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
-        | sh -s -- -y --default-toolchain stable --profile minimal \
-        --target aarch64-unknown-linux-gnu
+# Download to a file first (not `curl | sh`) so a failed download fails the build instead of
+# silently producing an image without cargo.
+RUN curl --proto '=https' --tlsv1.2 -fsSL -o /tmp/rustup-init.sh https://sh.rustup.rs \
+    && sh /tmp/rustup-init.sh -y --default-toolchain stable --profile minimal \
+        --target aarch64-unknown-linux-gnu \
+    && rm /tmp/rustup-init.sh
 
 # Target-scoped, so build scripts and proc-macros (host) keep using the native toolchain.
 ENV CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER=aarch64-linux-gnu-gcc \
