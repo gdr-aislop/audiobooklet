@@ -4,7 +4,7 @@ version = 4
 
 [[package]]
 name = "abs-api"
-version = "0.9.12"
+version = "0.9.13"
 dependencies = [
  "chrono",
  "openapiv3",
@@ -24,7 +24,7 @@ dependencies = [
 
 [[package]]
 name = "abs-core"
-version = "0.9.12"
+version = "0.9.13"
 dependencies = [
  "abs-api",
  "abs-storage",
@@ -47,7 +47,7 @@ dependencies = [
 
 [[package]]
 name = "abs-player"
-version = "0.9.12"
+version = "0.9.13"
 dependencies = [
  "futures",
  "gio",
@@ -62,7 +62,7 @@ dependencies = [
 
 [[package]]
 name = "abs-storage"
-version = "0.9.12"
+version = "0.9.13"
 dependencies = [
  "chrono",
  "directories",
@@ -197,7 +197,7 @@ checksum = "1505bd5d3d116872e7271a6d4e16d81d0c8570876c8de68093a09ac269d8aac0"
 
 [[package]]
 name = "audiobooklet"
-version = "0.9.12"
+version = "0.9.13"
 dependencies = [
  "abs-api",
  "abs-core",
