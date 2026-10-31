@@ -238,7 +238,10 @@ pub fn build(
     window: adw::ApplicationWindow,
 ) -> MainWindow {
     let _slow = crate::perf::SlowJob::new("main window build");
+    let mut steps = crate::perf::Steps::new("main window build steps", "startup");
+    steps.step("backend_and_mini_bar");
     let mini_bar = player::build_mini_bar(pool.clone(), paths.clone(), player::real_backend());
+    steps.step("mpris");
 
     // MPRIS registration is best-effort — no session bus (a bare console, a locked-down sandbox)
     // must never be fatal to playback, so a failure here is just a warning. On success, the
@@ -273,6 +276,7 @@ pub fn build(
     // detail lives. `open_player` (built below) is threaded in once it exists.
     let last_toasted_error: Rc<RefCell<Option<abs_player::PlaybackErrorKind>>> = Rc::new(RefCell::new(None));
 
+    steps.step("call_watcher");
     // Phone-call interruption is best-effort in the same way: no system bus, or no ModemManager
     // on it, must never be fatal — it just means this feature is unavailable. The callback is
     // one line by design, like the route watcher's below: all the semantics (pause on ringing;
@@ -313,6 +317,7 @@ pub fn build(
     // first playback of this session already honors Settings → Playback's switch rather than
     // needing a Settings edit (which re-applies it) to take effect.
     mini_bar.controller.set_burst_buffering(playback_settings.burst_buffering);
+    steps.step("route_watcher");
     let route_watcher = match abs_player::route_watch::PulseRouteWatcher::new() {
         Ok(mut watcher) => {
             let controller = mini_bar.controller.clone();
@@ -329,6 +334,7 @@ pub fn build(
     // watching above: no system bus (or no NetworkManager on it) must never be fatal, it just
     // means a device that goes offline while paused/idle won't push its pending local position
     // until the user does something else that happens to trigger a sync.
+    steps.step("network_watchers");
     let connectivity_watcher = match abs_player::connectivity_watch::NetworkManagerConnectivityWatcher::new() {
         Ok(mut watcher) => {
             let controller = mini_bar.controller.clone();
@@ -424,6 +430,7 @@ pub fn build(
         }
     });
 
+    steps.step("tabs_and_rest");
     let stack = adw::ViewStack::new();
 
     let shell_box = gtk4::Box::new(gtk4::Orientation::Vertical, 0);
@@ -922,6 +929,7 @@ pub fn build(
     #[cfg(test)]
     let toast_overlay_hook = root.clone();
 
+    steps.finish("built", None);
     MainWindow {
         root: root.upcast(),
         _call_watcher: call_watcher,

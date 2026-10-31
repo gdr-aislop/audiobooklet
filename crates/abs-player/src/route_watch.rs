@@ -173,10 +173,9 @@ impl RouteClassifier {
 /// cross into the GLib main loop over a `futures` channel, whose receiving future runs there and
 /// invokes the caller's callback — keeping that callback free to hold non-`Send` GTK state.
 ///
-/// `new()` blocks briefly (bounded by `INIT_TIMEOUT`) waiting for the first connection to reach
-/// Ready — the same synchronous-connect shape `call_watch`'s `ModemManagerCallWatcher::new()`
-/// uses — and returns [`RouteWatchError::NoAudioServer`] when there is no audio server to reach
-/// (sandboxes, CI), so callers can warn and continue without headphone support. Once that first
+/// `new()` returns at once: the connection is made on the watcher's thread, which may take
+/// seconds, and `new()` runs on the main thread while the window is built. With no audio server to
+/// reach (sandboxes, CI) the thread logs that headphone support is off and ends. Once the first
 /// connection succeeded, the thread lives as long as the process: a lost connection is logged and
 /// re-established with backoff (see `RECONNECT_BACKOFF`), never silently given up on.
 pub struct PulseRouteWatcher {
@@ -191,9 +190,6 @@ pub struct PulseRouteWatcher {
 }
 
 type EventSender = std::sync::Arc<std::sync::Mutex<Option<futures::channel::mpsc::UnboundedSender<RouteEvent>>>>;
-
-/// How long `PulseRouteWatcher::new()` waits for the audio-server connection to reach Ready.
-const INIT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(3);
 
 /// Backoff between reconnection attempts after an established connection was lost: starts at
 /// the first value, doubles per failure up to the second, resets once a connection is Ready.
@@ -257,10 +253,12 @@ impl PulseRouteWatcher {
                     match watch_connection(&mut init_tx, &sender_for_thread, &mut backoff, &stop_for_thread) {
                         ConnectionEnd::Quit => return,
                         ConnectionEnd::Failed(reason) => {
-                            if let Some(tx) = init_tx.take() {
-                                // The very first connection never got going: `new()` reports it
-                                // and the feature is off for this run — nothing to retry into.
-                                let _ = tx.send(Err(RouteWatchError::NoAudioServer(reason)));
+                            if init_tx.take().is_some() {
+                                // The very first connection never got going: the feature is off
+                                // for this run — nothing to retry into. `new()` has returned long
+                                // since (it never waits for the connection), so this is where it
+                                // is said.
+                                tracing::warn!(%reason, "couldn't watch the audio server for headphone changes; unplug-pause will be unavailable");
                                 return;
                             }
                             tracing::warn!(%reason, retry_in_secs = backoff.as_secs(), "lost the audio-server connection; headphone watching will resume after reconnecting");
@@ -272,14 +270,12 @@ impl PulseRouteWatcher {
             })
             .map_err(|err| RouteWatchError::NoAudioServer(format!("couldn't spawn the watcher thread: {err}")))?;
 
-        match init_rx.recv_timeout(INIT_TIMEOUT) {
-            Ok(Ok(())) => Ok(Self { sender, stop }),
-            Ok(Err(err)) => Err(err),
-            Err(_) => Err(RouteWatchError::NoAudioServer(format!(
-                "the audio server didn't become ready within {}s",
-                INIT_TIMEOUT.as_secs()
-            ))),
-        }
+        // Not waited for: connecting to the audio server can take seconds (or fail after a
+        // timeout), and `new()` runs on the main thread while the window is being built. Events
+        // flow once the thread's connection is up; before that there is nothing to miss, since no
+        // player has started. A first connection that fails is logged by the thread.
+        drop(init_rx);
+        Ok(Self { sender, stop })
     }
 }
 
@@ -707,10 +703,19 @@ mod tests {
         }
     }
 
+    #[test]
+    fn new_returns_at_once_even_when_the_audio_server_is_unreachable() {
+        // The environment is process-wide, but no other test in this crate reads PULSE_SERVER.
+        std::env::set_var("PULSE_SERVER", "unix:/nonexistent/abs-test-pulse");
+        let started = std::time::Instant::now();
+        let watcher = PulseRouteWatcher::new().expect("the thread starts; the missing server is logged there");
+        assert!(started.elapsed() < std::time::Duration::from_millis(250), "new() waited {:?}", started.elapsed());
+        drop(watcher);
+    }
+
     /// Registers against a *real* audio server — only checkable when one is reachable. This
-    /// sandbox has no PulseAudio/PipeWire socket at all, so `PulseRouteWatcher::new()` correctly
-    /// returns `Err` rather than panicking — exactly the graceful-degradation path exercised for
-    /// real. Run explicitly via `cargo test -p abs-player -- --ignored route_watch::tests::new`
+    /// sandbox has no PulseAudio/PipeWire socket at all, so the watcher's thread logs that the
+    /// feature is off rather than panicking. Run explicitly via `cargo test -p abs-player -- --ignored route_watch::tests::new`
     /// once a running audio server is confirmed present.
     #[test]
     #[ignore]

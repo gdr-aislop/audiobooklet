@@ -22,5 +22,6 @@ pub mod settings;
 pub mod streaming;
 pub mod sync;
 pub mod tracks;
+pub mod warmup;
 
 pub use error::{CoreError, Result};

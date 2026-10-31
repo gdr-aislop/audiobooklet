@@ -25,6 +25,60 @@ pub fn init() -> Result<()> {
     Ok(())
 }
 
+/// GStreamer initialising on its own thread (see [`init_in_background`]).
+///
+/// `gst::init` loads the plugin registry and, when the cache is stale, scans every plugin: on the
+/// phone that has taken seconds, and nothing needs it until the player is built. Starting it
+/// before the database opens lets the two overlap. Cloning is cheap; every clone sees the same
+/// outcome.
+#[derive(Clone)]
+pub struct GstInit {
+    outcome: futures::future::Shared<futures::channel::oneshot::Receiver<std::result::Result<(), String>>>,
+    finished: std::sync::Arc<std::sync::atomic::AtomicBool>,
+}
+
+impl GstInit {
+    /// Resolves once initialisation has finished: `Err` carries the failure's text. Never blocks
+    /// the thread polling it, so a GLib main-loop future can await it.
+    pub async fn wait(&self) -> std::result::Result<(), String> {
+        match self.outcome.clone().await {
+            Ok(outcome) => outcome,
+            Err(_) => Err("the GStreamer initialisation thread ended without a result".to_string()),
+        }
+    }
+
+    pub fn is_finished(&self) -> bool {
+        self.finished.load(std::sync::atomic::Ordering::Acquire)
+    }
+}
+
+/// Starts `gst::init` on a thread named `abs-gst-init` and returns at once. `init` itself stays
+/// the synchronous way (tests, tools). `took` is called on that thread with how long it took.
+pub fn init_in_background(took: impl FnOnce(Duration, &std::result::Result<(), String>) + Send + 'static) -> GstInit {
+    init_in_background_with(|| init().map_err(|err| err.to_string()), took)
+}
+
+fn init_in_background_with(
+    work: impl FnOnce() -> std::result::Result<(), String> + Send + 'static,
+    took: impl FnOnce(Duration, &std::result::Result<(), String>) + Send + 'static,
+) -> GstInit {
+    let (sender, receiver) = futures::channel::oneshot::channel();
+    let finished = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let finished_for_thread = finished.clone();
+    let spawned = std::thread::Builder::new().name("abs-gst-init".into()).spawn(move || {
+        let started = std::time::Instant::now();
+        let outcome = work();
+        took(started.elapsed(), &outcome);
+        finished_for_thread.store(true, std::sync::atomic::Ordering::Release);
+        let _ = sender.send(outcome);
+    });
+    if let Err(err) = spawned {
+        // No thread to run on: the sender was dropped with the closure, so waiters see the failure.
+        tracing::warn!(%err, "couldn't start the GStreamer initialisation thread");
+    }
+    GstInit { outcome: futures::FutureExt::shared(receiver), finished }
+}
+
 /// A bus event a caller should react to: end of stream (advance to the next chapter, or stop)
 /// and pipeline errors (surface to the user, stop playback). Polled rather than delivered via
 /// callback so this stays simple to drive from a GLib main-loop idle source or a plain timer,
@@ -506,6 +560,45 @@ fn apply_stream_role_when_sink_is_ready(pipeline: &gst::Element) {
 mod tests {
     use super::*;
     use std::path::PathBuf;
+
+    #[test]
+    fn background_init_reports_ready_to_every_waiter_and_its_timing() {
+        let (took_tx, took_rx) = std::sync::mpsc::channel();
+        let init = init_in_background(move |took, outcome| {
+            let _ = took_tx.send((took, outcome.clone()));
+        });
+        futures::executor::block_on(async {
+            assert_eq!(init.wait().await, Ok(()));
+            // A second wait, and a clone's, answer at once with the same outcome.
+            assert_eq!(init.wait().await, Ok(()));
+            assert_eq!(init.clone().wait().await, Ok(()));
+        });
+        assert!(init.is_finished());
+        let (_, outcome) = took_rx.recv_timeout(Duration::from_secs(5)).expect("the timing callback ran");
+        assert_eq!(outcome, Ok(()));
+        // And GStreamer is really usable afterwards.
+        assert!(gst::ElementFactory::make("fakesink").build().is_ok());
+    }
+
+    #[test]
+    fn background_init_failure_reaches_the_waiter_and_a_wait_before_the_end_does_not_block() {
+        let (release_tx, release_rx) = std::sync::mpsc::channel::<()>();
+        let init = init_in_background_with(
+            move || {
+                let _ = release_rx.recv_timeout(Duration::from_secs(5));
+                Err("no plugins".to_string())
+            },
+            |_, _| {},
+        );
+        assert!(!init.is_finished(), "the work is gated, so it can't have finished");
+        // Polling once while it is pending returns Pending instead of blocking the thread.
+        let waiting = init.clone();
+        let mut future = Box::pin(async move { waiting.wait().await });
+        let pending = futures::executor::block_on(async { futures::poll!(&mut future).is_pending() });
+        assert!(pending);
+        release_tx.send(()).unwrap();
+        assert_eq!(futures::executor::block_on(future), Err("no plugins".to_string()));
+    }
 
     /// Write a short, silent WAV file and return its `file://` URI, so tests exercise a real
     /// GStreamer decode/demux pipeline without needing a network fetch or a bundled fixture.
