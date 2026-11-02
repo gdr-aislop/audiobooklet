@@ -52,6 +52,12 @@ const LOW_MEMORY_TEXTURE_BUDGET_BYTES: usize = 4 * 1024 * 1024;
 /// applying the same reasoning to concurrent track downloads.
 const MAX_CONCURRENT_COVER_DECODES: usize = 3;
 
+#[cfg(test)]
+thread_local! {
+    /// How many decodes actually started: tests tell a skipped one from a decoded one with it.
+    static DECODES_STARTED: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
 thread_local! {
     // `gdk::Texture` isn't `Send`, and GTK only ever runs on the main thread in this app, so a
     // `thread_local!` is the right tool here, not a `Mutex` — same reasoning already used
@@ -66,6 +72,8 @@ thread_local! {
     static DECODE_SEMAPHORE: Rc<tokio::sync::Semaphore> = Rc::new(tokio::sync::Semaphore::new(MAX_CONCURRENT_COVER_DECODES));
     /// What the covers decoding right now have cost so far; see [`DecodeBurst`].
     static DECODE_BURST: RefCell<DecodeBurst> = RefCell::new(DecodeBurst::default());
+    /// The `(path, size)` decodes running now, with the widgets queued behind each (see [`DecodeOwner`]).
+    static DECODING: RefCell<HashMap<(PathBuf, i32), Vec<Waiter>>> = RefCell::new(HashMap::new());
 }
 
 /// Where one cover decode spent its time, measured on the decode thread.
@@ -93,6 +101,8 @@ struct DecodeBurst {
     in_flight: usize,
     decoded: usize,
     failed: usize,
+    /// Asked for but not decoded: already decoded by then, or no longer wanted.
+    skipped: usize,
     read: Duration,
     decode: Duration,
     resize: Duration,
@@ -115,8 +125,11 @@ impl DecodeBurst {
 
     /// One decode ended (`None`: it failed). Returns the summary line when it was the last of the
     /// burst, and starts the next burst's tally.
-    fn finish_one(&mut self, result: Option<(DecodeTimings, Duration, i32)>, now: Instant) -> Option<String> {
+    fn finish_one(&mut self, result: Option<(DecodeTimings, Duration, i32)>, skipped: bool, now: Instant) -> Option<String> {
         self.in_flight = self.in_flight.saturating_sub(1);
+        if skipped {
+            self.skipped += 1;
+        }
         match result {
             Some((timings, main_thread, target)) => {
                 self.decoded += 1;
@@ -130,9 +143,10 @@ impl DecodeBurst {
                 }
                 self.largest_target = self.largest_target.max(target);
             }
+            None if skipped => {}
             None => self.failed += 1,
         }
-        if self.in_flight > 0 || self.decoded + self.failed == 0 {
+        if self.in_flight > 0 || self.decoded + self.failed + self.skipped == 0 {
             return None;
         }
         let wall = self.started.map(|started| now.saturating_duration_since(started)).unwrap_or_default();
@@ -143,9 +157,10 @@ impl DecodeBurst {
 
     fn line(&self, wall: Duration) -> String {
         format!(
-            "covers decoded count={} failed={} wall_ms={} read_ms={} decode_ms={} resize_ms={} main_thread_ms={} source_kb={} largest_source={}x{} target_px={} cache_hits_before={}",
+            "covers decoded count={} failed={} skipped={} wall_ms={} read_ms={} decode_ms={} resize_ms={} main_thread_ms={} source_kb={} largest_source={}x{} target_px={} cache_hits_before={}",
             self.decoded,
             self.failed,
+            self.skipped,
             wall.as_millis(),
             self.read.as_millis(),
             self.decode.as_millis(),
@@ -160,17 +175,73 @@ impl DecodeBurst {
     }
 }
 
+/// Logs, once, how far into startup the first cover appeared on screen (from a decode or from
+/// the cache): with the other startup milestones, how long covers took to show up.
+fn note_cover_shown() {
+    thread_local! {
+        static SHOWN: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    }
+    if !SHOWN.with(|shown| shown.replace(true)) {
+        crate::perf::milestone("first cover shown");
+    }
+}
+
+/// A widget waiting for a decode another widget's task is already running.
+struct Waiter {
+    picture: glib::WeakRef<gtk4::Picture>,
+    placeholder: glib::WeakRef<gtk4::Box>,
+    last_path: Rc<RefCell<Option<PathBuf>>>,
+}
+
+/// The decode task of one `(path, size)`: held while it runs, and on the way out (finished, failed
+/// or dropped) it answers whoever queued up behind it — the texture to those still wanting it, or,
+/// when there is none, a reset so that their next `set_path` tries again.
+struct DecodeOwner {
+    key: (PathBuf, i32),
+    texture: Option<gtk4::gdk::Texture>,
+}
+
+impl Drop for DecodeOwner {
+    fn drop(&mut self) {
+        let Ok(waiters) = DECODING.try_with(|decoding| decoding.borrow_mut().remove(&self.key)) else { return };
+        for waiter in waiters.unwrap_or_default() {
+            if waiter.last_path.borrow().as_deref() != Some(self.key.0.as_path()) {
+                continue;
+            }
+            match &self.texture {
+                Some(texture) => {
+                    if let (Some(picture), Some(placeholder)) = (waiter.picture.upgrade(), waiter.placeholder.upgrade()) {
+                        picture.set_paintable(Some(texture));
+                        picture.set_visible(true);
+                        placeholder.set_visible(false);
+                        note_cover_shown();
+                    }
+                }
+                None => {
+                    waiter.last_path.replace(None);
+                }
+            }
+        }
+    }
+}
+
 /// Counts one decode in flight; when dropped it reports how it ended and logs the burst's summary
 /// if it was the last. A guard so that no way out of the decode task (an error, a panic, the
 /// future being dropped) can leave the count too high.
 struct InFlightDecode {
     result: Option<(DecodeTimings, Duration, i32)>,
+    /// Ended without decoding: someone else decoded it meanwhile, or nobody wants it any more.
+    skipped: bool,
 }
 
 impl InFlightDecode {
     fn begin() -> Self {
         DECODE_BURST.with(|burst| burst.borrow_mut().start_one(Instant::now()));
-        Self { result: None }
+        Self { result: None, skipped: false }
+    }
+
+    fn skip(&mut self) {
+        self.skipped = true;
     }
 
     /// This decode succeeded; reported when the guard is dropped, at the end of the task.
@@ -181,7 +252,7 @@ impl InFlightDecode {
 
 impl Drop for InFlightDecode {
     fn drop(&mut self) {
-        let line = DECODE_BURST.with(|burst| burst.borrow_mut().finish_one(self.result.take(), Instant::now()));
+        let line = DECODE_BURST.with(|burst| burst.borrow_mut().finish_one(self.result.take(), self.skipped, Instant::now()));
         if let Some(line) = line {
             tracing::info!("{line}");
             tracing::info!("{} {}", TEXTURE_CACHE.with(|cache| cache.borrow().report()), live_cover_report());
@@ -306,6 +377,13 @@ impl LruTextureCache {
         self.used_bytes += byte_size;
         while self.used_bytes > self.budget_bytes && self.evict_oldest() {}
     }
+}
+
+/// How many textures the cache holds right now: tests tell "nothing was decoded" from "something
+/// was" with it.
+#[cfg(test)]
+pub(crate) fn cached_texture_count() -> usize {
+    TEXTURE_CACHE.with(|cache| cache.borrow().entries.len())
 }
 
 /// How many `CoverImage` widgets exist, how many of them are on screen, and the display's scale
@@ -578,8 +656,10 @@ impl CoverImage {
 
         self.show_placeholder();
 
-        let picture = self.picture.clone();
-        let placeholder = self.placeholder.clone();
+        // Weak: a cover whose widgets are gone while it waits for a decode slot (the render that
+        // built it was replaced) must not be kept alive, or decoded, for nothing.
+        let picture = self.picture.downgrade();
+        let placeholder = self.placeholder.downgrade();
         let last_path = self.last_path.clone();
         let requested = path.to_path_buf();
         let size = decode_pixels;
@@ -588,6 +668,50 @@ impl CoverImage {
             let semaphore = DECODE_SEMAPHORE.with(|semaphore| semaphore.clone());
             let _permit = semaphore.acquire().await.expect("cover-decode semaphore is never closed");
 
+            // Time has passed while this waited its turn: skip the decode when nobody needs it.
+            let still_wanted = picture.upgrade().is_some() && last_path.borrow().as_deref() == Some(requested.as_path());
+            let cached = TEXTURE_CACHE.with(|cache| cache.borrow_mut().get(&(requested.clone(), size)));
+            if let Some(texture) = cached {
+                // A decode of the same cover finished meanwhile (another widget asked first).
+                if still_wanted {
+                    if let (Some(picture), Some(placeholder)) = (picture.upgrade(), placeholder.upgrade()) {
+                        picture.set_paintable(Some(&texture));
+                        picture.set_visible(true);
+                        placeholder.set_visible(false);
+                        note_cover_shown();
+                    }
+                }
+                in_flight.skip();
+                return;
+            }
+            if !still_wanted {
+                in_flight.skip();
+                return;
+            }
+            // The same cover is being decoded right now for another widget: wait for it instead
+            // of decoding it twice. The decoding task hands the texture to everyone waiting.
+            let key = (requested.clone(), size);
+            let waiting = DECODING.with(|decoding| {
+                let mut decoding = decoding.borrow_mut();
+                match decoding.get_mut(&key) {
+                    Some(waiters) => {
+                        waiters.push(Waiter { picture: picture.clone(), placeholder: placeholder.clone(), last_path: last_path.clone() });
+                        true
+                    }
+                    None => {
+                        decoding.insert(key.clone(), Vec::new());
+                        false
+                    }
+                }
+            });
+            if waiting {
+                in_flight.skip();
+                return;
+            }
+            let mut owner = DecodeOwner { key, texture: None };
+
+            #[cfg(test)]
+            DECODES_STARTED.with(|count| count.set(count.get() + 1));
             let decoded = tokio::task::spawn_blocking({
                 let requested = requested.clone();
                 move || decode_and_crop_to_cover(&requested, size)
@@ -611,14 +735,18 @@ impl CoverImage {
                 gtk4::gdk::MemoryTexture::new(side as i32, side as i32, gtk4::gdk::MemoryFormat::R8g8b8a8, &gtk4::glib::Bytes::from_owned(bytes), (side * 4) as usize).into();
 
             TEXTURE_CACHE.with(|cache| cache.borrow_mut().insert((requested.clone(), size), texture.clone()));
+            owner.texture = Some(texture.clone());
 
             // Staleness guard: this `CoverImage` may have been rebound to a different path while
             // this decode was in flight (the player's mini-bar reuses one instance across ticks,
             // sometimes onto a genuinely new track) — only apply if nothing newer superseded it.
             if last_path.borrow().as_deref() == Some(requested.as_path()) {
-                picture.set_paintable(Some(&texture));
-                picture.set_visible(true);
-                placeholder.set_visible(false);
+                if let (Some(picture), Some(placeholder)) = (picture.upgrade(), placeholder.upgrade()) {
+                    picture.set_paintable(Some(&texture));
+                    picture.set_visible(true);
+                    placeholder.set_visible(false);
+                    note_cover_shown();
+                }
             }
             in_flight.complete(timings, on_main_thread.elapsed(), size);
         });
@@ -628,6 +756,7 @@ impl CoverImage {
         self.picture.set_paintable(Some(&texture));
         self.picture.set_visible(true);
         self.placeholder.set_visible(false);
+        note_cover_shown();
     }
 
     fn show_placeholder(&self) {
@@ -700,22 +829,23 @@ pub(crate) mod tests {
         let t0 = Instant::now();
         let mut burst = DecodeBurst::default();
         burst.cache_hits = 7;
-        for _ in 0..3 {
+        for _ in 0..4 {
             burst.start_one(t0);
         }
-        assert_eq!(burst.finish_one(Some((timings(5, 100, 20, 1200, 1200, 300 * 1024), Duration::from_millis(2), 264)), t0 + Duration::from_millis(150)), None);
-        assert_eq!(burst.finish_one(None, t0 + Duration::from_millis(200)), None, "a failure counts as an ending too");
+        assert_eq!(burst.finish_one(Some((timings(5, 100, 20, 1200, 1200, 300 * 1024), Duration::from_millis(2), 264)), false, t0 + Duration::from_millis(150)), None);
+        assert_eq!(burst.finish_one(None, false, t0 + Duration::from_millis(200)), None, "a failure counts as an ending too");
+        assert_eq!(burst.finish_one(None, true, t0 + Duration::from_millis(220)), None, "so does a skipped decode, which is not a failure");
         let line = burst
-            .finish_one(Some((timings(3, 80, 10, 600, 900, 100 * 1024), Duration::from_millis(1), 132)), t0 + Duration::from_millis(250))
+            .finish_one(Some((timings(3, 80, 10, 600, 900, 100 * 1024), Duration::from_millis(1), 132)), false, t0 + Duration::from_millis(250))
             .expect("the last one ends the burst");
         assert_eq!(
             line,
-            "covers decoded count=2 failed=1 wall_ms=250 read_ms=8 decode_ms=180 resize_ms=30 main_thread_ms=3 source_kb=400 largest_source=1200x1200 target_px=264 cache_hits_before=7"
+            "covers decoded count=2 failed=1 skipped=1 wall_ms=250 read_ms=8 decode_ms=180 resize_ms=30 main_thread_ms=3 source_kb=400 largest_source=1200x1200 target_px=264 cache_hits_before=7"
         );
         // The next burst starts from nothing.
         burst.start_one(t0);
-        let next = burst.finish_one(Some((timings(1, 2, 3, 10, 10, 1024), Duration::ZERO, 64)), t0 + Duration::from_millis(5)).unwrap();
-        assert!(next.starts_with("covers decoded count=1 failed=0 wall_ms=5 ") && next.ends_with("cache_hits_before=0"), "{next}");
+        let next = burst.finish_one(Some((timings(1, 2, 3, 10, 10, 1024), Duration::ZERO, 64)), false, t0 + Duration::from_millis(5)).unwrap();
+        assert!(next.starts_with("covers decoded count=1 failed=0 skipped=0 wall_ms=5 ") && next.ends_with("cache_hits_before=0"), "{next}");
     }
 
     /// However a decode task ends (it failed, it finished, it was dropped before doing anything),
@@ -952,6 +1082,46 @@ pub(crate) mod tests {
         }
         assert_eq!(small.evicted.len(), EVICTED_MEMORY);
         assert!(live_cover_report().starts_with("live_covers="));
+        let _ = runtime;
+    }
+
+    /// Not a `#[test]` itself — see `main.rs`'s `mod tests`. Two widgets asking for the same new
+    /// cover at once cost one decode, and a widget that is gone by the time its turn comes costs none.
+    pub(crate) fn run_duplicate_and_abandoned_decodes_are_skipped(runtime: &tokio::runtime::Runtime) {
+        let tmp = tempfile::tempdir().unwrap();
+        let make = |name: &str| {
+            let path = tmp.path().join(name);
+            write_1x1_png(&path);
+            path
+        };
+        let started = || DECODES_STARTED.with(|count| count.get());
+        let before = started();
+
+        // The same cover, twice, before either decode has had a turn.
+        let shared = make("shared.png");
+        let first = CoverImage::new(64);
+        let second = CoverImage::new(64);
+        first.set_path(Some(&shared));
+        second.set_path(Some(&shared));
+        pump_until(|| first.picture.is_visible() && second.picture.is_visible(), Duration::from_secs(5));
+        assert!(first.picture.is_visible() && second.picture.is_visible(), "both show it");
+        assert_eq!(started() - before, 1, "one decode served both");
+
+        // Four covers asked for, two of them dropped before their turn.
+        let before = started();
+        let kept: Vec<_> = ["k1.png", "k2.png"].iter().map(|name| make(name)).collect();
+        let gone: Vec<_> = ["g1.png", "g2.png"].iter().map(|name| make(name)).collect();
+        let mut covers = Vec::new();
+        for path in kept.iter().chain(gone.iter()) {
+            let cover = CoverImage::new(64);
+            cover.set_path(Some(path));
+            covers.push(cover);
+        }
+        covers.truncate(2); // the two for `gone` are dropped here
+        pump_until(|| covers.iter().all(|cover| cover.picture.is_visible()), Duration::from_secs(5));
+        pump_until(|| false, Duration::from_millis(300));
+        assert!(covers.iter().all(|cover| cover.picture.is_visible()), "the covers still there are shown");
+        assert_eq!(started() - before, 2, "no decode for the two that were gone");
         let _ = runtime;
     }
 

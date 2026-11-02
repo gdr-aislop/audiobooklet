@@ -658,6 +658,16 @@ pub fn build(
         }
     });
 
+    // Shown (the Library tab opened, or the app's first layout of it): the covers near the
+    // viewport decode now. Idle, so GTK has allocated the page before bounds are read.
+    widgets.scroller.connect_map({
+        let widgets = widgets.clone();
+        move |_| {
+            let widgets = widgets.clone();
+            glib::idle_add_local_once(move || decode_covers_in_viewport(&widgets));
+        }
+    });
+
     let view_toggle_handler = view_toggle.connect_toggled({
         let pool = pool.clone();
         let widgets = widgets.clone();
@@ -1867,15 +1877,34 @@ fn decode_covers_in_viewport(widgets: &LibraryWidgets) {
     // (or already in flight) by the time they are.
     const MARGIN_PX: f32 = 600.0;
 
+    // A page nobody can see (the Library is built at startup while Home shows) has no layout: its
+    // scroller is 0 high and every tile reports bounds of (0, 0, 0, 0), which lie inside any
+    // viewport, so everything would decode — hundreds of covers, seconds of the phone's CPU, for
+    // nothing on screen. The page's `map` (see `build`) runs this again once it can be seen.
+    if !widgets.scroller.is_mapped() || widgets.scroller.height() <= 0 {
+        return;
+    }
+
     let viewport_height = widgets.scroller.height() as f32;
     let scroller = widgets.scroller.clone().upcast::<gtk4::Widget>();
-    for pending in widgets.pending_covers.borrow().iter() {
+    let pending = widgets.pending_covers.borrow();
+    let mut in_range = 0_usize;
+    for pending in pending.iter() {
         let Some(bounds) = pending.widget.compute_bounds(&scroller) else { continue };
         let top = bounds.y();
         let bottom = top + bounds.height();
         if bottom > -MARGIN_PX && top < viewport_height + MARGIN_PX {
+            in_range += 1;
             pending.cover.set_path(pending.path.as_deref());
         }
+    }
+    // Said when it changes (a scroll that moves the window by a row says it again, one that
+    // doesn't stays quiet), so the log shows how much of the library was asked for.
+    thread_local! {
+        static LAST_IN_RANGE: Cell<usize> = const { Cell::new(usize::MAX) };
+    }
+    if LAST_IN_RANGE.with(|last| last.replace(in_range)) != in_range {
+        tracing::info!(in_range, tracked = pending.len(), scroller_height = viewport_height as i32, "library covers in range");
     }
 }
 
@@ -3494,6 +3523,63 @@ pub(crate) mod tests {
         // `crate::widgets::Debouncer`'s fix — this must simply not crash.
         hooks.scroller.vadjustment().set_value(0.0);
         pump_until(|| false, Duration::from_millis(300));
+    }
+
+    /// Not a `#[test]` itself — see `main.rs`'s `mod tests`. The Library is built at startup while
+    /// Home is the visible tab. A page nobody can see has no layout, so every tile "sits" at the
+    /// origin, inside any viewport: its covers must wait until the page is shown (and then decode
+    /// only those near the viewport), not all be decoded in the background.
+    pub(crate) fn run_covers_of_a_hidden_library_wait_until_it_is_shown(runtime: &tokio::runtime::Runtime) {
+        let mock_server = runtime.block_on(MockServer::start());
+        runtime.block_on(
+            Mock::given(method("GET"))
+                .and(path("/api/libraries"))
+                .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                    "libraries": [{ "id": "e4bb1afb-4a4f-4dd6-8be0-e615d233185b", "name": "Audiobooks", "mediaType": "book" }]
+                })))
+                .mount(&mock_server),
+        );
+        runtime.block_on(
+            Mock::given(method("GET"))
+                .and(path("/api/libraries/e4bb1afb-4a4f-4dd6-8be0-e615d233185b/items"))
+                .respond_with(ResponseTemplate::new(503))
+                .mount(&mock_server),
+        );
+        let pool = runtime.block_on(pool());
+        let (server, account) = runtime.block_on(account_and_server(&pool, &mock_server.uri()));
+        let cover_dir = tempfile::tempdir().unwrap();
+        seed_items_with_real_covers(runtime, &pool, &server.id, 40, cover_dir.path());
+
+        let session = abs_core::auth::Session::new(pool.clone(), &server, &account);
+        let offline_mode = crate::offline_mode::OfflineModeState::new(pool.clone());
+        let screen = build(pool, crate::test_support::test_paths(), server, account, session, offline_mode.clone(), |_| {}, || {}, || {});
+        let hooks = screen.test_hooks();
+
+        // The shell's arrangement: Home shows, the Library is another page of the same stack.
+        let stack = adw::ViewStack::new();
+        stack.add_titled(&gtk4::Label::new(Some("Home")), Some("home"), "Home");
+        stack.add_titled(&screen.root, Some("library"), "Library");
+        stack.set_visible_child_name("home");
+        let app_window = adw::ApplicationWindow::builder().default_width(300).default_height(400).build();
+        app_window.set_content(Some(&stack));
+        app_window.present();
+        pump_until(|| app_window.is_mapped(), Duration::from_secs(5));
+
+        let before = crate::widgets::cover_image::cached_texture_count();
+        pump_until(|| hooks.list_box.row_at_index(39).is_some(), Duration::from_secs(10));
+        pump_until(|| false, Duration::from_millis(800));
+        assert_eq!(
+            crate::widgets::cover_image::cached_texture_count(),
+            before,
+            "no cover of a Library nobody can see should have been decoded"
+        );
+
+        stack.set_visible_child_name("library");
+        pump_until(|| crate::widgets::cover_image::cached_texture_count() > before, Duration::from_secs(5));
+        pump_until(|| false, Duration::from_millis(800));
+        let decoded = crate::widgets::cover_image::cached_texture_count() - before;
+        assert!(decoded > 0, "showing the Library decodes the covers in view");
+        assert!(decoded < 40, "and only those near the viewport, not all 40 (decoded {decoded})");
     }
 
     /// The view-options popover's "Hide finished" switch (LB-8) — independent of "In progress
