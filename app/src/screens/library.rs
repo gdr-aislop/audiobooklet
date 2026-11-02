@@ -4568,6 +4568,12 @@ pub(crate) mod tests {
         let screen = build(pool, crate::test_support::test_paths(), server, account, session, offline_mode, |_| {}, || {}, || {});
         screen.follow_low_memory_mode(&low_memory_mode);
         let hooks = screen.test_hooks();
+        // On screen, as in the app: a Library nobody can see decodes no covers (see
+        // `decode_covers_in_viewport`), which this test used to get by accident.
+        let app_window = adw::ApplicationWindow::builder().default_width(360).default_height(640).build();
+        app_window.set_content(Some(&screen.root));
+        app_window.present();
+        pump_until(|| app_window.is_mapped(), Duration::from_secs(5));
 
         pump_until(|| hooks.list_box.row_at_index(0).is_some(), Duration::from_secs(10));
         hooks.view_toggle.set_active(false);
