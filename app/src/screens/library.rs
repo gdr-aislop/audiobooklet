@@ -299,6 +299,9 @@ struct LibraryWidgets {
     /// What the fully built list on screen was built from (`render_signature`); `None` while a
     /// render is still in progress or nothing has been rendered.
     rendered_signature: Rc<std::cell::RefCell<Option<String>>>,
+    /// Per item of the render that built (or is building) the list: a hash of what its tile shows
+    /// (`display_key`). Lets the next render say why it had to rebuild (`render_reason`).
+    rendered_keys: Rc<std::cell::RefCell<std::collections::HashMap<String, u64>>>,
     /// Shown for the one main-loop tick between any filter/search/sort/view-mode change and the
     /// rebuild it triggers — see [`request_render`]/[`set_busy`].
     busy_spinner: gtk4::Spinner,
@@ -609,6 +612,7 @@ pub fn build(
         pending_covers: Rc::new(std::cell::RefCell::new(Vec::new())),
         render_generation: Rc::new(Cell::new(0)),
         rendered_signature: Rc::new(std::cell::RefCell::new(None)),
+        rendered_keys: Rc::new(std::cell::RefCell::new(std::collections::HashMap::new())),
         busy_spinner: busy_spinner.clone(),
         busy_scrim: busy_scrim.clone(),
     };
@@ -664,7 +668,13 @@ pub fn build(
         let widgets = widgets.clone();
         move |_| {
             let widgets = widgets.clone();
-            glib::idle_add_local_once(move || decode_covers_in_viewport(&widgets));
+            glib::idle_add_local_once(move || {
+                // TEMP(stall-hunt): the render ABS_LIB_LAZY held back.
+                if LAZY_RENDER_PENDING.with(|pending| pending.replace(false)) {
+                    render_from_current_data(&widgets);
+                }
+                decode_covers_in_viewport(&widgets);
+            });
         }
     });
 
@@ -1553,7 +1563,17 @@ fn apply_view_mode(mode: LibraryViewMode, widgets: &LibraryWidgets, toggle: &gtk
     });
 }
 
+thread_local! {
+    // TEMP(stall-hunt): a render deferred by ABS_LIB_LAZY.
+    static LAZY_RENDER_PENDING: Cell<bool> = const { Cell::new(false) };
+}
+
 fn render_from_current_data(widgets: &LibraryWidgets) {
+    // TEMP(stall-hunt): with ABS_LIB_LAZY the render waits until the page is shown (`connect_map`).
+    if crate::debug_switches::get().library_lazy && !widgets.scroller.is_mapped() {
+        LAZY_RENDER_PENDING.with(|pending| pending.set(true));
+        return;
+    }
     let _slow = crate::perf::SlowJob::new("library render");
     let render_started = std::time::Instant::now();
     let blocked_at_start = crate::perf::main_loop_blocked_total();
@@ -1655,14 +1675,25 @@ fn render_from_current_data(widgets: &LibraryWidgets) {
             entries.push(RenderEntry::Item { item: Box::new((*item).clone()), downloaded: data.downloaded.contains(&item.id) });
         }
     }
+    // TEMP(stall-hunt): ABS_LIB_LIMIT builds only the first N entries.
+    crate::debug_switches::limit_entries(&mut entries, crate::debug_switches::get().library_limit);
     let mode = widgets.view_mode.get();
     let signature = render_signature(mode, &entries);
     if widgets.rendered_signature.borrow().as_deref() == Some(signature.as_str()) {
         // Exactly what is on screen already (a sync that changed nothing, a toggle with nothing to
         // filter, a search whose results didn't change): rebuilding it would only cost time and
         // lose the scroll position.
-        tracing::debug!(books = entries.len(), "library render skipped: nothing changed");
+        tracing::info!(items = entries.len(), "library render skipped: nothing visible changed");
     } else {
+        let (reason, changed) = render_reason(&widgets.rendered_keys.borrow(), &entries);
+        tracing::info!(reason, items = entries.len(), changed, "library render needed");
+        *widgets.rendered_keys.borrow_mut() = entries
+            .iter()
+            .filter_map(|entry| match entry {
+                RenderEntry::Item { item, downloaded } => Some((item.id.clone(), display_key(item, *downloaded))),
+                RenderEntry::Header(_) => None,
+            })
+            .collect();
         *widgets.rendered_signature.borrow_mut() = None;
         let generation = widgets.render_generation.get() + 1;
         widgets.render_generation.set(generation);
@@ -1774,10 +1805,49 @@ fn render_signature(mode: LibraryViewMode, entries: &[RenderEntry]) -> String {
     for entry in entries {
         match entry {
             RenderEntry::Header(label) => ("header", label).hash(&mut hasher),
-            RenderEntry::Item { item, downloaded } => ("item", format!("{item:?}"), downloaded).hash(&mut hasher),
+            RenderEntry::Item { item, downloaded } => ("item", &item.id, display_key(item, *downloaded)).hash(&mut hasher),
         }
     }
     format!("{}:{:x}", entries.len(), hasher.finish())
+}
+
+/// A hash of what a tile or row of `item` shows, says when tapped, and is named for — and nothing
+/// else. Hashing the whole `Item` made every sync look like a change (`synced_at` moves for every
+/// item on every sync), so the list was rebuilt, seconds of main-loop time, to look the same.
+/// What decides the order or the grouping needs no hashing here: the entry order and the headers
+/// are part of the signature already. Listening progress is not shown on a Library tile (Home's
+/// cards show it), so it is not hashed; if a tile ever shows it, it must be added here.
+fn display_key(item: &Item, downloaded: bool) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    (&item.id, &item.title, &item.author, item.duration_seconds.to_bits(), &item.cover_cache_path, downloaded).hash(&mut hasher);
+    hasher.finish()
+}
+
+/// Why a render that is not skipped has to rebuild, and how many items' displayed fields differ
+/// from the previous render's (`changed`; items new to the list count too).
+fn render_reason(previous: &std::collections::HashMap<String, u64>, entries: &[RenderEntry]) -> (&'static str, usize) {
+    let items: Vec<(&str, u64)> = entries
+        .iter()
+        .filter_map(|entry| match entry {
+            RenderEntry::Item { item, downloaded } => Some((item.id.as_str(), display_key(item, *downloaded))),
+            RenderEntry::Header(_) => None,
+        })
+        .collect();
+    if previous.is_empty() {
+        return ("first", items.len());
+    }
+    let changed = items.iter().filter(|(id, key)| previous.get(*id) != Some(key)).count();
+    let removed = previous.keys().filter(|id| !items.iter().any(|(item, _)| item == &id.as_str())).count();
+    let reason = if items.len() != previous.len() || removed > 0 {
+        "items-added-or-removed"
+    } else if changed > 0 {
+        "fields"
+    } else {
+        // The same items showing the same things: the order, the grouping or the view mode moved.
+        "order"
+    };
+    (reason, changed)
 }
 
 /// Builds and inserts the widgets for `entries` into the active container, and tracks their
@@ -4460,6 +4530,170 @@ pub(crate) mod tests {
         pump_until(|| rows() == 1, Duration::from_secs(10));
         pump_until(|| false, Duration::from_millis(500));
         assert_eq!(rows(), 1, "only the match remains");
+    }
+
+    fn sample_item(id: &str, title: &str) -> Item {
+        let at = chrono::DateTime::from_timestamp_millis(1_700_000_000_000).unwrap();
+        Item {
+            id: id.to_string(),
+            server_id: "server".to_string(),
+            library_id: "library".to_string(),
+            title: title.to_string(),
+            author: Some("An Author".to_string()),
+            narrator: Some("A Narrator".to_string()),
+            description: Some("A long description".to_string()),
+            cover_cache_path: Some("/covers/a.jpg".to_string()),
+            duration_seconds: 3600.0,
+            added_at: at,
+            synced_at: at,
+            series_name: None,
+            genres_json: "[]".to_string(),
+            title_sort: None,
+            author_sort: None,
+        }
+    }
+
+    fn entries_of(items: &[(Item, bool)]) -> Vec<RenderEntry> {
+        items.iter().map(|(item, downloaded)| RenderEntry::Item { item: Box::new(item.clone()), downloaded: *downloaded }).collect()
+    }
+
+    fn signature_of(items: &[(Item, bool)]) -> String {
+        render_signature(LibraryViewMode::List, &entries_of(items))
+    }
+
+    /// A sync rewrites `synced_at` on every item, and the fields no tile shows move with it: none
+    /// of that is a reason to rebuild the list. What a tile shows, and the order, are.
+    #[test]
+    fn the_signature_follows_what_a_tile_shows_and_nothing_else() {
+        let base = vec![(sample_item("a", "Alpha"), false), (sample_item("b", "Beta"), false)];
+        let same = signature_of(&base);
+
+        let mut unseen = base.clone();
+        let moved_on = chrono::DateTime::from_timestamp_millis(1_800_000_000_000).unwrap();
+        unseen[0].0.synced_at = moved_on;
+        unseen[0].0.added_at = moved_on;
+        unseen[0].0.description = Some("rewritten".to_string());
+        unseen[0].0.narrator = None;
+        unseen[0].0.genres_json = r#"["Fantasy"]"#.to_string();
+        unseen[0].0.series_name = Some("A Series".to_string());
+        unseen[0].0.title_sort = Some("Alpha".to_string());
+        unseen[0].0.author_sort = Some("Author, An".to_string());
+        unseen[0].0.server_id = "other".to_string();
+        assert_eq!(signature_of(&unseen), same, "fields no tile shows don't count");
+
+        let changed = |edit: &dyn Fn(&mut (Item, bool))| {
+            let mut items = base.clone();
+            edit(&mut items[0]);
+            signature_of(&items)
+        };
+        assert_ne!(changed(&|i| i.0.title = "Alpha 2".to_string()), same, "title");
+        assert_ne!(changed(&|i| i.0.author = None), same, "author");
+        assert_ne!(changed(&|i| i.0.duration_seconds = 7200.0), same, "duration");
+        assert_ne!(changed(&|i| i.0.cover_cache_path = None), same, "cover path");
+        assert_ne!(changed(&|i| i.1 = true), same, "downloaded");
+
+        let mut reordered = base.clone();
+        reordered.reverse();
+        assert_ne!(signature_of(&reordered), same, "order");
+        assert_ne!(signature_of(&base[..1]), same, "an item removed");
+        let mut added = base.clone();
+        added.push((sample_item("c", "Gamma"), false));
+        assert_ne!(signature_of(&added), same, "an item added");
+        assert_ne!(render_signature(LibraryViewMode::Grid, &entries_of(&base)), same, "the view mode");
+        let mut with_header = entries_of(&base);
+        with_header.insert(0, RenderEntry::Header("Some Author".to_string()));
+        assert_ne!(render_signature(LibraryViewMode::List, &with_header), same, "a group header");
+    }
+
+    /// The log line for a render that has to rebuild says why.
+    #[test]
+    fn a_render_that_must_rebuild_says_why() {
+        let base = vec![(sample_item("a", "Alpha"), false), (sample_item("b", "Beta"), false)];
+        let keys = |items: &[(Item, bool)]| -> std::collections::HashMap<String, u64> {
+            items.iter().map(|(item, downloaded)| (item.id.clone(), display_key(item, *downloaded))).collect()
+        };
+        let previous = keys(&base);
+        assert_eq!(render_reason(&std::collections::HashMap::new(), &entries_of(&base)), ("first", 2));
+
+        let mut retitled = base.clone();
+        retitled[1].0.title = "Beta 2".to_string();
+        assert_eq!(render_reason(&previous, &entries_of(&retitled)), ("fields", 1));
+
+        let mut reversed = base.clone();
+        reversed.reverse();
+        assert_eq!(render_reason(&previous, &entries_of(&reversed)), ("order", 0), "same items, same looks, another order");
+
+        let mut longer = base.clone();
+        longer.push((sample_item("c", "Gamma"), false));
+        assert_eq!(render_reason(&previous, &entries_of(&longer)), ("items-added-or-removed", 1));
+        assert_eq!(render_reason(&previous, &entries_of(&base[..1])), ("items-added-or-removed", 0));
+        let mut swapped = base.clone();
+        swapped[1].0.id = "z".to_string();
+        assert_eq!(render_reason(&previous, &entries_of(&swapped)).0, "items-added-or-removed", "same count, a different item");
+    }
+
+    /// Not a `#[test]` itself — see `main.rs`'s `mod tests`. A sync rewrites `synced_at` for every
+    /// book; the list on screen must stay the very same widgets then, and be rebuilt when a title
+    /// really changes.
+    pub(crate) fn run_a_sync_that_changes_nothing_visible_keeps_the_list(runtime: &tokio::runtime::Runtime) {
+        const BOOKS: usize = 30;
+        let mock_server = runtime.block_on(MockServer::start());
+        let mount = |first_title: &str| {
+            let results: Vec<_> = (0..BOOKS)
+                .map(|i| item_json(&format!("item-{i:03}"), if i == 0 { first_title } else { "Another Book" }, "An Author", 1_700_000_000_000 + i as i64, 3600.0))
+                .collect();
+            runtime.block_on(async {
+                Mock::given(method("GET"))
+                    .and(path("/api/libraries"))
+                    .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                        "libraries": [{ "id": "e4bb1afb-4a4f-4dd6-8be0-e615d233185b", "name": "Audiobooks", "mediaType": "book" }]
+                    })))
+                    .mount(&mock_server)
+                    .await;
+                Mock::given(method("GET"))
+                    .and(path("/api/libraries/e4bb1afb-4a4f-4dd6-8be0-e615d233185b/items"))
+                    .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({ "results": results })))
+                    .mount(&mock_server)
+                    .await;
+            });
+        };
+        mount("First Book");
+        let pool = runtime.block_on(pool());
+        let (server, account) = runtime.block_on(account_and_server(&pool, &mock_server.uri()));
+        let session = abs_core::auth::Session::new(pool.clone(), &server, &account);
+        let offline_mode = crate::offline_mode::OfflineModeState::new(pool.clone());
+        let screen = build(pool, crate::test_support::test_paths(), server, account, session, offline_mode, |_| {}, || {}, || {});
+        let hooks = screen.test_hooks();
+        let app_window = adw::ApplicationWindow::builder().default_width(360).default_height(640).build();
+        app_window.set_content(Some(&screen.root));
+        app_window.present();
+        pump_until(|| app_window.is_mapped(), Duration::from_secs(5));
+        let rows = || {
+            let mut count = 0;
+            while hooks.list_box.row_at_index(count).is_some() {
+                count += 1;
+            }
+            count as usize
+        };
+        pump_until(|| rows() == BOOKS, Duration::from_secs(20));
+        pump_until(|| false, Duration::from_millis(1500)); // the first sync and its re-render settle
+        assert_eq!(rows(), BOOKS);
+
+        // A sync that finds the same books: every `synced_at` moves, nothing on a row does.
+        let first_row = hooks.list_box.row_at_index(0).unwrap();
+        hooks.sync_now_button.emit_clicked();
+        pump_until(|| false, Duration::from_millis(2500));
+        assert_eq!(rows(), BOOKS);
+        assert_eq!(hooks.list_box.row_at_index(0).as_ref(), Some(&first_row), "a sync that changed nothing visible must not rebuild the list");
+
+        // A sync that finds a retitled book rebuilds it.
+        runtime.block_on(mock_server.reset());
+        mount("First Book, Revised");
+        hooks.sync_now_button.emit_clicked();
+        pump_until(|| hooks.list_box.row_at_index(0).as_ref() != Some(&first_row), Duration::from_secs(10));
+        pump_until(|| rows() == BOOKS, Duration::from_secs(10));
+        assert_ne!(hooks.list_box.row_at_index(0).as_ref(), Some(&first_row), "a changed title rebuilds the list");
+        assert_eq!(rows(), BOOKS);
     }
 
     /// Not a `#[test]` itself — see `main.rs`'s `mod tests`. The Library's badges follow downloads

@@ -1,6 +1,7 @@
 mod a11y;
 mod application;
 mod crash_reporting;
+mod debug_switches;
 mod download_speed;
 mod downloads;
 mod error_reporting;
@@ -146,6 +147,7 @@ fn main() -> adw::glib::ExitCode {
     // after the last `i18n::init` (it sets LANGUAGE and the locale): GStreamer and its plugins read
     // the environment from C, which a concurrent `setenv` would race.
     gst_ready::start();
+    debug_switches::get(); // TEMP(stall-hunt): says in the log if a switch is on
     perf::milestone("starting the GTK application");
     let exit_code = app.run();
     // While thread-local storage is still intact: the shell's teardown (the player retiring)
@@ -306,6 +308,8 @@ mod tests {
         (item_detail_tab_walks_from_the_header_through_the_page, crate::screens::item_detail::tests::run_tab_walks_from_the_header_through_the_page),
         (item_detail_an_unspaced_title_and_author_fit_a_phone, crate::screens::item_detail::tests::run_an_unspaced_title_and_author_fit_a_phone),
         (item_detail_downloaded_legend_sits_over_the_row_checkmarks, crate::screens::item_detail::tests::run_the_downloaded_legend_sits_over_the_row_checkmarks),
+        (perf_the_widget_counter_walks_the_whole_tree, crate::perf::tests::run_the_widget_counter_walks_the_whole_tree),
+        (library_a_sync_that_changes_nothing_visible_keeps_the_list, crate::screens::library::tests::run_a_sync_that_changes_nothing_visible_keeps_the_list),
         (perf_the_frame_probe_sees_frames, crate::perf::tests::run_the_frame_probe_sees_frames),
         (item_detail_shows_the_subtitle_facts_and_chapter_count, crate::screens::item_detail::tests::run_shows_the_subtitle_facts_and_chapter_count),
         (item_detail_download_menu_gets_sizes_from_the_pages_own_request, crate::screens::item_detail::tests::run_download_menu_gets_sizes_from_the_pages_own_request),
