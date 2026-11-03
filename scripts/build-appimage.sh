@@ -452,11 +452,21 @@ fi
 # phone, so it stops the build here instead.
 if [ "$GST_PREWARMED" = "1" ]; then
     CHECK_DIR="$(mktemp -d)"
-    (cd "$CHECK_DIR" && "$OUTPUT_PATH" --appimage-extract >/dev/null) || die "couldn't extract $OUTPUT_PATH to check its GStreamer cache"
-    audiobooklet_gst_registry_matches "$CHECK_DIR/squashfs-root" "$GST_PREWARM_RUNDIR" \
-        || die "the GStreamer cache in the finished AppImage is not accepted by GStreamer as it is (it would be rescanned on every first start)"
+    if (cd "$CHECK_DIR" && "$OUTPUT_PATH" --appimage-extract >/dev/null); then
+        audiobooklet_gst_registry_matches "$CHECK_DIR/squashfs-root" "$GST_PREWARM_RUNDIR" \
+            || die "the GStreamer cache in the finished AppImage is not accepted by GStreamer as it is (it would be rescanned on every first start)"
+        echo "Checked: GStreamer accepts the shipped plugin cache as it is."
+    elif [ -n "${CI:-}" ]; then
+        # A release build must prove the cache.
+        die "couldn't extract $OUTPUT_PATH to check its GStreamer cache"
+    else
+        # A local build can't always run the AppImage it just made: in an emulated container
+        # (aarch64 on x86_64) a binfmt handler on the host, such as AppImageLauncher's, may take
+        # it over and fail. The cache itself was checked above; one that doesn't match only
+        # means the phone scans the plugins once, as before.
+        warn "couldn't run $OUTPUT_PATH here, so its GStreamer cache wasn't checked on the finished file (CI does)"
+    fi
     rm -rf "$CHECK_DIR"
-    echo "Checked: GStreamer accepts the shipped plugin cache as it is."
 fi
 
 echo
