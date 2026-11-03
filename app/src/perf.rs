@@ -116,7 +116,7 @@ pub(crate) fn watch_frames(widget: &impl IsA<gtk4::Widget>) {
             }
             let Some(clock) = widget.frame_clock() else { return };
             attached.set(true);
-            attach_frame_probe(&clock);
+            attach_frame_probe(&clock, widget.downgrade());
         }
     };
     attach(widget.upcast_ref());
@@ -124,7 +124,7 @@ pub(crate) fn watch_frames(widget: &impl IsA<gtk4::Widget>) {
     widget.connect_realize(move |widget| attach(widget.upcast_ref()));
 }
 
-fn attach_frame_probe(clock: &gtk4::gdk::FrameClock) {
+fn attach_frame_probe(clock: &gtk4::gdk::FrameClock, root: glib::WeakRef<gtk4::Widget>) {
     let marks = std::rc::Rc::new(std::cell::Cell::new(FrameMarks::default()));
     let first_frame_logged = std::rc::Rc::new(std::cell::Cell::new(false));
     clock.connect_before_paint({
@@ -152,7 +152,10 @@ fn attach_frame_probe(clock: &gtk4::gdk::FrameClock) {
         let phases = marks.get().phases(Instant::now());
         marks.set(FrameMarks::default());
         if let Some(phases) = phases.filter(|phases| phases.total >= SLOW_FRAME_AFTER) {
-            tracing::warn!("a slow frame {}", phases.line());
+            // What the tree looked like and what ran just before: widget counts are walked only
+            // for a frame that is already slow.
+            let (widgets, mapped) = root.upgrade().map(|root| widget_counts(&root)).unwrap_or_default();
+            tracing::warn!("a slow frame {} widgets={widgets} mapped={mapped} {}", phases.line(), LAST_JOB.with(|last| last_job_text(last.get(), Instant::now())));
         }
     });
 }
@@ -184,8 +187,36 @@ impl SlowJob {
     }
 }
 
+thread_local! {
+    /// The last UI job that ended (slow or not), so a slow frame can say what ran just before it.
+    static LAST_JOB: std::cell::Cell<Option<(&'static str, Instant)>> = const { std::cell::Cell::new(None) };
+}
+
+/// `last_job=<name> ago_ms=<n>` for the slow-frame line: the last [`SlowJob`] to end, or `none`.
+fn last_job_text(last: Option<(&'static str, Instant)>, now: Instant) -> String {
+    match last {
+        Some((name, ended)) => format!("last_job={} ago_ms={}", name.replace(' ', "_"), now.saturating_duration_since(ended).as_millis()),
+        None => "last_job=none".to_string(),
+    }
+}
+
+/// How many widgets are in the tree under `root`, and how many of them are mapped (on screen).
+/// Walked only for a frame that is already slow.
+fn widget_counts(root: &gtk4::Widget) -> (usize, usize) {
+    let (mut total, mut mapped) = (1, usize::from(root.is_mapped()));
+    let mut child = root.first_child();
+    while let Some(widget) = child {
+        let (child_total, child_mapped) = widget_counts(&widget);
+        total += child_total;
+        mapped += child_mapped;
+        child = widget.next_sibling();
+    }
+    (total, mapped)
+}
+
 impl Drop for SlowJob {
     fn drop(&mut self) {
+        LAST_JOB.with(|last| last.set(Some((self.what, Instant::now()))));
         let took = self.started.elapsed();
         if took >= SLOW_JOB_AFTER {
             tracing::warn!(job = self.what, took_ms = took.as_millis() as u64, "a UI job held up the main loop");
@@ -357,5 +388,38 @@ pub(crate) mod tests {
         assert_eq!(names, ["first", "second", "elsewhere"], "recording ends the step in progress first");
         assert!(steps.done[0].1 >= Duration::from_millis(20));
         assert_eq!(steps.done[2].1, Duration::from_millis(500));
+    }
+
+    /// A slow frame says which job ended just before it; a `SlowJob` records itself when it ends,
+    /// slow or not.
+    #[test]
+    fn a_slow_frame_names_the_job_that_ended_just_before() {
+        let t0 = Instant::now();
+        assert_eq!(last_job_text(None, t0), "last_job=none");
+        assert_eq!(last_job_text(Some(("library render slice", t0)), t0 + Duration::from_millis(37)), "last_job=library_render_slice ago_ms=37");
+        // A job ending in the past can't be "in the future" if the clocks disagree.
+        assert_eq!(last_job_text(Some(("x", t0 + Duration::from_millis(5))), t0), "last_job=x ago_ms=0");
+
+        drop(SlowJob::new("a quick job"));
+        let recorded = LAST_JOB.with(|last| last.get()).map(|(name, _)| name);
+        assert_eq!(recorded, Some("a quick job"), "a job that was not slow is recorded too");
+    }
+
+    /// Not a `#[test]` itself — see `main.rs`'s `mod tests`. The widget counter walks a whole tree
+    /// and counts the mapped ones (none of an unrealized tree).
+    pub(crate) fn run_the_widget_counter_walks_the_whole_tree(_runtime: &tokio::runtime::Runtime) {
+        let inner = gtk4::Box::new(gtk4::Orientation::Vertical, 0);
+        inner.append(&gtk4::Label::new(Some("a")));
+        inner.append(&gtk4::Label::new(Some("b")));
+        let root = gtk4::Box::new(gtk4::Orientation::Vertical, 0);
+        root.append(&inner);
+        root.append(&gtk4::Label::new(Some("c")));
+        assert_eq!(widget_counts(root.upcast_ref()), (5, 0), "root, inner box and three labels; nothing is on screen yet");
+
+        let window = gtk4::Window::builder().default_width(100).default_height(100).child(&root).build();
+        window.present();
+        crate::test_support::pump_until(|| root.is_mapped(), Duration::from_secs(5));
+        assert_eq!(widget_counts(root.upcast_ref()), (5, 5), "all five are on screen once the window is");
+        window.close();
     }
 }
