@@ -56,11 +56,11 @@ run_containerized_build() {
     echo "=== [$ENGINE build] $(date -u '+%Y-%m-%d %H:%M:%SZ') ==="
     "$ENGINE" build -t "$IMAGE" -f scripts/appimage-builder-bookworm.Dockerfile .
     echo "=== [$ENGINE run] ./scripts/build-appimage.sh $* ==="
+    # The GStreamer plugin cache that ships in the AppImage is built for a path under
+    # /run/user/1000 (scripts/appimage-gst-registry.sh): the unprivileged build user needs it
+    # writable (--tmpfs), and the build must fail rather than ship without the cache.
     "$ENGINE" run --rm \
         --user "$(id -u):$(id -g)" \
-        # The GStreamer plugin cache that ships in the AppImage is built for a path under
-        # /run/user/1000 (scripts/appimage-gst-registry.sh); the unprivileged build user needs it
-        # writable, and the build must fail rather than ship without the cache.
         --tmpfs "/run/user/1000:rw,mode=0700,uid=$(id -u),gid=$(id -g)" \
         -e AUDIOBOOKLET_REQUIRE_GST_PREWARM=1 \
         -e HOME=/tmp \
