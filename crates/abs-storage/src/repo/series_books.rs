@@ -24,10 +24,15 @@ pub async fn replace_all_for_library(pool: &SqlitePool, server_id: &str, library
         .execute(&mut *tx)
         .await?;
 
+    // A series can list a book this app never stored (an e-book, a podcast, a book the server
+    // listed after the items fetch): such a row would break the foreign key and, in one
+    // transaction, lose the whole library's series. It's skipped instead. `OR IGNORE` covers a
+    // server repeating the same book in one series.
     for row in rows {
         sqlx::query(
-            "INSERT INTO series_books (server_id, library_id, series_id, series_name, item_id, sequence)
-             VALUES (?, ?, ?, ?, ?, ?)",
+            "INSERT OR IGNORE INTO series_books (server_id, library_id, series_id, series_name, item_id, sequence)
+             SELECT ?, ?, ?, ?, ?, ?
+             WHERE EXISTS (SELECT 1 FROM items WHERE server_id = ? AND id = ?)",
         )
         .bind(server_id)
         .bind(library_id)
@@ -35,12 +40,38 @@ pub async fn replace_all_for_library(pool: &SqlitePool, server_id: &str, library
         .bind(row.series_name)
         .bind(row.item_id)
         .bind(row.sequence)
+        .bind(server_id)
+        .bind(row.item_id)
         .execute(&mut *tx)
         .await?;
     }
 
     tx.commit().await?;
     Ok(())
+}
+
+/// One cached book-in-series row: which series an item belongs to, and its position in it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SeriesMembership {
+    pub item_id: String,
+    pub series_id: String,
+    pub series_name: String,
+    pub sequence: Option<String>,
+}
+
+/// Every cached series membership for a server, across its libraries — what the Library screen
+/// groups by. A book in several series has several rows; they come back ordered by series name
+/// (then series id), so a caller keeping the first row per item gets a stable choice.
+pub async fn list_for_server(pool: &SqlitePool, server_id: &str) -> Result<Vec<SeriesMembership>> {
+    let rows: Vec<(String, String, String, Option<String>)> = sqlx::query_as(
+        "SELECT item_id, series_id, series_name, sequence FROM series_books
+         WHERE server_id = ? ORDER BY series_name COLLATE NOCASE, series_id, item_id",
+    )
+    .bind(server_id)
+    .fetch_all(pool)
+    .await?;
+
+    Ok(rows.into_iter().map(|(item_id, series_id, series_name, sequence)| SeriesMembership { item_id, series_id, series_name, sequence }).collect())
 }
 
 /// This item's own series/sequence, plus the series' total book count. `None` if the item was
@@ -174,6 +205,53 @@ mod tests {
         let info = find_for_item(&pool, &server_id, "item-5").await.unwrap().unwrap();
         assert_eq!(info.sequence, Some("5".to_string()));
         assert_eq!(info.total_books, 7, "3 books are synced, but book 7 is known to exist, so the total must be 7, not 3");
+    }
+
+    #[tokio::test]
+    async fn list_for_server_returns_every_membership_of_that_server_only() {
+        let (pool, server_id) = pool_with_items(&["item-1", "item-2", "item-3"]).await;
+        replace_all_for_library(
+            &pool,
+            &server_id,
+            "lib-1",
+            &[
+                NewSeriesBook { series_id: "s-b", series_name: "banda", item_id: "item-3", sequence: Some("1") },
+                NewSeriesBook { series_id: "s-a", series_name: "Aspirant", item_id: "item-2", sequence: Some("2") },
+                NewSeriesBook { series_id: "s-a", series_name: "Aspirant", item_id: "item-1", sequence: None },
+            ],
+        )
+        .await
+        .unwrap();
+        let other_server = servers::add(&pool, "https://b.example").await.unwrap();
+
+        let memberships = list_for_server(&pool, &server_id).await.unwrap();
+        let ids: Vec<&str> = memberships.iter().map(|m| m.item_id.as_str()).collect();
+        assert_eq!(ids, ["item-1", "item-2", "item-3"], "ordered by series name (case-insensitively), then item");
+        assert_eq!(memberships[1].series_name, "Aspirant");
+        assert_eq!(memberships[1].sequence.as_deref(), Some("2"));
+        assert_eq!(memberships[0].sequence, None);
+        assert!(list_for_server(&pool, &other_server).await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn replace_all_skips_a_book_that_is_not_stored_instead_of_failing() {
+        let (pool, server_id) = pool_with_items(&["item-1"]).await;
+        replace_all_for_library(
+            &pool,
+            &server_id,
+            "lib-1",
+            &[
+                NewSeriesBook { series_id: "series-1", series_name: "Foundation", item_id: "never-stored", sequence: Some("1") },
+                NewSeriesBook { series_id: "series-1", series_name: "Foundation", item_id: "item-1", sequence: Some("2") },
+                NewSeriesBook { series_id: "series-1", series_name: "Foundation", item_id: "item-1", sequence: Some("2") },
+            ],
+        )
+        .await
+        .unwrap();
+
+        let memberships = list_for_server(&pool, &server_id).await.unwrap();
+        assert_eq!(memberships.len(), 1, "the unknown book is skipped and the repeated row is stored once");
+        assert_eq!(memberships[0].item_id, "item-1");
     }
 
     #[tokio::test]

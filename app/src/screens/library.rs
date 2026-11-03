@@ -132,7 +132,8 @@ impl LibraryScreen {
     /// filter is applied — the same acceptable gap `apply_view` already has (no sort button
     /// highlights after Home's tap-through either).
     pub(crate) fn apply_series_filter(&self, series_name: &str) {
-        *self.widgets.category_filter.borrow_mut() = CategoryFilter::OneSeries(series_name.to_string());
+        let name = resolve_series_filter_name(&self.widgets.data.borrow(), series_name);
+        *self.widgets.category_filter.borrow_mut() = CategoryFilter::OneSeries(name);
         self.widgets.grouping.set(Grouping::None);
         request_render(&self.widgets);
     }
@@ -317,6 +318,20 @@ struct LibraryData {
     /// the "In progress only" filter. Loaded in the same one-query-per-concern pass as
     /// `downloaded`, never per card.
     last_listened: std::collections::HashMap<String, Progress>,
+    /// Each book's place in its series, keyed by item id, from the server's series list (cached
+    /// by the sync). The list endpoint's own `series_name` is a display string with the book
+    /// number glued on ("Aspirant Przeworski #2"), so grouping and ordering by series use this
+    /// instead. Books missing from it (series list not fetched yet or failing) fall back to
+    /// `series_name`; see [`series_group_name`].
+    series: std::collections::HashMap<String, SeriesPlace>,
+}
+
+/// One book's series as the server's series list gives it: a clean name and the book's number.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct SeriesPlace {
+    name: String,
+    /// "3", "5.5", or `None` for a series that doesn't number its books.
+    sequence: Option<String>,
 }
 
 /// Builds the screen. Signature mirrors `home::build`'s exactly — same reasoning: `server`/
@@ -600,7 +615,7 @@ pub fn build(
         grouping: Rc::new(Cell::new(Grouping::None)),
         category_filter: Rc::new(std::cell::RefCell::new(CategoryFilter::All)),
         offline_mode,
-        data: Rc::new(std::cell::RefCell::new(LibraryData { items: Vec::new(), downloaded: std::collections::HashSet::new(), last_listened: std::collections::HashMap::new() })),
+        data: Rc::new(std::cell::RefCell::new(LibraryData { items: Vec::new(), downloaded: std::collections::HashSet::new(), last_listened: std::collections::HashMap::new(), series: std::collections::HashMap::new() })),
         on_open: Rc::new(on_open),
         view_options_button: view_options_button.clone(),
         in_progress_only_switch: in_progress_only_switch.clone(),
@@ -1463,7 +1478,29 @@ async fn load(pool: &SqlitePool, server_id: &str, account_id: &str) -> CoreResul
     }
     let downloaded = abs_core::download_tracks::downloaded_item_ids(pool, server_id).await?.into_iter().collect();
     let last_listened = abs_storage::repo::progress::list_for_account(pool, account_id).await?.into_iter().map(|progress| (progress.item_id.clone(), progress)).collect();
-    Ok(LibraryData { items, downloaded, last_listened })
+    // The series list is a refinement of the books, never a requirement: a read failing here
+    // (or nothing cached) just means books group by their own `series_name`.
+    let series = match abs_storage::repo::series_books::list_for_server(pool, server_id).await {
+        Ok(rows) => series_places(rows),
+        Err(err) => {
+            tracing::warn!(%err, "couldn't read the cached series list; grouping by each book's own series name");
+            std::collections::HashMap::new()
+        }
+    };
+    Ok(LibraryData { items, downloaded, last_listened, series })
+}
+
+/// One [`SeriesPlace`] per book. A book in several series keeps the first row, which is the one
+/// whose series name sorts first (the order `list_for_server` returns), so the choice is stable.
+fn series_places(rows: Vec<abs_storage::repo::series_books::SeriesMembership>) -> std::collections::HashMap<String, SeriesPlace> {
+    let mut places = std::collections::HashMap::new();
+    for row in rows {
+        if row.series_name.trim().is_empty() {
+            continue;
+        }
+        places.entry(row.item_id).or_insert(SeriesPlace { name: row.series_name, sequence: row.sequence.filter(|s| !s.trim().is_empty()) });
+    }
+    places
 }
 
 fn apply(data: LibraryData, widgets: &LibraryWidgets) {
@@ -1588,7 +1625,7 @@ fn render_from_current_data(widgets: &LibraryWidgets) {
         // `grouping` instead (below), not this.
         .filter(|item| match &*widgets.category_filter.borrow() {
             CategoryFilter::Genre(genre) => item.genres().iter().any(|g| g == genre),
-            CategoryFilter::OneSeries(name) => item.series_name.as_deref() == Some(name.as_str()),
+            CategoryFilter::OneSeries(name) => series_group_name(item, &data.series) == Some(name.as_str()),
             CategoryFilter::All | CategoryFilter::Author | CategoryFilter::Series => true,
         })
         .collect();
@@ -1622,12 +1659,12 @@ fn render_from_current_data(widgets: &LibraryWidgets) {
     // group key makes same-key items contiguous without disturbing their relative order from
     // the sort above, so each bucket is still internally sorted by `sort`.
     if grouping != Grouping::None {
-        visible.sort_by_cached_key(|item| group_order_key(item, grouping, server_author_keys));
+        visible.sort_by_cached_key(|item| group_order_key(item, grouping, server_author_keys, &data.series));
     }
     let book_count = visible.len();
     let mut groups: Vec<(GroupKey, Vec<&Item>)> = Vec::new();
     for item in visible {
-        let key = group_key_for(item, grouping);
+        let key = group_key_for(item, grouping, &data.series);
         match groups.last_mut() {
             Some((last_key, bucket)) if grouping == Grouping::None || *last_key == key => bucket.push(item),
             _ => groups.push((key, vec![item])),
@@ -1950,16 +1987,54 @@ impl GroupKey {
 /// `Grouping::None` is never actually consulted (every item lands in the render loop's single
 /// un-headered bucket regardless of what this returns), so its `Named(String::new())` here is
 /// just a harmless placeholder.
-fn group_key_for(item: &Item, grouping: Grouping) -> GroupKey {
+fn group_key_for(item: &Item, grouping: Grouping, series: &std::collections::HashMap<String, SeriesPlace>) -> GroupKey {
     match grouping {
         Grouping::None => GroupKey::Named(String::new()),
         Grouping::ByAuthor => named(&item.author)
             .map(|author| GroupKey::Named(author.to_string()))
             .unwrap_or_else(|| GroupKey::Fallback(tr("Unknown author"))),
-        Grouping::BySeries => named(&item.series_name)
+        Grouping::BySeries => series_group_name(item, series)
             .map(|series| GroupKey::Named(series.to_string()))
             .unwrap_or_else(|| GroupKey::Fallback(tr_ctx("Group header for books without a series", "Other"))),
     }
+}
+
+/// The series a book is grouped under: the server's own series name from its series list, so
+/// "Aspirant Przeworski" for all three books. Without a cached entry for the book (the series
+/// list couldn't be fetched, or was never fetched), the book's own `series_name` — the server's
+/// display string, number included — so a series is never lost, only grouped more coarsely until
+/// the next successful sync. `None` for a book without any series.
+fn series_group_name<'a>(item: &'a Item, series: &'a std::collections::HashMap<String, SeriesPlace>) -> Option<&'a str> {
+    series.get(&item.id).map(|place| place.name.as_str()).or_else(|| named(&item.series_name))
+}
+
+/// Where a book sits within its series group, as a sort key: numbered books by number ("5.5"
+/// between 5 and 6), the rest after them. Constant for every other grouping and for a book
+/// falling back to its `series_name`, so the sort leaves those in the order they already had.
+fn series_position_key(item: &Item, grouping: Grouping, series: &std::collections::HashMap<String, SeriesPlace>) -> (bool, u64) {
+    let number = (grouping == Grouping::BySeries)
+        .then(|| series.get(&item.id))
+        .flatten()
+        .and_then(|place| place.sequence.as_deref())
+        .and_then(|sequence| sequence.trim().parse::<f64>().ok())
+        .filter(|number| number.is_finite() && *number >= 0.0);
+    match number {
+        // Non-negative floats compare like their bits; `+ 0.0` turns a "-0" into a plain 0.
+        Some(number) => (false, (number + 0.0).to_bits()),
+        None => (true, 0),
+    }
+}
+
+/// The name `CategoryFilter::OneSeries` should carry for a series name Item Detail hands over.
+/// Item Detail shows the book's own `series_name` ("Aspirant Przeworski #2"); the book it came
+/// from knows its real series from the cached series list, and that is the name every book of the
+/// series is filtered by. Unchanged when nothing is cached for it.
+fn resolve_series_filter_name(data: &LibraryData, raw: &str) -> String {
+    data.items
+        .iter()
+        .find(|item| item.series_name.as_deref() == Some(raw))
+        .and_then(|item| data.series.get(&item.id))
+        .map_or_else(|| raw.to_string(), |place| place.name.clone())
 }
 
 /// Alphabetical by author, case-insensitively, with books without one after every named one
@@ -1995,13 +2070,16 @@ fn server_author_keys(items: &[&Item]) -> bool {
 /// The order of the group headers: by the group's name as shown, or, grouped by author with the
 /// server's keys, by surname first. Books with the same author as shown always share a key, so a
 /// group is never split, and the label breaks any tie so two authors can't interleave.
-fn group_order_key(item: &Item, grouping: Grouping, server_author_keys: bool) -> (u8, String, String) {
-    let (rank, label) = group_key_for(item, grouping).sort_rank();
+///
+/// Grouped by series, a group's books then go by their number in the series (the last element);
+/// books without a number, and the sorts that came before for equal numbers, keep their order.
+fn group_order_key(item: &Item, grouping: Grouping, server_author_keys: bool, series: &std::collections::HashMap<String, SeriesPlace>) -> (u8, String, String, (bool, u64)) {
+    let (rank, label) = group_key_for(item, grouping, series).sort_rank();
     let surname = match (grouping, rank) {
         (Grouping::ByAuthor, 0) if server_author_keys => named(&item.author_sort).map(str::to_lowercase).unwrap_or_default(),
         _ => String::new(),
     };
-    (rank, surname, label)
+    (rank, surname, label, series_position_key(item, grouping, series))
 }
 
 /// An author or series name, or `None` when there isn't one. Audiobookshelf sends `""` for a book
@@ -2105,6 +2183,10 @@ pub(crate) mod tests {
     use wiremock::matchers::{method, path};
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
+    fn no_series() -> std::collections::HashMap<String, SeriesPlace> {
+        std::collections::HashMap::new()
+    }
+
     fn stored_item(author: Option<&str>, series_name: Option<&str>) -> Item {
         Item {
             id: "item-1".to_string(),
@@ -2130,12 +2212,70 @@ pub(crate) mod tests {
     fn a_blank_author_or_series_groups_with_the_missing_ones() {
         for blank in [None, Some(""), Some("  ")] {
             let item = stored_item(blank, blank);
-            assert!(matches!(group_key_for(&item, Grouping::ByAuthor), GroupKey::Fallback(_)), "{blank:?}");
-            assert!(matches!(group_key_for(&item, Grouping::BySeries), GroupKey::Fallback(_)), "{blank:?}");
+            assert!(matches!(group_key_for(&item, Grouping::ByAuthor, &no_series()), GroupKey::Fallback(_)), "{blank:?}");
+            assert!(matches!(group_key_for(&item, Grouping::BySeries, &no_series()), GroupKey::Fallback(_)), "{blank:?}");
         }
         let named = stored_item(Some("Andy Weir"), Some("Bobiverse"));
-        assert!(group_key_for(&named, Grouping::ByAuthor) == GroupKey::Named("Andy Weir".to_string()));
-        assert!(group_key_for(&named, Grouping::BySeries) == GroupKey::Named("Bobiverse".to_string()));
+        assert!(group_key_for(&named, Grouping::ByAuthor, &no_series()) == GroupKey::Named("Andy Weir".to_string()));
+        assert!(group_key_for(&named, Grouping::BySeries, &no_series()) == GroupKey::Named("Bobiverse".to_string()));
+    }
+
+    fn place(name: &str, sequence: Option<&str>) -> SeriesPlace {
+        SeriesPlace { name: name.to_string(), sequence: sequence.map(str::to_string) }
+    }
+
+    /// The server's series list names the group and numbers the books; the book's own
+    /// `series_name` ("X #2") is only the fallback for a book without an entry.
+    #[test]
+    fn series_groups_use_the_series_list_and_fall_back_to_the_books_own_name() {
+        let series = std::collections::HashMap::from([("item-1".to_string(), place("Aspirant Przeworski", Some("2")))]);
+        let mut cached = stored_item(None, Some("Aspirant Przeworski #2"));
+        assert!(group_key_for(&cached, Grouping::BySeries, &series) == GroupKey::Named("Aspirant Przeworski".to_string()));
+        cached.id = "item-2".to_string();
+        assert!(group_key_for(&cached, Grouping::BySeries, &series) == GroupKey::Named("Aspirant Przeworski #2".to_string()), "no entry: the book's own name");
+        let seriesless = stored_item(None, None);
+        assert!(matches!(group_key_for(&seriesless, Grouping::BySeries, &std::collections::HashMap::new()), GroupKey::Fallback(_)));
+        // A stale entry for a book the list no longer holds is simply never asked for.
+        assert!(matches!(group_key_for(&seriesless, Grouping::BySeries, &series), GroupKey::Named(_)), "item-1 is in the list");
+    }
+
+    #[test]
+    fn books_of_a_series_are_ordered_by_number_with_unnumbered_ones_last() {
+        let mut books = Vec::new();
+        let mut series = std::collections::HashMap::new();
+        for (id, sequence) in [("a", Some("10")), ("b", Some("2")), ("c", None), ("d", Some("2.5")), ("e", Some("")), ("f", Some("-1")), ("g", Some("0")), ("h", Some("-0")), ("i", Some("x")), ("j", Some(" 1 "))] {
+            let mut book = stored_item(None, Some("S"));
+            book.id = id.to_string();
+            series.insert(id.to_string(), place("S", sequence.filter(|s| !s.is_empty())));
+            books.push(book);
+        }
+        let mut sorted: Vec<&Item> = books.iter().collect();
+        sorted.sort_by_cached_key(|item| group_order_key(item, Grouping::BySeries, false, &series));
+        let order: Vec<&str> = sorted.iter().map(|item| item.id.as_str()).collect();
+        assert_eq!(order, ["g", "h", "j", "b", "d", "a", "c", "e", "f", "i"], "numbers 0, -0, 1, 2, 2.5, 10; then no number, a negative one and junk in their given order");
+        // Other groupings never use the number.
+        assert_eq!(series_position_key(&books[0], Grouping::ByAuthor, &series), (true, 0));
+    }
+
+    #[test]
+    fn the_series_filter_name_is_resolved_from_the_book_it_came_from() {
+        let mut item = stored_item(None, Some("Aspirant Przeworski #2"));
+        item.id = "item-2".to_string();
+        let data = |series| LibraryData { items: vec![item.clone()], downloaded: Default::default(), last_listened: Default::default(), series };
+        let cached = data(std::collections::HashMap::from([("item-2".to_string(), place("Aspirant Przeworski", Some("2")))]));
+        assert_eq!(resolve_series_filter_name(&cached, "Aspirant Przeworski #2"), "Aspirant Przeworski");
+        assert_eq!(resolve_series_filter_name(&cached, "Something else"), "Something else");
+        assert_eq!(resolve_series_filter_name(&data(Default::default()), "Aspirant Przeworski #2"), "Aspirant Przeworski #2", "nothing cached: unchanged");
+    }
+
+    #[test]
+    fn series_places_keep_one_series_per_book_and_skip_blank_names() {
+        use abs_storage::repo::series_books::SeriesMembership;
+        let row = |item: &str, name: &str, sequence: Option<&str>| SeriesMembership { item_id: item.to_string(), series_id: format!("id-{name}"), series_name: name.to_string(), sequence: sequence.map(str::to_string) };
+        let places = series_places(vec![row("a", "Alpha", Some("1")), row("a", "Beta", Some("7")), row("b", "  ", Some("1")), row("c", "Gamma", Some(" "))]);
+        assert_eq!(places.get("a"), Some(&place("Alpha", Some("1"))), "the first row wins");
+        assert!(!places.contains_key("b"), "a blank name is no series");
+        assert_eq!(places.get("c"), Some(&place("Gamma", None)), "a blank number is no number");
     }
 
     #[test]
@@ -2212,8 +2352,8 @@ pub(crate) mod tests {
         let keys = server_author_keys(&all);
         assert!(keys);
         let mut grouped = all.clone();
-        grouped.sort_by_cached_key(|item| group_order_key(item, Grouping::ByAuthor, keys));
-        let order: Vec<(String, &str)> = grouped.iter().map(|item| (group_key_for(item, Grouping::ByAuthor).label().to_string(), item.title.as_str())).collect();
+        grouped.sort_by_cached_key(|item| group_order_key(item, Grouping::ByAuthor, keys, &no_series()));
+        let order: Vec<(String, &str)> = grouped.iter().map(|item| (group_key_for(item, Grouping::ByAuthor, &no_series()).label().to_string(), item.title.as_str())).collect();
         let labels: Vec<&str> = order.iter().map(|(label, _)| label.as_str()).collect();
         assert_eq!(&labels[..2], ["Frank Herbert", "Ursula K. Le Guin"]);
         assert_eq!(&labels[2..4], ["J.R.R. Tolkien", "J.R.R. Tolkien"], "Tolkien's books are adjacent");
@@ -2221,8 +2361,8 @@ pub(crate) mod tests {
 
         // Without server keys: by the name as shown, as before.
         let mut plain = all.clone();
-        plain.sort_by_cached_key(|item| group_order_key(item, Grouping::ByAuthor, false));
-        let plain_labels: Vec<String> = plain.iter().map(|item| group_key_for(item, Grouping::ByAuthor).label().to_string()).collect();
+        plain.sort_by_cached_key(|item| group_order_key(item, Grouping::ByAuthor, false, &no_series()));
+        let plain_labels: Vec<String> = plain.iter().map(|item| group_key_for(item, Grouping::ByAuthor, &no_series()).label().to_string()).collect();
         assert_eq!(plain_labels[0], "Frank Herbert");
         assert_eq!(plain_labels[1], "J.R.R. Tolkien");
     }
@@ -3811,6 +3951,127 @@ pub(crate) mod tests {
         let mut others = entries[5..].to_vec();
         others.sort();
         assert_eq!(others, ["Book Blank", "Book None"], "a blank series is no series: {entries:?}");
+    }
+
+    /// Opens the Library on a mock server listing `items` and answering the series route with
+    /// `series_response`, in Grid view (what `flow_box_entries` reads). The window is returned so
+    /// the caller keeps it alive for the test's length.
+    fn series_scenario(runtime: &tokio::runtime::Runtime, items: Vec<serde_json::Value>, series_response: ResponseTemplate) -> (LibraryScreen, TestHooks, adw::ApplicationWindow, MockServer) {
+        const LIBRARY: &str = "e4bb1afb-4a4f-4dd6-8be0-e615d233185b";
+        let mock_server = runtime.block_on(MockServer::start());
+        runtime.block_on(
+            Mock::given(method("GET"))
+                .and(path("/api/libraries"))
+                .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({ "libraries": [{ "id": LIBRARY, "name": "Audiobooks", "mediaType": "book" }] })))
+                .mount(&mock_server),
+        );
+        let last = items.len() as i32 - 1;
+        runtime.block_on(Mock::given(method("GET")).and(path(format!("/api/libraries/{LIBRARY}/items"))).respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({ "results": items }))).mount(&mock_server));
+        runtime.block_on(Mock::given(method("GET")).and(path(format!("/api/libraries/{LIBRARY}/series"))).respond_with(series_response).mount(&mock_server));
+
+        let pool = runtime.block_on(pool());
+        let (server, account) = runtime.block_on(account_and_server(&pool, &mock_server.uri()));
+        let session = abs_core::auth::Session::new(pool.clone(), &server, &account);
+        let offline_mode = crate::offline_mode::OfflineModeState::new(pool.clone());
+        let screen = build(pool, crate::test_support::test_paths(), server, account, session, offline_mode, |_| {}, || {}, || {});
+        let hooks = screen.test_hooks().clone();
+
+        let app_window = adw::ApplicationWindow::builder().build();
+        app_window.set_content(Some(&screen.root));
+        app_window.present();
+        pump_until(|| app_window.is_mapped(), Duration::from_secs(5));
+        // Library defaults to List view; switch to Grid so `flow_box_entries` sees anything.
+        pump_until(|| hooks.list_box.row_at_index(last).is_some(), Duration::from_secs(10));
+        hooks.view_toggle.set_active(false);
+        pump_until(|| hooks.flow_box.child_at_index(last).is_some(), Duration::from_secs(10));
+        (screen, hooks, app_window, mock_server)
+    }
+
+    fn series_response(books: serde_json::Value) -> ResponseTemplate {
+        ResponseTemplate::new(200).set_body_json(serde_json::json!({ "results": books }))
+    }
+
+    fn strings(entries: &[&str]) -> Vec<String> {
+        entries.iter().map(|entry| entry.to_string()).collect()
+    }
+
+    /// The reported bug: Audiobookshelf's list endpoint sends `seriesName` as "Name #N", so each
+    /// book got a header of its own ("Aspirant Przeworski #1", "#2", ...). The series list gives
+    /// the real name and the numbers: one header per series, books in series order, whatever
+    /// order the server listed them in.
+    pub(crate) fn run_series_grouping_uses_the_servers_series_names_and_numbers(runtime: &tokio::runtime::Runtime) {
+        let items = vec![
+            item_json_with_series_and_genres("item-2", "Krzywda", Some("Aspirant Przeworski #2"), &[]),
+            item_json_with_series_and_genres("item-3", "Milczenie", Some("Aspirant Przeworski #3"), &[]),
+            item_json_with_series_and_genres("item-1", "Skrucha", Some("Aspirant Przeworski #1"), &[]),
+            item_json_with_series_and_genres("item-6", "Nowela", Some("Aspirant Przeworski #2.5"), &[]),
+            item_json_with_series_and_genres("item-4", "Tajemnica piwnicy", Some("Banda z Burej #1"), &[]),
+            item_json_with_series_and_genres("item-7", "Bez numeru", Some("Banda z Burej"), &[]),
+            item_json_with_series_and_genres("item-5", "Samotna", None, &[]),
+        ];
+        let series = series_response(serde_json::json!([
+            { "id": "s-1", "name": "Aspirant Przeworski", "books": [{ "id": "item-3", "sequence": "3" }, { "id": "item-1", "sequence": "1" }, { "id": "item-2", "sequence": "2" }, { "id": "item-6", "sequence": "2.5" }] },
+            { "id": "s-2", "name": "Banda z Burej", "books": [{ "id": "item-7", "sequence": null }, { "id": "item-4", "sequence": "1" }] },
+        ]));
+        let (screen, hooks, _window, _server) = series_scenario(runtime, items, series);
+
+        hooks.category_series.set_active(true);
+        let expected = strings(&["§Aspirant Przeworski", "Skrucha", "Krzywda", "Nowela", "Milczenie", "§Banda z Burej", "Tajemnica piwnicy", "Bez numeru", "§Other", "Samotna"]);
+        pump_until(|| flow_box_entries(&hooks.flow_box) == expected, Duration::from_secs(10));
+        assert_eq!(flow_box_entries(&hooks.flow_box), expected, "one header per series, books by number (2.5 between 2 and 3, the unnumbered one last)");
+
+        // Item Detail hands over the book's own display string; every book of the series shows.
+        screen.apply_series_filter("Aspirant Przeworski #2");
+        let in_series = strings(&["Skrucha", "Krzywda", "Nowela", "Milczenie"]);
+        pump_until(|| flow_box_entries(&hooks.flow_box).len() == 4, Duration::from_secs(5));
+        let mut shown = flow_box_entries(&hooks.flow_box);
+        shown.sort();
+        let mut expected_shown = in_series;
+        expected_shown.sort();
+        assert_eq!(shown, expected_shown, "the whole series, not just the one book whose label was tapped");
+    }
+
+    /// The series list can't be had (a 500 here; the sync tests cover other failures and an
+    /// older server): the Library still opens, nothing is lost, and each book falls back to the
+    /// series name the list endpoint gave it.
+    pub(crate) fn run_series_grouping_falls_back_when_the_series_list_is_not_cached(runtime: &tokio::runtime::Runtime) {
+        let items = vec![
+            item_json_with_series_and_genres("item-1", "Skrucha", Some("Aspirant Przeworski #1"), &[]),
+            item_json_with_series_and_genres("item-2", "Krzywda", Some("Aspirant Przeworski #2"), &[]),
+            item_json_with_series_and_genres("item-3", "Standalone Series", Some("Dune"), &[]),
+            item_json_with_series_and_genres("item-4", "Samotna", None, &[]),
+        ];
+        let (screen, hooks, _window, _server) = series_scenario(runtime, items, ResponseTemplate::new(500));
+
+        hooks.category_series.set_active(true);
+        let expected = strings(&["§Aspirant Przeworski #1", "Skrucha", "§Aspirant Przeworski #2", "Krzywda", "§Dune", "Standalone Series", "§Other", "Samotna"]);
+        pump_until(|| flow_box_entries(&hooks.flow_box) == expected, Duration::from_secs(10));
+        assert_eq!(flow_box_entries(&hooks.flow_box), expected, "every book keeps a series header, grouped by its own series name");
+
+        // The tap-through still finds the book it came from.
+        screen.apply_series_filter("Aspirant Przeworski #2");
+        pump_until(|| flow_box_entries(&hooks.flow_box).len() == 1, Duration::from_secs(5));
+        assert_eq!(flow_box_entries(&hooks.flow_box), strings(&["Krzywda"]));
+    }
+
+    /// A series list that covers only some of the books (a book added since, one the server's
+    /// series list doesn't mention, a stale entry for a book this app never stored): books with
+    /// an entry group by it, the rest by their own series name, side by side, without errors.
+    pub(crate) fn run_series_grouping_copes_with_a_partly_cached_series_list(runtime: &tokio::runtime::Runtime) {
+        let items = vec![
+            item_json_with_series_and_genres("item-1", "Skrucha", Some("Aspirant Przeworski #1"), &[]),
+            item_json_with_series_and_genres("item-2", "Krzywda", Some("Aspirant Przeworski #2"), &[]),
+            item_json_with_series_and_genres("item-3", "Milczenie", Some("Aspirant Przeworski #3"), &[]),
+        ];
+        let series = series_response(serde_json::json!([
+            { "id": "s-1", "name": "Aspirant Przeworski", "books": [{ "id": "item-2", "sequence": "2" }, { "id": "item-1", "sequence": "1" }, { "id": "never-listed", "sequence": "9" }] },
+        ]));
+        let (_screen, hooks, _window, _server) = series_scenario(runtime, items, series);
+
+        hooks.category_series.set_active(true);
+        let expected = strings(&["§Aspirant Przeworski", "Skrucha", "Krzywda", "§Aspirant Przeworski #3", "Milczenie"]);
+        pump_until(|| flow_box_entries(&hooks.flow_box) == expected, Duration::from_secs(10));
+        assert_eq!(flow_box_entries(&hooks.flow_box), expected);
     }
 
     /// Not a `#[test]` itself — see `main.rs`'s `mod tests`. What a screen reader gets here: a

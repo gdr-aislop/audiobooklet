@@ -329,6 +329,17 @@ pub async fn sync_all(
         let removing = Instant::now();
         remove_unlisted_items(pool, paths, server_id, &library.id, &items_listed, &downloaded).await?;
         timings.tidy += removing.elapsed();
+
+        // Series names and book numbers: the list endpoint only has a display string ("Name #2"),
+        // so the Library groups and orders by this separate, structured list instead. Best
+        // effort — books keep working without it (the Library falls back to the display string),
+        // so a server that can't answer must not fail the whole sync. Runs after the removal
+        // above so every row it caches refers to a book that is still stored.
+        if library.media_type != "podcast" {
+            if let Err(err) = crate::series::sync_library_series(pool, &api, server_id, &library.id).await {
+                tracing::warn!(%err, library_id = %library.id, "couldn't refresh the library's series list; keeping what is cached");
+            }
+        }
     }
     if timings.libraries > 0 {
         tracing::info!("{}", timings.line());
@@ -1048,5 +1059,84 @@ mod tests {
         assert_eq!(stored_titles(&pool, &server_id, "33333333-3333-4333-8333-333333333333").await, ["Audiobook", "Older Server Book"]);
         assert!(items::get(&pool, &server_id, "ebook").await.is_ok(), "stored, just not listed");
         assert_eq!(libraries::list_for_server(&pool, &server_id).await.unwrap().len(), 2, "the podcast library itself is still listed");
+    }
+
+    const SERIES_LIBRARY: &str = "55555555-5555-4555-8555-555555555555";
+
+    async fn mount_one_book_library(server: &MockServer) {
+        mount_libraries(server, serde_json::json!([{ "id": SERIES_LIBRARY, "name": "Audiobooks", "mediaType": "book" }])).await;
+        mount_items(server, SERIES_LIBRARY, serde_json::json!([item_json("item-1", "Skrucha"), item_json("item-2", "Krzywda")])).await;
+    }
+
+    fn series_body() -> serde_json::Value {
+        serde_json::json!({ "results": [
+            { "id": "series-1", "name": "Aspirant Przeworski", "books": [{ "id": "item-1", "sequence": "1" }, { "id": "item-2", "sequence": "2" }, { "id": "not-stored", "sequence": "3" }] },
+        ] })
+    }
+
+    async fn cached_series(pool: &SqlitePool, server_id: &str) -> Vec<(String, String, Option<String>)> {
+        abs_storage::repo::series_books::list_for_server(pool, server_id).await.unwrap().into_iter().map(|m| (m.item_id, m.series_name, m.sequence)).collect()
+    }
+
+    /// The list endpoint's `seriesName` is a display string ("Name #2"); the structured name and
+    /// number come from the series endpoint, which the sync caches for the Library to group by.
+    #[tokio::test]
+    async fn sync_all_caches_each_librarys_series_and_skips_books_it_never_stored() {
+        let mock_server = MockServer::start().await;
+        mount_one_book_library(&mock_server).await;
+        Mock::given(method("GET")).and(path(format!("/api/libraries/{SERIES_LIBRARY}/series"))).respond_with(ResponseTemplate::new(200).set_body_json(series_body())).mount(&mock_server).await;
+
+        let (pool, server_id) = pool_with_server(&mock_server.uri()).await;
+        sync_all(&pool, &ConnectionTarget::direct(&mock_server.uri()), &test_paths(), &server_id, "token").await.unwrap();
+
+        assert_eq!(
+            cached_series(&pool, &server_id).await,
+            [
+                ("item-1".to_string(), "Aspirant Przeworski".to_string(), Some("1".to_string())),
+                ("item-2".to_string(), "Aspirant Przeworski".to_string(), Some("2".to_string())),
+            ],
+            "the unknown book `not-stored` is skipped rather than failing the sync"
+        );
+    }
+
+    /// A server that can't give the series list (an error, junk, an older server without the
+    /// route) must neither fail the sync nor lose the books, and must keep whatever was cached
+    /// by an earlier sync.
+    #[tokio::test]
+    async fn a_failing_series_list_does_not_fail_the_sync_or_drop_the_cached_series() {
+        for failing in [ResponseTemplate::new(500), ResponseTemplate::new(404), ResponseTemplate::new(401), ResponseTemplate::new(200).set_body_string("<html>not json</html>"), ResponseTemplate::new(200).set_body_json(serde_json::json!({ "results": "nope" }))] {
+            let mock_server = MockServer::start().await;
+            mount_one_book_library(&mock_server).await;
+            let (pool, server_id) = pool_with_server(&mock_server.uri()).await;
+
+            // An earlier, healthy sync cached the series.
+            Mock::given(method("GET")).and(path(format!("/api/libraries/{SERIES_LIBRARY}/series"))).respond_with(ResponseTemplate::new(200).set_body_json(series_body())).mount(&mock_server).await;
+            sync_all(&pool, &ConnectionTarget::direct(&mock_server.uri()), &test_paths(), &server_id, "token").await.unwrap();
+            let before = cached_series(&pool, &server_id).await;
+            assert_eq!(before.len(), 2);
+
+            // Now the series route breaks.
+            mock_server.reset().await;
+            mount_one_book_library(&mock_server).await;
+            Mock::given(method("GET")).and(path(format!("/api/libraries/{SERIES_LIBRARY}/series"))).respond_with(failing).mount(&mock_server).await;
+            sync_all(&pool, &ConnectionTarget::direct(&mock_server.uri()), &test_paths(), &server_id, "token").await.expect("a failing series list must not fail the sync");
+
+            assert_eq!(stored_titles(&pool, &server_id, SERIES_LIBRARY).await, ["Krzywda", "Skrucha"]);
+            assert_eq!(cached_series(&pool, &server_id).await, before, "the previously cached series survive a failed refresh");
+        }
+    }
+
+    /// First sync ever, and the series route is broken: nothing cached, books still stored.
+    #[tokio::test]
+    async fn a_failing_series_list_on_the_first_sync_leaves_no_series_cached() {
+        let mock_server = MockServer::start().await;
+        mount_one_book_library(&mock_server).await;
+        Mock::given(method("GET")).and(path(format!("/api/libraries/{SERIES_LIBRARY}/series"))).respond_with(ResponseTemplate::new(500)).mount(&mock_server).await;
+
+        let (pool, server_id) = pool_with_server(&mock_server.uri()).await;
+        sync_all(&pool, &ConnectionTarget::direct(&mock_server.uri()), &test_paths(), &server_id, "token").await.unwrap();
+
+        assert_eq!(stored_titles(&pool, &server_id, SERIES_LIBRARY).await, ["Krzywda", "Skrucha"]);
+        assert!(cached_series(&pool, &server_id).await.is_empty());
     }
 }
