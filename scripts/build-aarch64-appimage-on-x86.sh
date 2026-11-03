@@ -79,12 +79,12 @@ run_containerized_build() {
     fi
 
     echo "=== [$ENGINE run arm64] ./scripts/build-appimage.sh --arch aarch64 $* ==="
+    # The GStreamer plugin cache that ships in the AppImage is built for a path under
+    # /run/user/1000 (scripts/appimage-gst-registry.sh): the unprivileged build user needs it
+    # writable (--tmpfs), and the build must fail rather than ship without the cache.
     "$ENGINE" run --rm \
         --platform linux/arm64 \
         --user "$(id -u):$(id -g)" \
-        # The GStreamer plugin cache that ships in the AppImage is built for a path under
-        # /run/user/1000 (scripts/appimage-gst-registry.sh); the unprivileged build user needs it
-        # writable, and the build must fail rather than ship without the cache.
         --tmpfs "/run/user/1000:rw,mode=0700,uid=$(id -u),gid=$(id -g)" \
         -e AUDIOBOOKLET_REQUIRE_GST_PREWARM=1 \
         -e HOME=/tmp \

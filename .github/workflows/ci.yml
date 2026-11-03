@@ -85,6 +85,11 @@ jobs:
         timeout-minutes: 5
         run: bash scripts/test-appimage-gst-env.sh
 
+      # The Docker build wrappers, against a fake docker (no daemon): one complete `docker run`.
+      - name: Docker build wrapper tests
+        timeout-minutes: 2
+        run: bash scripts/test-build-wrappers.sh
+
       - name: Build
         timeout-minutes: 20
         run: cargo build --workspace --all-targets --locked
