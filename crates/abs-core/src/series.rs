@@ -1,10 +1,10 @@
 //! Per-book series membership and real position ("book 5 of 8"), sourced from
 //! `abs_api::Client::get_library_series_summaries` — the only place Audiobookshelf's API exposes
-//! a book's actual `sequence` on (`media.metadata.seriesName`, used elsewhere in this app, is a
-//! flat convenience string with no number attached). Deliberately **not** part of the general
-//! sync cycle (`sync::sync_all`): the caller (`app`'s Item Detail screen) fetches this on demand,
-//! async and non-blocking, only for a library actually being viewed — see that screen's own doc
-//! comment for the render-now/refine-in-place shape this feeds into. [`series_info_for_item`] is
+//! a book's series as a clean name and a separate `sequence` (`media.metadata.seriesName`, used
+//! elsewhere in this app, is a display string with the number glued on: "Name #5"). The cache
+//! this fills (`series_books`) is what the Library groups and orders by, and what Item Detail's
+//! "5/8" reads. [`sync_library_series`] runs for every book library as part of the general sync
+//! (`sync::sync_all`), best-effort, and Item Detail refreshes it too; [`series_info_for_item`] is
 //! a purely local read and never touches the network, which is what makes this offline-friendly
 //! after the first fetch: once cached, it's available even without a connection.
 

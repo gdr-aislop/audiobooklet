@@ -562,7 +562,9 @@ one of them, per LB-4 below.
 - [ ] **LB-9 — Grouping.** Set Grouping to "By Series", then "By Author", then "None".
       *Expected:* with grouping active, the list sections under headers named for the series/
       author; "None" removes the sectioning. Not sticky-while-scrolling (see this section's
-      intro) — a documented simplification, not a bug.
+      intro) — a documented simplification, not a bug. With "By Series" every series gets *one*
+      header (the series name, no "#N"), its books in series order (book 1, 2, 3, ...); books
+      the server lists in no series are under "Other".
 
 - [x] **LB-10 — Sorting.** Set Sort by to each of: "Date of creation", "Title", "Author",
       "Duration".

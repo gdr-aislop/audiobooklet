@@ -1092,8 +1092,9 @@ impl Client {
 
     /// Fetch a library's series list, each with its books and their per-series `sequence` (e.g.
     /// `"5"`, or `"5.5"` for an inserted novella) — the only place Audiobookshelf's API actually
-    /// exposes a book's position within a series; `media.metadata.seriesName` (used above) is a
-    /// flat convenience string with no number attached.
+    /// exposes a book's series as a clean name plus its position in it; `media.metadata.seriesName`
+    /// (used above) is only the server's display string, "Name #5" (several series joined with
+    /// ", "), which can't be told apart from a series that really is called "Name #5".
     ///
     /// Named `_summaries` rather than plain `get_library_series` — that name is already taken by
     /// the *generated* client method (this endpoint isn't an outright gap like
