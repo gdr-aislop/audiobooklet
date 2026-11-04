@@ -61,11 +61,13 @@ pub struct SeriesMembership {
 
 /// Every cached series membership for a server, across its libraries — what the Library screen
 /// groups by. A book in several series has several rows; they come back ordered by series name
-/// (then series id), so a caller keeping the first row per item gets a stable choice.
+/// (then series id), so a caller keeping the first row per item gets a stable choice. Within a
+/// series the books come back in the order they were stored, which is the server's order for
+/// the series (by their number in it) — the server doesn't send the number itself.
 pub async fn list_for_server(pool: &SqlitePool, server_id: &str) -> Result<Vec<SeriesMembership>> {
     let rows: Vec<(String, String, String, Option<String>)> = sqlx::query_as(
         "SELECT item_id, series_id, series_name, sequence FROM series_books
-         WHERE server_id = ? ORDER BY series_name COLLATE NOCASE, series_id, item_id",
+         WHERE server_id = ? ORDER BY series_name COLLATE NOCASE, series_id, rowid",
     )
     .bind(server_id)
     .fetch_all(pool)
@@ -216,8 +218,8 @@ mod tests {
             "lib-1",
             &[
                 NewSeriesBook { series_id: "s-b", series_name: "banda", item_id: "item-3", sequence: Some("1") },
-                NewSeriesBook { series_id: "s-a", series_name: "Aspirant", item_id: "item-2", sequence: Some("2") },
-                NewSeriesBook { series_id: "s-a", series_name: "Aspirant", item_id: "item-1", sequence: None },
+                NewSeriesBook { series_id: "s-a", series_name: "Aspirant", item_id: "item-1", sequence: Some("2") },
+                NewSeriesBook { series_id: "s-a", series_name: "Aspirant", item_id: "item-2", sequence: None },
             ],
         )
         .await
@@ -227,10 +229,32 @@ mod tests {
         let memberships = list_for_server(&pool, &server_id).await.unwrap();
         let ids: Vec<&str> = memberships.iter().map(|m| m.item_id.as_str()).collect();
         assert_eq!(ids, ["item-1", "item-2", "item-3"], "ordered by series name (case-insensitively), then item");
-        assert_eq!(memberships[1].series_name, "Aspirant");
-        assert_eq!(memberships[1].sequence.as_deref(), Some("2"));
-        assert_eq!(memberships[0].sequence, None);
+        assert_eq!(memberships[0].series_name, "Aspirant");
+        assert_eq!(memberships[0].sequence.as_deref(), Some("2"));
+        assert_eq!(memberships[1].sequence, None);
         assert!(list_for_server(&pool, &other_server).await.unwrap().is_empty());
+    }
+
+    /// The server sorts a series' books by their number but doesn't send it, so the order they
+    /// were stored in is the only order there is.
+    #[tokio::test]
+    async fn list_for_server_keeps_the_stored_book_order_within_a_series() {
+        let (pool, server_id) = pool_with_items(&["item-a", "item-b", "item-c"]).await;
+        replace_all_for_library(
+            &pool,
+            &server_id,
+            "lib-1",
+            &[
+                NewSeriesBook { series_id: "s-1", series_name: "Aspirant", item_id: "item-c", sequence: None },
+                NewSeriesBook { series_id: "s-1", series_name: "Aspirant", item_id: "item-a", sequence: None },
+                NewSeriesBook { series_id: "s-1", series_name: "Aspirant", item_id: "item-b", sequence: None },
+            ],
+        )
+        .await
+        .unwrap();
+
+        let ids: Vec<String> = list_for_server(&pool, &server_id).await.unwrap().into_iter().map(|m| m.item_id).collect();
+        assert_eq!(ids, ["item-c", "item-a", "item-b"], "not alphabetical: the server's order");
     }
 
     #[tokio::test]
