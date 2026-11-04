@@ -33,7 +33,7 @@ adw = { package = "libadwaita", version = "0.7", features = ["v1_2"] }
 
 # gettext translations (see `src/i18n.rs` and `po/`). `gettext-system` links the C library's own
 # libintl (glibc on every target distro) instead of compiling a bundled GNU gettext.
-gettext-rs = { version = "0.7", features = ["gettext-system"] }
+gettext-rs = { version = "0.8", features = ["gettext-system"] }
 
 # Cover-art decoding fallback: gdk-pixbuf has no WebP support on the target
 # distros (no loader shipped in Debian bookworm, PureOS Crimson's base), while
