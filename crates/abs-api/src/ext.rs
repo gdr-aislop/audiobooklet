@@ -621,6 +621,11 @@ impl Client {
     }
 }
 
+/// How many series one request asks for, and the most requests made for one library (a guard
+/// against a server that ignores `page` and would otherwise be asked forever).
+const SERIES_PAGE_SIZE: usize = 100;
+const MAX_SERIES_PAGES: usize = 1000;
+
 #[derive(Debug, Deserialize)]
 struct LibrarySeriesResponseBody {
     results: Vec<RawLibrarySeries>,
@@ -637,10 +642,10 @@ struct RawLibrarySeries {
 #[derive(Debug, Deserialize)]
 struct RawSeriesBook {
     id: Option<String>,
-    /// The book's position within this one series — a nullable **string** on the wire (e.g.
-    /// `"5"`, or `"5.5"` for an inserted novella), not a number; Audiobookshelf's own schema
-    /// (`third_party/audiobookshelf-openapi/openapi.json`'s `sequence` schema) documents it this
-    /// way, so this is passed through as-is rather than parsed into an integer.
+    /// The book's position within this one series, as a nullable **string** (e.g. `"5"`, or
+    /// `"5.5"` for an inserted novella) where a server sends one — Audiobookshelf's own schema
+    /// documents it that way. The real `/series` response doesn't have it on the books at all (it
+    /// only sorts them by it), so this is normally `None`.
     sequence: Option<String>,
 }
 
@@ -1105,38 +1110,55 @@ impl Client {
     /// `LibraryItemSummary.id: String` above), and needlessly fragile against a server that ever
     /// sends a non-UUID id. This mirrors `get_library_items_with_media`'s own `filter_map`
     /// posture instead: a series or book entry missing its id is skipped rather than failing the
-    /// whole page. `GET /api/libraries/{id}/series` is unpaginated here too, same as
-    /// `get_library_items_with_media` — no `limit`/`page` params sent, relying on the server
-    /// returning everything in one response.
+    /// whole page.
+    ///
+    /// **Paginated on purpose.** Unlike the items route, this one answers a request with no
+    /// `limit` with `"results": []` (and a correct `total`) — seen live against the demo server
+    /// (2.36.0) — so a call without paging caches no series at all. Pages of [`SERIES_PAGE_SIZE`]
+    /// are asked for until one comes back short or empty.
+    ///
+    /// Each book is a minified library item. The server sorts them by their number in the
+    /// series but doesn't put the number on them, so `sequence` is usually `None` and the order of
+    /// `books` is what says which book comes first.
     pub async fn get_library_series_summaries(&self, library_id: &str) -> Result<Vec<LibrarySeriesSummary>, LibraryItemsError> {
-        let response = self.client().get(format!("{}/api/libraries/{library_id}/series", self.baseurl())).send().await?;
+        let mut summaries = Vec::new();
+        for page in 0..MAX_SERIES_PAGES {
+            let response = self
+                .client()
+                .get(format!("{}/api/libraries/{library_id}/series", self.baseurl()))
+                .query(&[("limit", SERIES_PAGE_SIZE.to_string()), ("page", page.to_string())])
+                .send()
+                .await?;
 
-        if is_auth_status(response.status()) {
-            return Err(LibraryItemsError::Unauthorized(response.status().as_u16()));
-        }
-        if !response.status().is_success() {
-            return Err(LibraryItemsError::UnexpectedResponse(format!(
-                "GET /api/libraries/{library_id}/series returned HTTP {}",
-                response.status()
-            )));
-        }
+            if is_auth_status(response.status()) {
+                return Err(LibraryItemsError::Unauthorized(response.status().as_u16()));
+            }
+            if !response.status().is_success() {
+                return Err(LibraryItemsError::UnexpectedResponse(format!(
+                    "GET /api/libraries/{library_id}/series returned HTTP {}",
+                    response.status()
+                )));
+            }
 
-        let body: LibrarySeriesResponseBody = response.json().await?;
+            let body: LibrarySeriesResponseBody = response.json().await?;
+            let returned = body.results.len();
 
-        Ok(body
-            .results
-            .into_iter()
-            .filter_map(|series| {
+            summaries.extend(body.results.into_iter().filter_map(|series| {
                 let id = series.id?;
                 let name = series.name?;
                 let books = series
                     .books
                     .into_iter()
-                    .filter_map(|book| Some(SeriesBookSummary { item_id: book.id?, sequence: book.sequence }))
+                    .filter_map(|book| Some(SeriesBookSummary { item_id: book.id?, sequence: book.sequence.filter(|s| !s.trim().is_empty()) }))
                     .collect();
                 Some(LibrarySeriesSummary { id, name, books })
-            })
-            .collect())
+            }));
+
+            if returned < SERIES_PAGE_SIZE {
+                break;
+            }
+        }
+        Ok(summaries)
     }
 
     /// Fetch the audio file(s) backing an item, for resolving a playable URL. Hand-written: the
@@ -2187,6 +2209,66 @@ mod tests {
         assert_eq!(series[0].books[0].sequence.as_deref(), Some("1"));
         assert_eq!(series[0].books[1].item_id, "item-2");
         assert_eq!(series[0].books[1].sequence, None, "a null sequence is a real, if less common, server-side possibility");
+    }
+
+    /// What the real server (2.36.0) sends: books are whole minified library items, with no
+    /// `sequence` on them, in the order of their number in the series.
+    #[tokio::test]
+    async fn get_library_series_summaries_keeps_the_servers_book_order_when_there_is_no_sequence() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api/libraries/lib-1/series"))
+            .and(wiremock::matchers::query_param("limit", "100"))
+            .and(wiremock::matchers::query_param("page", "0"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "results": [{
+                    "id": "series-1",
+                    "name": "Aspirant Przeworski",
+                    "libraryId": "lib-1",
+                    "books": [
+                        { "id": "item-1", "mediaType": "book", "media": { "metadata": { "seriesName": "Aspirant Przeworski #1" } } },
+                        { "id": "item-2", "mediaType": "book", "media": { "metadata": { "seriesName": "Aspirant Przeworski #2" } } },
+                        { "id": "item-3", "sequence": "", "mediaType": "book" }
+                    ]
+                }],
+                "total": 1, "limit": 100, "page": 0
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let series = Client::new(&server.uri()).get_library_series_summaries("lib-1").await.unwrap();
+
+        let ids: Vec<&str> = series[0].books.iter().map(|book| book.item_id.as_str()).collect();
+        assert_eq!(ids, ["item-1", "item-2", "item-3"], "the server's order is kept");
+        assert!(series[0].books.iter().all(|book| book.sequence.is_none()), "no number on the books, and a blank one is none");
+    }
+
+    /// Without `limit` the real server answers `"results": []`, so paging is asked for, and
+    /// followed until a page comes back short.
+    #[tokio::test]
+    async fn get_library_series_summaries_follows_the_pages() {
+        let server = MockServer::start().await;
+        let full_page: Vec<serde_json::Value> = (0..SERIES_PAGE_SIZE).map(|n| serde_json::json!({ "id": format!("s-{n}"), "name": format!("Series {n}"), "books": [] })).collect();
+        Mock::given(method("GET"))
+            .and(path("/api/libraries/lib-1/series"))
+            .and(wiremock::matchers::query_param("page", "0"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({ "results": full_page })))
+            .expect(1)
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/api/libraries/lib-1/series"))
+            .and(wiremock::matchers::query_param("page", "1"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({ "results": [{ "id": "last", "name": "Last", "books": [{ "id": "item-9" }] }] })))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let series = Client::new(&server.uri()).get_library_series_summaries("lib-1").await.unwrap();
+
+        assert_eq!(series.len(), SERIES_PAGE_SIZE + 1);
+        assert_eq!(series.last().unwrap().name, "Last");
     }
 
     #[tokio::test]
