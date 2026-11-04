@@ -1,7 +1,6 @@
 mod a11y;
 mod application;
 mod crash_reporting;
-mod debug_switches;
 mod download_speed;
 mod downloads;
 mod error_reporting;
@@ -147,7 +146,6 @@ fn main() -> adw::glib::ExitCode {
     // after the last `i18n::init` (it sets LANGUAGE and the locale): GStreamer and its plugins read
     // the environment from C, which a concurrent `setenv` would race.
     gst_ready::start();
-    debug_switches::get(); // TEMP(stall-hunt): says in the log if a switch is on
     perf::milestone("starting the GTK application");
     let exit_code = app.run();
     // While thread-local storage is still intact: the shell's teardown (the player retiring)

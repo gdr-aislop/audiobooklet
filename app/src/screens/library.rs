@@ -303,6 +303,10 @@ struct LibraryWidgets {
     /// Per item of the render that built (or is building) the list: a hash of what its tile shows
     /// (`display_key`). Lets the next render say why it had to rebuild (`render_reason`).
     rendered_keys: Rc<std::cell::RefCell<std::collections::HashMap<String, u64>>>,
+    /// The whole screen (what the shell puts in its stack), to tell whether anybody can see it.
+    page: gtk4::Widget,
+    /// Set when a render was asked for while the page was hidden; the page's `map` runs it.
+    render_pending: Rc<Cell<bool>>,
     /// Shown for the one main-loop tick between any filter/search/sort/view-mode change and the
     /// rebuild it triggers — see [`request_render`]/[`set_busy`].
     busy_spinner: gtk4::Spinner,
@@ -631,6 +635,8 @@ pub fn build(
         render_generation: Rc::new(Cell::new(0)),
         rendered_signature: Rc::new(std::cell::RefCell::new(None)),
         rendered_keys: Rc::new(std::cell::RefCell::new(std::collections::HashMap::new())),
+        page: toast_overlay.clone().upcast(),
+        render_pending: Rc::new(Cell::new(false)),
         busy_spinner: busy_spinner.clone(),
         busy_scrim: busy_scrim.clone(),
     };
@@ -680,15 +686,15 @@ pub fn build(
         }
     });
 
-    // Shown (the Library tab opened, or the app's first layout of it): the covers near the
-    // viewport decode now. Idle, so GTK has allocated the page before bounds are read.
-    widgets.scroller.connect_map({
+    // Shown (the Library tab opened, or the app's first layout of it): a render that was asked for
+    // while the page was hidden happens now, and the covers near the viewport decode. Idle, so GTK
+    // has allocated the page before bounds are read.
+    widgets.page.connect_map({
         let widgets = widgets.clone();
         move |_| {
             let widgets = widgets.clone();
             glib::idle_add_local_once(move || {
-                // TEMP(stall-hunt): the render ABS_LIB_LAZY held back.
-                if LAZY_RENDER_PENDING.with(|pending| pending.replace(false)) {
+                if widgets.render_pending.replace(false) {
                     render_from_current_data(&widgets);
                 }
                 decode_covers_in_viewport(&widgets);
@@ -1608,17 +1614,17 @@ fn apply_view_mode(mode: LibraryViewMode, widgets: &LibraryWidgets, toggle: &gtk
     });
 }
 
-thread_local! {
-    // TEMP(stall-hunt): a render deferred by ABS_LIB_LAZY.
-    static LAZY_RENDER_PENDING: Cell<bool> = const { Cell::new(false) };
-}
-
 fn render_from_current_data(widgets: &LibraryWidgets) {
-    // TEMP(stall-hunt): with ABS_LIB_LAZY the render waits until the page is shown (`connect_map`).
-    if crate::debug_switches::get().library_lazy && !widgets.scroller.is_mapped() {
-        LAZY_RENDER_PENDING.with(|pending| pending.set(true));
+    // A Library nobody can see is not built: it is a tab of the shell, built at launch while Home
+    // shows, and its few hundred rows are ~3000 widgets, seconds of main-loop time on the phone
+    // (every frame after each slice re-processes the whole tree) for a page most sessions never
+    // open. The render is remembered and runs when the page is mapped. A Library that is in no
+    // window yet (a screen built on its own) renders at once, as does one that is on screen.
+    if widgets.page.root().is_some() && !widgets.page.is_mapped() {
+        widgets.render_pending.set(true);
         return;
     }
+    widgets.render_pending.set(false);
     let _slow = crate::perf::SlowJob::new("library render");
     let render_started = std::time::Instant::now();
     let blocked_at_start = crate::perf::main_loop_blocked_total();
@@ -1721,8 +1727,6 @@ fn render_from_current_data(widgets: &LibraryWidgets) {
             entries.push(RenderEntry::Item { item: Box::new((*item).clone()), downloaded: data.downloaded.contains(&item.id), number });
         }
     }
-    // TEMP(stall-hunt): ABS_LIB_LIMIT builds only the first N entries.
-    crate::debug_switches::limit_entries(&mut entries, crate::debug_switches::get().library_limit);
     let mode = widgets.view_mode.get();
     let signature = render_signature(mode, &entries);
     if widgets.rendered_signature.borrow().as_deref() == Some(signature.as_str()) {
@@ -3852,10 +3856,9 @@ pub(crate) mod tests {
         pump_until(|| false, Duration::from_millis(300));
     }
 
-    /// Not a `#[test]` itself — see `main.rs`'s `mod tests`. The Library is built at startup while
-    /// Home is the visible tab. A page nobody can see has no layout, so every tile "sits" at the
-    /// origin, inside any viewport: its covers must wait until the page is shown (and then decode
-    /// only those near the viewport), not all be decoded in the background.
+    /// Not a `#[test]` itself — see `main.rs`'s `mod tests`. The Library is a tab of the shell,
+    /// built at launch while Home shows. Nobody can see it, so it renders nothing and decodes no
+    /// cover until its page is shown; then it builds, and decodes only the covers near the viewport.
     pub(crate) fn run_covers_of_a_hidden_library_wait_until_it_is_shown(runtime: &tokio::runtime::Runtime) {
         let mock_server = runtime.block_on(MockServer::start());
         runtime.block_on(
@@ -3881,6 +3884,13 @@ pub(crate) mod tests {
         let offline_mode = crate::offline_mode::OfflineModeState::new(pool.clone());
         let screen = build(pool, crate::test_support::test_paths(), server, account, session, offline_mode.clone(), |_| {}, || {}, || {});
         let hooks = screen.test_hooks();
+        let rows = || {
+            let mut count = 0;
+            while hooks.list_box.row_at_index(count).is_some() {
+                count += 1;
+            }
+            count as usize
+        };
 
         // The shell's arrangement: Home shows, the Library is another page of the same stack.
         let stack = adw::ViewStack::new();
@@ -3893,15 +3903,23 @@ pub(crate) mod tests {
         pump_until(|| app_window.is_mapped(), Duration::from_secs(5));
 
         let before = crate::widgets::cover_image::cached_texture_count();
-        pump_until(|| hooks.list_box.row_at_index(39).is_some(), Duration::from_secs(10));
-        pump_until(|| false, Duration::from_millis(800));
-        assert_eq!(
-            crate::widgets::cover_image::cached_texture_count(),
-            before,
-            "no cover of a Library nobody can see should have been decoded"
-        );
+        // A search typed while it is hidden is remembered too.
+        pump_until(|| screen.widgets.render_pending.get(), Duration::from_secs(10));
+        hooks.search_entry.set_text("book 39");
+        pump_until(|| false, Duration::from_millis(1000));
+        assert!(screen.widgets.render_pending.get(), "the render is waiting for the page to be shown");
+        assert_eq!(rows(), 0, "nothing of a Library nobody can see is built");
+        assert_eq!(crate::widgets::cover_image::cached_texture_count(), before, "and no cover of it is decoded");
 
         stack.set_visible_child_name("library");
+        pump_until(|| rows() > 0, Duration::from_secs(10));
+        pump_until(|| false, Duration::from_millis(500));
+        assert!(!screen.widgets.render_pending.get());
+        assert_eq!(rows(), 1, "shown, it reflects the search made meanwhile");
+
+        // And the whole list, with the covers near the viewport only.
+        hooks.search_entry.set_text("");
+        pump_until(|| rows() == 40, Duration::from_secs(10));
         pump_until(|| crate::widgets::cover_image::cached_texture_count() > before, Duration::from_secs(5));
         pump_until(|| false, Duration::from_millis(800));
         let decoded = crate::widgets::cover_image::cached_texture_count() - before;
