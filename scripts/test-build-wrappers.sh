@@ -39,6 +39,12 @@ run_wrapper() { # <wrapper> -> sets OUT, STATUS; the fake's log is $TMP/<name>.l
 check_wrapper() { # <script file> <description>
     run_wrapper "$REPO_ROOT/scripts/$1"
     check "$2 runs to the end" test "$STATUS" -eq 0
+    if [ "$STATUS" -ne 0 ]; then
+        echo "      $2 exited with $STATUS; its output:"
+        printf '%s\n' "$OUT" | sed 's/^/      | /'
+        echo "      what the fake docker was asked:"
+        sed 's/^/      > /' "$TMP/$(basename "$1" .sh).log"
+    fi
     check "$2 ran no stray command (a broken line continuation)" bash -c '! grep -qE "command not found|requires at least 1 argument" <<<"$1"' _ "$OUT"
     check "$2 starts the build in a container" test -n "$BUILD_RUN"
     check "$2 names an image, then the build script" grep -qE 'audiobooklet-appimage-builder[^ ]* \./scripts/build-appimage\.sh' <<<"$BUILD_RUN"

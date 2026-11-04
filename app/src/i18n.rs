@@ -72,7 +72,15 @@ static SETTING: Mutex<Option<String>> = Mutex::new(None);
 pub fn init(setting: &str) {
     // `setlocale(LC_ALL, "")` honours LC_ALL / LC_MESSAGES / LANG / LANGUAGE. A failure here
     // (e.g. a locale the system hasn't generated) leaves the "C" locale, i.e. English.
-    gettextrs::setlocale(LocaleCategory::LcAll, "");
+    // SAFETY: `setlocale` modifies process-wide locale state and reads the environment without
+    // synchronisation, so it must not run while another thread reads or writes either. This runs
+    // at startup, on the main thread, once, before GTK starts and before GStreamer's initialisation
+    // thread (`gst_ready::start` comes after the last `init`: a test in `main.rs` keeps it so). The
+    // threads that already exist then (the Tokio runtime's workers, the log writer) are idle and
+    // never touch the environment or the locale. `init` is not called again after startup.
+    unsafe {
+        gettextrs::setlocale(LocaleCategory::LcAll, "");
+    }
     let dir = locale_dir();
     let available = available_languages_in(&dir);
 
