@@ -6,6 +6,7 @@ version = 4
 name = "abs-api"
 version = "0.9.13"
 dependencies = [
+ "base64",
  "chrono",
  "openapiv3",
  "prettyplease",

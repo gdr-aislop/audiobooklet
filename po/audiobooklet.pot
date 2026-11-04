@@ -746,6 +746,11 @@ msgstr ""
 msgid "Try a different search or filter."
 msgstr ""
 
+#. TRANSLATORS: A book's subtitle when the library is grouped by series. {number} is the book's number in its series, e.g. "2" or "5.5", so "#2" reads "number 2"; {subtitle} is the usual subtitle, e.g. "Andy Weir · 11.5h".
+#: app/src/screens/library.rs
+msgid "#{number} · {subtitle}"
+msgstr ""
+
 #: app/src/screens/library.rs
 msgctxt "Group header for books without a series"
 msgid "Other"

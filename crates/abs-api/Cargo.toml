@@ -22,6 +22,8 @@ schemars.workspace = true
 thiserror.workspace = true
 # `Client::refresh` limits the wait for the server's answer separately from the reply.
 tokio.workspace = true
+# The library items route filters by series as `series.<base64 of the series id>`.
+base64 = "0.22"
 
 [dev-dependencies]
 tokio.workspace = true

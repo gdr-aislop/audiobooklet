@@ -649,6 +649,37 @@ struct RawSeriesBook {
     sequence: Option<String>,
 }
 
+/// The library items route filtered by one series: every item of it, with the one series being
+/// asked about and the book's number in it at `media.metadata.series` (the list without the
+/// filter has neither; seen live, 2.36.0).
+#[derive(Debug, Deserialize)]
+struct SeriesItemsResponseBody {
+    results: Vec<RawSeriesItem>,
+}
+
+#[derive(Debug, Deserialize)]
+struct RawSeriesItem {
+    id: Option<String>,
+    media: Option<RawSeriesItemMedia>,
+}
+
+#[derive(Debug, Deserialize)]
+struct RawSeriesItemMedia {
+    metadata: Option<RawSeriesItemMetadata>,
+}
+
+#[derive(Debug, Deserialize)]
+struct RawSeriesItemMetadata {
+    #[serde(default, deserialize_with = "lenient")]
+    series: Option<RawSeriesRef>,
+}
+
+#[derive(Debug, Deserialize)]
+struct RawSeriesRef {
+    #[serde(default, deserialize_with = "lenient_text")]
+    sequence: Option<String>,
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct SeriesBookSummary {
     pub item_id: String,
@@ -1159,6 +1190,43 @@ impl Client {
             }
         }
         Ok(summaries)
+    }
+
+    /// The number of each book of one series, `(item id, sequence)` — `"3"`, or `"5.5"`, `None`
+    /// for a book the series doesn't number. This is the only request that carries the numbers: the
+    /// series list has the books in order but no numbers, and the plain items list only the display
+    /// string "Name #3". Asking for the items filtered by the series (the filter is `series.` and
+    /// the base64 of the series id, as the server's own web app and Lissen do) makes the server
+    /// put the series and the book's `sequence` on each item's metadata.
+    pub async fn get_series_book_sequences(&self, library_id: &str, series_id: &str) -> Result<Vec<(String, Option<String>)>, LibraryItemsError> {
+        use base64::Engine as _;
+        let filter = format!("series.{}", base64::engine::general_purpose::STANDARD.encode(series_id));
+        let response = self
+            .client()
+            .get(format!("{}/api/libraries/{library_id}/items", self.baseurl()))
+            .query(&[("filter", filter.as_str())])
+            .send()
+            .await?;
+
+        if is_auth_status(response.status()) {
+            return Err(LibraryItemsError::Unauthorized(response.status().as_u16()));
+        }
+        if !response.status().is_success() {
+            return Err(LibraryItemsError::UnexpectedResponse(format!(
+                "GET /api/libraries/{library_id}/items (series {series_id}) returned HTTP {}",
+                response.status()
+            )));
+        }
+
+        let body: SeriesItemsResponseBody = response.json().await?;
+        Ok(body
+            .results
+            .into_iter()
+            .filter_map(|item| {
+                let sequence = item.media.and_then(|media| media.metadata).and_then(|metadata| metadata.series).and_then(|series| series.sequence).filter(|s| !s.trim().is_empty());
+                Some((item.id?, sequence))
+            })
+            .collect())
     }
 
     /// Fetch the audio file(s) backing an item, for resolving a playable URL. Hand-written: the
@@ -2269,6 +2337,52 @@ mod tests {
 
         assert_eq!(series.len(), SERIES_PAGE_SIZE + 1);
         assert_eq!(series.last().unwrap().name, "Last");
+    }
+
+    /// The numbers only come with the items filtered by the series: `filter=series.<base64 id>`.
+    #[tokio::test]
+    async fn get_series_book_sequences_asks_for_the_series_filter_and_reads_the_numbers() {
+        let server = MockServer::start().await;
+        // "series-1" in base64.
+        Mock::given(method("GET"))
+            .and(path("/api/libraries/lib-1/items"))
+            .and(wiremock::matchers::query_param("filter", "series.c2VyaWVzLTE="))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "results": [
+                    { "id": "item-1", "media": { "metadata": { "seriesName": "Aspirant #1", "series": { "id": "series-1", "name": "Aspirant", "sequence": "1" } } } },
+                    { "id": "item-2", "media": { "metadata": { "series": { "id": "series-1", "name": "Aspirant", "sequence": 2 } } } },
+                    { "id": "item-3", "media": { "metadata": { "series": { "id": "series-1", "name": "Aspirant", "sequence": "5.5" } } } },
+                    { "id": "item-4", "media": { "metadata": { "series": { "id": "series-1", "name": "Aspirant", "sequence": "" } } } },
+                    { "id": "item-5", "media": { "metadata": { "series": { "id": "series-1", "name": "Aspirant", "sequence": null } } } },
+                    { "id": "item-6", "media": { "metadata": { "series": "odd" } } },
+                    { "id": "item-7", "media": { "metadata": {} } },
+                    { "media": { "metadata": { "series": { "sequence": "9" } } } }
+                ]
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let sequences = Client::new(&server.uri()).get_series_book_sequences("lib-1", "series-1").await.unwrap();
+
+        let as_text: Vec<(&str, Option<&str>)> = sequences.iter().map(|(id, seq)| (id.as_str(), seq.as_deref())).collect();
+        assert_eq!(
+            as_text,
+            [("item-1", Some("1")), ("item-2", Some("2")), ("item-3", Some("5.5")), ("item-4", None), ("item-5", None), ("item-6", None), ("item-7", None)],
+            "a number sent as a number is kept, blank or odd values are no number, an item without an id is skipped"
+        );
+    }
+
+    #[tokio::test]
+    async fn get_series_book_sequences_propagates_server_errors() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET")).and(path("/api/libraries/lib-1/items")).respond_with(ResponseTemplate::new(500)).mount(&server).await;
+        let result = Client::new(&server.uri()).get_series_book_sequences("lib-1", "series-1").await;
+        assert!(matches!(result, Err(LibraryItemsError::UnexpectedResponse(_))));
+
+        let denied = MockServer::start().await;
+        Mock::given(method("GET")).and(path("/api/libraries/lib-1/items")).respond_with(ResponseTemplate::new(401)).mount(&denied).await;
+        assert!(matches!(Client::new(&denied.uri()).get_series_book_sequences("lib-1", "series-1").await, Err(LibraryItemsError::Unauthorized(401))));
     }
 
     #[tokio::test]

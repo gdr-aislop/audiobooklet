@@ -1717,7 +1717,8 @@ fn render_from_current_data(widgets: &LibraryWidgets) {
             entries.push(RenderEntry::Header(key.label().to_string()));
         }
         for item in bucket {
-            entries.push(RenderEntry::Item { item: Box::new((*item).clone()), downloaded: data.downloaded.contains(&item.id) });
+            let number = series_number(item, grouping, &data.series).map(str::to_string);
+            entries.push(RenderEntry::Item { item: Box::new((*item).clone()), downloaded: data.downloaded.contains(&item.id), number });
         }
     }
     // TEMP(stall-hunt): ABS_LIB_LIMIT builds only the first N entries.
@@ -1735,7 +1736,7 @@ fn render_from_current_data(widgets: &LibraryWidgets) {
         *widgets.rendered_keys.borrow_mut() = entries
             .iter()
             .filter_map(|entry| match entry {
-                RenderEntry::Item { item, downloaded } => Some((item.id.clone(), display_key(item, *downloaded))),
+                RenderEntry::Item { item, downloaded, number } => Some((item.id.clone(), display_key(item, *downloaded, number.as_deref()))),
                 RenderEntry::Header(_) => None,
             })
             .collect();
@@ -1838,7 +1839,9 @@ const RENDER_SLICE: usize = 40;
 #[derive(Clone)]
 enum RenderEntry {
     Header(String),
-    Item { item: Box<Item>, downloaded: bool },
+    /// `number`: the book's number in its series, only when grouped by series and the server gave
+    /// one ("2", "5.5"). Shown as "#2" at the start of its subtitle.
+    Item { item: Box<Item>, downloaded: bool, number: Option<String> },
 }
 
 /// Identifies what a render would show — the view mode and every input the card/row builders and
@@ -1850,7 +1853,7 @@ fn render_signature(mode: LibraryViewMode, entries: &[RenderEntry]) -> String {
     for entry in entries {
         match entry {
             RenderEntry::Header(label) => ("header", label).hash(&mut hasher),
-            RenderEntry::Item { item, downloaded } => ("item", &item.id, display_key(item, *downloaded)).hash(&mut hasher),
+            RenderEntry::Item { item, downloaded, number } => ("item", &item.id, display_key(item, *downloaded, number.as_deref())).hash(&mut hasher),
         }
     }
     format!("{}:{:x}", entries.len(), hasher.finish())
@@ -1862,10 +1865,10 @@ fn render_signature(mode: LibraryViewMode, entries: &[RenderEntry]) -> String {
 /// What decides the order or the grouping needs no hashing here: the entry order and the headers
 /// are part of the signature already. Listening progress is not shown on a Library tile (Home's
 /// cards show it), so it is not hashed; if a tile ever shows it, it must be added here.
-fn display_key(item: &Item, downloaded: bool) -> u64 {
+fn display_key(item: &Item, downloaded: bool, number: Option<&str>) -> u64 {
     use std::hash::{Hash, Hasher};
     let mut hasher = std::collections::hash_map::DefaultHasher::new();
-    (&item.id, &item.title, &item.author, item.duration_seconds.to_bits(), &item.cover_cache_path, downloaded).hash(&mut hasher);
+    (&item.id, &item.title, &item.author, item.duration_seconds.to_bits(), &item.cover_cache_path, downloaded, number).hash(&mut hasher);
     hasher.finish()
 }
 
@@ -1875,7 +1878,7 @@ fn render_reason(previous: &std::collections::HashMap<String, u64>, entries: &[R
     let items: Vec<(&str, u64)> = entries
         .iter()
         .filter_map(|entry| match entry {
-            RenderEntry::Item { item, downloaded } => Some((item.id.as_str(), display_key(item, *downloaded))),
+            RenderEntry::Item { item, downloaded, number } => Some((item.id.as_str(), display_key(item, *downloaded, number.as_deref()))),
             RenderEntry::Header(_) => None,
         })
         .collect();
@@ -1909,15 +1912,15 @@ fn append_entries(widgets: &LibraryWidgets, mode: LibraryViewMode, entries: &[Re
             (LibraryViewMode::List, RenderEntry::Header(label)) => {
                 widgets.list_box.append(&list_group_header(label));
             }
-            (LibraryViewMode::Grid, RenderEntry::Item { item, downloaded }) => {
-                let subtitle = item_subtitle(item);
+            (LibraryViewMode::Grid, RenderEntry::Item { item, downloaded, number }) => {
+                let subtitle = item_subtitle(item, number.as_deref());
                 let built = item_card::build_deferred(TILE_SIZE, item, &subtitle, &widgets.on_open, true, *downloaded, None);
                 widgets.flow_box.insert(&built.widget, -1);
                 skip_flow_cell(&built.widget);
                 pending.push(PendingCover { widget: built.widget, cover: built.cover, path: item.cover_cache_path.as_ref().map(std::path::PathBuf::from) });
             }
-            (LibraryViewMode::List, RenderEntry::Item { item, .. }) => {
-                let built = library_list_row_deferred(item, &widgets.on_open);
+            (LibraryViewMode::List, RenderEntry::Item { item, number, .. }) => {
+                let built = library_list_row_deferred(item, number.as_deref(), &widgets.on_open);
                 widgets.list_box.append(&built.row);
                 pending.push(PendingCover { widget: built.row.upcast(), cover: built.cover, path: item.cover_cache_path.as_ref().map(std::path::PathBuf::from) });
             }
@@ -2023,11 +2026,29 @@ fn decode_covers_in_viewport(widgets: &LibraryWidgets) {
     }
 }
 
-fn item_subtitle(item: &Item) -> String {
+/// A book's subtitle: "Author · 12.4h", with "#2 · " in front when `number` (its number in its
+/// series, grouped by series only) is known. The number leads so a narrow tile that cuts the
+/// subtitle short still shows it.
+fn item_subtitle(item: &Item, number: Option<&str>) -> String {
     let author = named(&item.author).map_or_else(|| tr("Unknown author"), str::to_string);
     let duration = crate::screens::item_detail::format_duration(item.duration_seconds);
     // TRANSLATORS: A book's subtitle on a card or in a list. {author} is the author's name; {duration} its length, e.g. "11.5h" or "45m".
-    tr_args("{author} · {duration}", &[("author", &author), ("duration", &duration)])
+    let subtitle = tr_args("{author} · {duration}", &[("author", &author), ("duration", &duration)]);
+    match number {
+        // TRANSLATORS: A book's subtitle when the library is grouped by series. {number} is the book's number in its series, e.g. "2" or "5.5", so "#2" reads "number 2"; {subtitle} is the usual subtitle, e.g. "Andy Weir · 11.5h".
+        Some(number) => tr_args("#{number} · {subtitle}", &[("number", number), ("subtitle", &subtitle)]),
+        None => subtitle,
+    }
+}
+
+/// The book's number in its series for display: only grouped by series, and only a number the
+/// server sent. A book with just the order, or none, gets none; the "Name #N" display string is
+/// never read for it.
+fn series_number<'a>(item: &Item, grouping: Grouping, series: &'a std::collections::HashMap<String, SeriesPlace>) -> Option<&'a str> {
+    if grouping != Grouping::BySeries {
+        return None;
+    }
+    series.get(&item.id)?.sequence.as_deref().map(str::trim).filter(|number| !number.is_empty())
 }
 
 /// The section an item falls into under a given `Grouping`. `Named` carries a real author/series
@@ -2226,12 +2247,12 @@ struct BuiltListRow {
     cover: crate::widgets::cover_image::CoverImage,
 }
 
-fn library_list_row_deferred(item: &Item, on_open: &Rc<dyn Fn(PlayRequest)>) -> BuiltListRow {
+fn library_list_row_deferred(item: &Item, number: Option<&str>, on_open: &Rc<dyn Fn(PlayRequest)>) -> BuiltListRow {
     const THUMBNAIL_SIZE: i32 = 48;
 
     let cover = crate::widgets::cover_image::CoverImage::new(THUMBNAIL_SIZE);
 
-    let row = adw::ActionRow::builder().title(&item.title).subtitle(item_subtitle(item)).activatable(true).build();
+    let row = adw::ActionRow::builder().title(&item.title).subtitle(item_subtitle(item, number)).activatable(true).build();
     row.add_prefix(cover.widget());
 
     let request = PlayRequest { item_id: item.id.clone(), title: item.title.clone(), author: item.author.clone() };
@@ -2360,6 +2381,40 @@ pub(crate) mod tests {
         let places = series_places(vec![row("c", "s1"), row("a", "s1"), row("b", "s1"), row("n", "s2"), row("m", "s2")]);
         let at = |id: &str| places[id].position;
         assert_eq!([at("c"), at("a"), at("b"), at("n"), at("m")], [0, 1, 2, 0, 1]);
+    }
+
+    #[test]
+    fn the_subtitle_leads_with_the_number_in_the_series_when_there_is_one() {
+        let mut item = stored_item(Some("Andy Weir"), None);
+        item.duration_seconds = 3600.0;
+        assert_eq!(item_subtitle(&item, None), "Andy Weir · 1.0h");
+        assert_eq!(item_subtitle(&item, Some("2")), "#2 · Andy Weir · 1.0h");
+        assert_eq!(item_subtitle(&item, Some("5.5")), "#5.5 · Andy Weir · 1.0h");
+    }
+
+    /// Only a number the server sent, only grouped by series: not the order, not the "Name #N" string.
+    #[test]
+    fn a_series_number_is_shown_only_when_grouped_by_series_and_sent_by_the_server() {
+        let mut series = std::collections::HashMap::new();
+        series.insert("item-1".to_string(), place("S", Some(" 3 ")));
+        series.insert("blank".to_string(), place("S", Some("  ")));
+        series.insert("none".to_string(), place_at("S", None, 4));
+        let mut book = stored_item(None, Some("S #3"));
+        assert_eq!(series_number(&book, Grouping::BySeries, &series), Some("3"));
+        assert_eq!(series_number(&book, Grouping::ByAuthor, &series), None);
+        assert_eq!(series_number(&book, Grouping::None, &series), None);
+        for id in ["blank", "none", "uncached"] {
+            book.id = id.to_string();
+            assert_eq!(series_number(&book, Grouping::BySeries, &series), None, "{id}: no number, even though series_name is \"S #3\"");
+        }
+    }
+
+    #[test]
+    fn a_changed_number_changes_what_a_tile_shows() {
+        let item = stored_item(Some("A"), None);
+        assert_ne!(display_key(&item, false, Some("2")), display_key(&item, false, Some("3")));
+        assert_ne!(display_key(&item, false, Some("2")), display_key(&item, false, None));
+        assert_eq!(display_key(&item, false, None), display_key(&item, false, None));
     }
 
     #[test]
@@ -2571,6 +2626,33 @@ pub(crate) mod tests {
             index += 1;
         }
         entries
+    }
+
+    /// The subtitle under each card's title, in order (headers have none and are skipped).
+    fn flow_box_subtitles(flow_box: &gtk4::FlowBox) -> Vec<String> {
+        let mut subtitles = Vec::new();
+        let mut index = 0;
+        while let Some(child) = flow_box.child_at_index(index) {
+            if let Some(button) = child.child().and_then(|w| w.downcast::<gtk4::Button>().ok()) {
+                let card_box = button.child().and_then(|w| w.downcast::<gtk4::Box>().ok()).expect("button wraps the card box");
+                let meta = card_box.last_child().and_then(|w| w.downcast::<gtk4::Label>().ok()).expect("the card's last child is the subtitle label");
+                subtitles.push(meta.text().to_string());
+            }
+            index += 1;
+        }
+        subtitles
+    }
+
+    fn list_box_subtitles(list_box: &gtk4::ListBox) -> Vec<String> {
+        let mut subtitles = Vec::new();
+        let mut index = 0;
+        while let Some(row) = list_box.row_at_index(index) {
+            if let Ok(action_row) = row.downcast::<adw::ActionRow>() {
+                subtitles.push(action_row.subtitle().map(|s| s.to_string()).unwrap_or_default());
+            }
+            index += 1;
+        }
+        subtitles
     }
 
     /// Like `list_box_titles`, but also reports grouped section headers (`list_group_header`) —
@@ -4062,6 +4144,13 @@ pub(crate) mod tests {
     /// `series_response`, in Grid view (what `flow_box_entries` reads). The window is returned so
     /// the caller keeps it alive for the test's length.
     fn series_scenario(runtime: &tokio::runtime::Runtime, items: Vec<serde_json::Value>, series_response: ResponseTemplate) -> (LibraryScreen, TestHooks, adw::ApplicationWindow, MockServer) {
+        series_scenario_with_numbers(runtime, items, series_response, &[])
+    }
+
+    /// [`series_scenario`] where the items filtered by a series answer with each book's number:
+    /// `numbers` is `(the filter value, [(item id, number)])`, e.g. `("series.cy0x", ..)` for the
+    /// series id "s-1" (the filter is `series.` and the base64 of the id).
+    fn series_scenario_with_numbers(runtime: &tokio::runtime::Runtime, items: Vec<serde_json::Value>, series_response: ResponseTemplate, numbers: &[(&str, Vec<(&str, &str)>)]) -> (LibraryScreen, TestHooks, adw::ApplicationWindow, MockServer) {
         const LIBRARY: &str = "e4bb1afb-4a4f-4dd6-8be0-e615d233185b";
         let mock_server = runtime.block_on(MockServer::start());
         runtime.block_on(
@@ -4071,7 +4160,23 @@ pub(crate) mod tests {
                 .mount(&mock_server),
         );
         let last = items.len() as i32 - 1;
-        runtime.block_on(Mock::given(method("GET")).and(path(format!("/api/libraries/{LIBRARY}/items"))).respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({ "results": items }))).mount(&mock_server));
+        runtime.block_on(
+            Mock::given(method("GET"))
+                .and(path(format!("/api/libraries/{LIBRARY}/items")))
+                .and(wiremock::matchers::query_param_is_missing("filter"))
+                .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({ "results": items })))
+                .mount(&mock_server),
+        );
+        for (filter, books) in numbers {
+            let results: Vec<_> = books.iter().map(|(id, number)| serde_json::json!({ "id": id, "media": { "metadata": { "series": { "sequence": number } } } })).collect();
+            runtime.block_on(
+                Mock::given(method("GET"))
+                    .and(path(format!("/api/libraries/{LIBRARY}/items")))
+                    .and(wiremock::matchers::query_param("filter", *filter))
+                    .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({ "results": results })))
+                    .mount(&mock_server),
+            );
+        }
         runtime.block_on(Mock::given(method("GET")).and(path(format!("/api/libraries/{LIBRARY}/series"))).respond_with(series_response).mount(&mock_server));
 
         let pool = runtime.block_on(pool());
@@ -4157,6 +4262,42 @@ pub(crate) mod tests {
         let expected = strings(&["§Aspirant Przeworski", "Skrucha", "Krzywda", "Milczenie", "§Banda z Burej", "Tajemnica piwnicy", "Tajemnica falszywego Mikolaja"]);
         pump_until(|| flow_box_entries(&hooks.flow_box) == expected, Duration::from_secs(10));
         assert_eq!(flow_box_entries(&hooks.flow_box), expected, "one header per series, books in the server's series order");
+    }
+
+    /// Grouped by series, each book's subtitle starts with its number in the series, "#2 · …", in
+    /// the grid and in the list. A book without a number from the server gets none (its place in
+    /// the order isn't a number), and other groupings are as before.
+    pub(crate) fn run_series_grouping_shows_the_number_in_the_subtitle(runtime: &tokio::runtime::Runtime) {
+        let items = vec![
+            item_json("item-2", "Krzywda", "Marek Stelar", 1_700_000_000_000, 10.4 * 3600.0),
+            item_json("item-1", "Skrucha", "Marek Stelar", 1_700_000_001_000, 12.4 * 3600.0),
+            item_json("item-3", "Nowela", "Marek Stelar", 1_700_000_002_000, 3600.0),
+            item_json("item-4", "Bez numeru", "Anna Autor", 1_700_000_003_000, 3600.0),
+            item_json("item-5", "Samotna", "Ewa Solo", 1_700_000_004_000, 3600.0),
+        ];
+        let series = series_response(serde_json::json!([
+            { "id": "s-1", "name": "Aspirant Przeworski", "books": [{ "id": "item-1" }, { "id": "item-2" }, { "id": "item-3" }] },
+            { "id": "s-2", "name": "Banda z Burej", "books": [{ "id": "item-4" }] },
+        ]));
+        // s-1's books are numbered 1, 2 and 5.5; s-2's request returns nothing useful.
+        let numbers = [("series.cy0x", vec![("item-1", "1"), ("item-2", "2"), ("item-3", "5.5")])];
+        let (_screen, hooks, _window, _server) = series_scenario_with_numbers(runtime, items, series, &numbers);
+
+        hooks.category_series.set_active(true);
+        let expected_titles = strings(&["§Aspirant Przeworski", "Skrucha", "Krzywda", "Nowela", "§Banda z Burej", "Bez numeru", "§Other", "Samotna"]);
+        pump_until(|| flow_box_entries(&hooks.flow_box) == expected_titles && flow_box_subtitles(&hooks.flow_box).first().is_some_and(|s| s.starts_with('#')), Duration::from_secs(10));
+        assert_eq!(flow_box_entries(&hooks.flow_box), expected_titles);
+        let expected_subtitles = strings(&["#1 · Marek Stelar · 12.4h", "#2 · Marek Stelar · 10.4h", "#5.5 · Marek Stelar · 1.0h", "Anna Autor · 1.0h", "Ewa Solo · 1.0h"]);
+        assert_eq!(flow_box_subtitles(&hooks.flow_box), expected_subtitles, "grid: numbered books lead with their number; the others are as before");
+
+        hooks.view_toggle.set_active(true);
+        pump_until(|| list_box_entries(&hooks.list_box).len() == 8, Duration::from_secs(5));
+        assert_eq!(list_box_subtitles(&hooks.list_box), expected_subtitles, "the list reads the same");
+
+        // Other groupings never show it.
+        hooks.category_author.set_active(true);
+        pump_until(|| list_box_subtitles(&hooks.list_box).iter().all(|s| !s.starts_with('#')) && !list_box_subtitles(&hooks.list_box).is_empty(), Duration::from_secs(5));
+        assert!(list_box_subtitles(&hooks.list_box).iter().all(|s| !s.starts_with('#')), "no number under author grouping");
     }
 
     /// The series list can't be had (a 500 here; the sync tests cover other failures and an
@@ -4873,7 +5014,7 @@ pub(crate) mod tests {
     }
 
     fn entries_of(items: &[(Item, bool)]) -> Vec<RenderEntry> {
-        items.iter().map(|(item, downloaded)| RenderEntry::Item { item: Box::new(item.clone()), downloaded: *downloaded }).collect()
+        items.iter().map(|(item, downloaded)| RenderEntry::Item { item: Box::new(item.clone()), downloaded: *downloaded, number: None }).collect()
     }
 
     fn signature_of(items: &[(Item, bool)]) -> String {
@@ -4929,7 +5070,7 @@ pub(crate) mod tests {
     fn a_render_that_must_rebuild_says_why() {
         let base = vec![(sample_item("a", "Alpha"), false), (sample_item("b", "Beta"), false)];
         let keys = |items: &[(Item, bool)]| -> std::collections::HashMap<String, u64> {
-            items.iter().map(|(item, downloaded)| (item.id.clone(), display_key(item, *downloaded))).collect()
+            items.iter().map(|(item, downloaded)| (item.id.clone(), display_key(item, *downloaded, None))).collect()
         };
         let previous = keys(&base);
         assert_eq!(render_reason(&std::collections::HashMap::new(), &entries_of(&base)), ("first", 2));

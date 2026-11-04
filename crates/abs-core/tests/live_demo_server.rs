@@ -110,4 +110,8 @@ async fn live_sync_caches_the_series_with_clean_names_in_the_servers_order() {
     let mut sorted = numbers.clone();
     sorted.sort_unstable();
     assert_eq!(numbers, sorted, "the books are cached in series order");
+
+    // The real numbers, from the items filtered by the series, match what the titles say.
+    let cached: Vec<Option<u32>> = fables.iter().map(|m| m.sequence.as_deref().and_then(|s| s.parse().ok())).collect();
+    assert_eq!(cached, numbers.iter().map(|n| Some(*n)).collect::<Vec<_>>(), "each book is cached with its real number in the series");
 }
