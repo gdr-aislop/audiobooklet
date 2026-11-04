@@ -1,7 +1,9 @@
 //! Per-book series membership and real position ("book 5 of 8"), sourced from
 //! `abs_api::Client::get_library_series_summaries` — the only place Audiobookshelf's API exposes
-//! a book's series as a clean name and a separate `sequence` (`media.metadata.seriesName`, used
-//! elsewhere in this app, is a display string with the number glued on: "Name #5"). The cache
+//! a book's series as a clean name, with the books in series order (`media.metadata.seriesName`,
+//! used elsewhere in this app, is a display string with the number glued on: "Name #5"). The
+//! server doesn't send the number itself on a real server, so `sequence` is usually `None`; the
+//! order the books are stored in is what carries it. The cache
 //! this fills (`series_books`) is what the Library groups and orders by, and what Item Detail's
 //! "5/8" reads. [`sync_library_series`] runs for every book library as part of the general sync
 //! (`sync::sync_all`), best-effort, and Item Detail refreshes it too; [`series_info_for_item`] is

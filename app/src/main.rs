@@ -294,6 +294,7 @@ mod tests {
         (library_author_category_chip_groups_items_with_headers, crate::screens::library::tests::run_author_category_chip_groups_items_with_headers),
         (library_series_grouping_sorts_named_groups_before_the_fallback_bucket, crate::screens::library::tests::run_series_grouping_sorts_named_groups_before_the_fallback_bucket),
         (library_series_grouping_uses_the_servers_series_names_and_numbers, crate::screens::library::tests::run_series_grouping_uses_the_servers_series_names_and_numbers),
+        (library_series_grouping_follows_the_servers_book_order_when_there_are_no_numbers, crate::screens::library::tests::run_series_grouping_follows_the_servers_book_order_when_there_are_no_numbers),
         (library_series_grouping_falls_back_when_the_series_list_is_not_cached, crate::screens::library::tests::run_series_grouping_falls_back_when_the_series_list_is_not_cached),
         (library_series_grouping_copes_with_a_partly_cached_series_list, crate::screens::library::tests::run_series_grouping_copes_with_a_partly_cached_series_list),
         (library_chips_cards_and_search_speak_for_screen_readers, crate::screens::library::tests::run_chips_cards_and_search_speak_for_screen_readers),

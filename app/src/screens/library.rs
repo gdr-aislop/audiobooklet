@@ -337,8 +337,11 @@ struct LibraryData {
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct SeriesPlace {
     name: String,
-    /// "3", "5.5", or `None` for a series that doesn't number its books.
+    /// "3", "5.5", or `None`. A real server doesn't send the number, only the books in order.
     sequence: Option<String>,
+    /// The book's index in its series as the server listed it (by number), 0-based. What orders
+    /// the books when there is no number.
+    position: usize,
 }
 
 /// Builds the screen. Signature mirrors `home::build`'s exactly — same reasoning: `server`/
@@ -1510,11 +1513,16 @@ async fn load(pool: &SqlitePool, server_id: &str, account_id: &str) -> CoreResul
 /// whose series name sorts first (the order `list_for_server` returns), so the choice is stable.
 fn series_places(rows: Vec<abs_storage::repo::series_books::SeriesMembership>) -> std::collections::HashMap<String, SeriesPlace> {
     let mut places = std::collections::HashMap::new();
+    // Rows of a series arrive together, in the server's book order; count along them.
+    let mut counted: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
     for row in rows {
         if row.series_name.trim().is_empty() {
             continue;
         }
-        places.entry(row.item_id).or_insert(SeriesPlace { name: row.series_name, sequence: row.sequence.filter(|s| !s.trim().is_empty()) });
+        let position = counted.entry(row.series_id).or_insert(0);
+        let this_position = *position;
+        *position += 1;
+        places.entry(row.item_id).or_insert(SeriesPlace { name: row.series_name, sequence: row.sequence.filter(|s| !s.trim().is_empty()), position: this_position });
     }
     places
 }
@@ -2082,20 +2090,20 @@ fn series_group_name<'a>(item: &'a Item, series: &'a std::collections::HashMap<S
     series.get(&item.id).map(|place| place.name.as_str()).or_else(|| named(&item.series_name))
 }
 
-/// Where a book sits within its series group, as a sort key: numbered books by number ("5.5"
-/// between 5 and 6), the rest after them. Constant for every other grouping and for a book
-/// falling back to its `series_name`, so the sort leaves those in the order they already had.
-fn series_position_key(item: &Item, grouping: Grouping, series: &std::collections::HashMap<String, SeriesPlace>) -> (bool, u64) {
-    let number = (grouping == Grouping::BySeries)
-        .then(|| series.get(&item.id))
-        .flatten()
-        .and_then(|place| place.sequence.as_deref())
-        .and_then(|sequence| sequence.trim().parse::<f64>().ok())
-        .filter(|number| number.is_finite() && *number >= 0.0);
+/// Where a book sits within its series group, as a sort key: books with a number by number
+/// ("5.5" between 5 and 6), the rest after them in the server's own order for the series (which
+/// is by number; the server just doesn't say it). Constant for every other grouping and for a
+/// book falling back to its `series_name`, so the sort leaves those in the order they already had.
+fn series_position_key(item: &Item, grouping: Grouping, series: &std::collections::HashMap<String, SeriesPlace>) -> (bool, u64, usize) {
+    let place = (grouping == Grouping::BySeries).then(|| series.get(&item.id)).flatten();
+    let Some(place) = place else {
+        return (true, 0, 0);
+    };
+    let number = place.sequence.as_deref().and_then(|sequence| sequence.trim().parse::<f64>().ok()).filter(|number| number.is_finite() && *number >= 0.0);
     match number {
         // Non-negative floats compare like their bits; `+ 0.0` turns a "-0" into a plain 0.
-        Some(number) => (false, (number + 0.0).to_bits()),
-        None => (true, 0),
+        Some(number) => (false, (number + 0.0).to_bits(), place.position),
+        None => (true, 0, place.position),
     }
 }
 
@@ -2145,9 +2153,9 @@ fn server_author_keys(items: &[&Item]) -> bool {
 /// server's keys, by surname first. Books with the same author as shown always share a key, so a
 /// group is never split, and the label breaks any tie so two authors can't interleave.
 ///
-/// Grouped by series, a group's books then go by their number in the series (the last element);
-/// books without a number, and the sorts that came before for equal numbers, keep their order.
-fn group_order_key(item: &Item, grouping: Grouping, server_author_keys: bool, series: &std::collections::HashMap<String, SeriesPlace>) -> (u8, String, String, (bool, u64)) {
+/// Grouped by series, a group's books then go by their number in the series, else by the server's
+/// order for it (the last element); ties keep the order the sorts before left them in.
+fn group_order_key(item: &Item, grouping: Grouping, server_author_keys: bool, series: &std::collections::HashMap<String, SeriesPlace>) -> (u8, String, String, (bool, u64, usize)) {
     let (rank, label) = group_key_for(item, grouping, series).sort_rank();
     let surname = match (grouping, rank) {
         (Grouping::ByAuthor, 0) if server_author_keys => named(&item.author_sort).map(str::to_lowercase).unwrap_or_default(),
@@ -2295,7 +2303,11 @@ pub(crate) mod tests {
     }
 
     fn place(name: &str, sequence: Option<&str>) -> SeriesPlace {
-        SeriesPlace { name: name.to_string(), sequence: sequence.map(str::to_string) }
+        place_at(name, sequence, 0)
+    }
+
+    fn place_at(name: &str, sequence: Option<&str>, position: usize) -> SeriesPlace {
+        SeriesPlace { name: name.to_string(), sequence: sequence.map(str::to_string), position }
     }
 
     /// The server's series list names the group and numbers the books; the book's own
@@ -2328,7 +2340,30 @@ pub(crate) mod tests {
         let order: Vec<&str> = sorted.iter().map(|item| item.id.as_str()).collect();
         assert_eq!(order, ["g", "h", "j", "b", "d", "a", "c", "e", "f", "i"], "numbers 0, -0, 1, 2, 2.5, 10; then no number, a negative one and junk in their given order");
         // Other groupings never use the number.
-        assert_eq!(series_position_key(&books[0], Grouping::ByAuthor, &series), (true, 0));
+        assert_eq!(series_position_key(&books[0], Grouping::ByAuthor, &series), (true, 0, 0));
+    }
+
+    /// What a real server gives: no numbers at all, just the books in the series' order.
+    #[test]
+    fn books_without_numbers_follow_the_servers_order_for_the_series() {
+        let mut books = Vec::new();
+        let mut series = std::collections::HashMap::new();
+        for (id, position) in [("x", 2), ("y", 0), ("z", 1)] {
+            let mut book = stored_item(None, Some("S #1"));
+            book.id = id.to_string();
+            series.insert(id.to_string(), place_at("S", None, position));
+            books.push(book);
+        }
+        let mut sorted: Vec<&Item> = books.iter().collect();
+        sorted.sort_by_cached_key(|item| group_order_key(item, Grouping::BySeries, false, &series));
+        assert_eq!(sorted.iter().map(|item| item.id.as_str()).collect::<Vec<_>>(), ["y", "z", "x"]);
+
+        // `series_places` hands out those positions per series, in the order the rows arrive.
+        use abs_storage::repo::series_books::SeriesMembership;
+        let row = |item: &str, series_id: &str| SeriesMembership { item_id: item.to_string(), series_id: series_id.to_string(), series_name: series_id.to_string(), sequence: None };
+        let places = series_places(vec![row("c", "s1"), row("a", "s1"), row("b", "s1"), row("n", "s2"), row("m", "s2")]);
+        let at = |id: &str| places[id].position;
+        assert_eq!([at("c"), at("a"), at("b"), at("n"), at("m")], [0, 1, 2, 0, 1]);
     }
 
     #[test]
@@ -4117,6 +4152,29 @@ pub(crate) mod tests {
         let mut expected_shown = in_series;
         expected_shown.sort();
         assert_eq!(shown, expected_shown, "the whole series, not just the one book whose label was tapped");
+    }
+
+    /// The shape a real server sends (seen live): the books of a series carry no number, they are
+    /// just listed in series order. The grouping must still be one header per series with the
+    /// books in that order, not in the order the library listed them.
+    pub(crate) fn run_series_grouping_follows_the_servers_book_order_when_there_are_no_numbers(runtime: &tokio::runtime::Runtime) {
+        let items = vec![
+            item_json_with_series_and_genres("item-3", "Milczenie", Some("Aspirant Przeworski #3"), &[]),
+            item_json_with_series_and_genres("item-1", "Skrucha", Some("Aspirant Przeworski #1"), &[]),
+            item_json_with_series_and_genres("item-4", "Tajemnica piwnicy", Some("Banda z Burej #1"), &[]),
+            item_json_with_series_and_genres("item-2", "Krzywda", Some("Aspirant Przeworski #2"), &[]),
+            item_json_with_series_and_genres("item-5", "Tajemnica falszywego Mikolaja", Some("Banda z Burej #2"), &[]),
+        ];
+        let series = series_response(serde_json::json!([
+            { "id": "s-1", "name": "Aspirant Przeworski", "books": [{ "id": "item-1" }, { "id": "item-2" }, { "id": "item-3" }] },
+            { "id": "s-2", "name": "Banda z Burej", "books": [{ "id": "item-4" }, { "id": "item-5" }] },
+        ]));
+        let (_screen, hooks, _window, _server) = series_scenario(runtime, items, series);
+
+        hooks.category_series.set_active(true);
+        let expected = strings(&["§Aspirant Przeworski", "Skrucha", "Krzywda", "Milczenie", "§Banda z Burej", "Tajemnica piwnicy", "Tajemnica falszywego Mikolaja"]);
+        pump_until(|| flow_box_entries(&hooks.flow_box) == expected, Duration::from_secs(10));
+        assert_eq!(flow_box_entries(&hooks.flow_box), expected, "one header per series, books in the server's series order");
     }
 
     /// The series list can't be had (a 500 here; the sync tests cover other failures and an
