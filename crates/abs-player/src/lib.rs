@@ -25,8 +25,13 @@ pub fn init() -> Result<()> {
     Ok(())
 }
 
-/// Whether GStreamer has finished initialising in this process (by [`init`] or
-/// [`init_in_background`]); `gst_is_initialized` turns true only at the end of the init.
+/// GStreamer's own "initialised" flag (`gst_is_initialized`).
+///
+/// **Not a readiness signal.** GStreamer sets it near the *start* of its initialisation, before the
+/// plugin registry is loaded or scanned, so it is true while another thread is still inside
+/// `gst::init` and `playbin` and the other elements may not be registered yet. Whether the
+/// initialisation is *done* is [`GstInit::is_finished`] (from [`init_in_background`]), or the return of
+/// the synchronous [`init`].
 pub fn is_initialized() -> bool {
     unsafe { gst::ffi::gst_is_initialized() != 0 }
 }
@@ -276,9 +281,11 @@ impl GstBackend {
     }
 
     fn build(sink_element_name: Option<&str>) -> Result<Self> {
-        // The player is built once the app has awaited `init_in_background`; building a pipeline
-        // while the plugin registry is still loading would race it.
-        debug_assert!(is_initialized(), "GStreamer isn't initialised yet");
+        // The player is built once the app has awaited `init_in_background`. If a caller built it
+        // too early anyway, `init` waits here for the initialisation running on another thread
+        // (GStreamer holds a lock for all of it) instead of looking up `playbin` while the plugin
+        // registry is still being scanned, which fails for good.
+        init()?;
         let pipeline = gst::ElementFactory::make("playbin").build()?;
         let connection_properties = std::sync::Arc::new(std::sync::Mutex::new(ConnectionProperties::default()));
         connect_source_setup(&pipeline, connection_properties.clone());

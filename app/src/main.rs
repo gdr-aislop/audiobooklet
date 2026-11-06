@@ -484,6 +484,7 @@ mod tests {
         (cover_image_cache_counts_hits_misses_evictions_and_redecodes, crate::widgets::cover_image::tests::run_cache_counts_hits_misses_evictions_and_redecodes),
         (item_detail_play_and_chapters_wait_for_the_audio_to_be_ready, crate::screens::item_detail::tests::run_play_and_chapters_wait_for_the_audio_to_be_ready),
         (player_replace_backend_swaps_when_idle_and_refuses_while_something_is_loaded, crate::player::tests::run_replace_backend_swaps_when_idle_and_refuses_while_something_is_loaded),
+        (player_a_failed_backend_build_is_tried_again_by_the_next_attempt, crate::player::tests::run_a_failed_backend_build_is_tried_again_by_the_next_attempt),
         (cover_image_duplicate_and_abandoned_decodes_are_skipped, crate::widgets::cover_image::tests::run_duplicate_and_abandoned_decodes_are_skipped),
         (cover_image_cache_hit_avoids_re_reading_disk, crate::widgets::cover_image::tests::run_cache_hit_avoids_re_reading_disk),
         (cover_image_low_memory_mode_turns_covers_off_and_back_on, crate::widgets::cover_image::tests::run_low_memory_mode_turns_covers_off_and_back_on),

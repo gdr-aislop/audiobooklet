@@ -4191,14 +4191,26 @@ pub fn silent_backend() -> Box<dyn abs_player::AudioBackend> {
 }
 
 /// The real, production audio backend — `GstBackend::new()` (the system default
-/// `autoaudiosink`), falling back to `NullBackend` if GStreamer can't build a pipeline at all.
-pub fn real_backend() -> Box<dyn abs_player::AudioBackend> {
+/// `autoaudiosink`). `Err` carries why GStreamer couldn't build a pipeline (already logged), so a
+/// caller can leave the silent backend in place and try again later instead of treating it as final.
+pub fn try_real_backend() -> Result<Box<dyn abs_player::AudioBackend>, String> {
     match abs_player::GstBackend::new() {
-        Ok(backend) => Box::new(backend),
+        Ok(backend) => Ok(Box::new(backend)),
         Err(err) => {
-            tracing::warn!(%err, "couldn't build the audio backend; playback will be unavailable");
-            Box::new(NullBackend)
+            tracing::warn!(%err, "couldn't build the audio backend; playback is unavailable until it can be built (tried again on the next Play)");
+            Err(err.to_string())
         }
+    }
+}
+
+/// One attempt at putting the real audio engine into `controller`, which holds the silent one until
+/// then. True once the real one is in; false (the silent one stays) when it couldn't be built or the
+/// controller refused the swap, so the next Play tries again. A build that failed used to be
+/// final for the whole run: the silent backend was installed as if it were the real one.
+pub(crate) fn install_real_backend(controller: &PlayerController, build: impl FnOnce() -> Result<Box<dyn abs_player::AudioBackend>, String>) -> bool {
+    match build() {
+        Ok(backend) => controller.replace_backend(backend),
+        Err(_) => false,
     }
 }
 
@@ -4682,6 +4694,24 @@ pub(crate) mod tests {
         assert!(controller.snapshot().is_some_and(|s| s.last_error.is_none()), "the swapped-in backend plays");
         assert!(!controller.replace_backend(silent_backend()), "something is loaded: the swap is refused");
         controller.stop();
+    }
+
+    /// The audio engine failing to build is not final: the silent backend stays, and the next
+    /// attempt (the next Play) builds it again and installs it.
+    pub(crate) fn run_a_failed_backend_build_is_tried_again_by_the_next_attempt(runtime: &tokio::runtime::Runtime) {
+        let pool = runtime.block_on(pool());
+        let controller = PlayerController::new(pool, crate::test_support::test_paths(), silent_backend(), |_| {});
+        let attempts = std::cell::Cell::new(0);
+
+        let failing = || {
+            attempts.set(attempts.get() + 1);
+            Err("Failed to find element factory with name 'playbin' for creating element".to_string())
+        };
+        assert!(!install_real_backend(&controller, failing), "a failed build installs nothing and says so");
+        assert!(!install_real_backend(&controller, failing), "and the next attempt asks again");
+        assert_eq!(attempts.get(), 2);
+
+        assert!(install_real_backend(&controller, || Ok(test_backend())), "once GStreamer can build it, it is installed");
     }
 
     /// Regression test for the "Play button silently does nothing" gap's more common trigger: the

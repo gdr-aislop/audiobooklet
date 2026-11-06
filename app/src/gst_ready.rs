@@ -119,10 +119,22 @@ fn held() -> bool {
     }
 }
 
-/// Whether the audio can be built right now: GStreamer finished initialising (or failed, in which
-/// case the silent backend is what there is).
+/// Whether the audio can be built right now: GStreamer finished initialising, the plugin registry
+/// loaded or scanned (or it failed, in which case the silent backend is what there is).
 pub(crate) fn is_ready() -> bool {
-    !held() && (abs_player::is_initialized() || STARTED.get().is_some_and(|init| init.is_finished()))
+    !held() && ready(STARTED.get(), abs_player::is_initialized())
+}
+
+/// The readiness rule, apart from the process-wide state it is asked about.
+///
+/// Once the background initialisation was started, it is ready exactly when that finished. GStreamer's
+/// own "initialised" flag (`process_initialized`) must not count then: it turns true when the
+/// initialisation *starts* (before the plugin registry is loaded or scanned), so on a first start
+/// that scans the plugins (seconds on the phone) the player was built while `playbin` was not
+/// registered yet, and stayed silent for the whole run. The flag is only believed when no
+/// background initialisation was started, e.g. where something called `init()` synchronously.
+fn ready(started: Option<&abs_player::GstInit>, process_initialized: bool) -> bool {
+    started.map_or(process_initialized, abs_player::GstInit::is_finished)
 }
 
 /// Runs `callback` on the main loop once [`is_ready`] — at once if it already is.
@@ -217,6 +229,33 @@ mod tests {
         let (found, source) = registry_file();
         assert_eq!((found.as_deref(), source), (Some(tmp.path().join("own.bin").as_path()), "env"));
         std::env::remove_var("GST_REGISTRY");
+    }
+
+    /// The bug: GStreamer's own flag is true while the plugins are still being scanned.
+    #[test]
+    fn a_started_initialisation_is_ready_only_when_it_has_finished_whatever_gstreamers_own_flag_says() {
+        let (release, gate) = std::sync::mpsc::channel::<()>();
+        let init = abs_player::init_in_background_with(
+            move || {
+                let _ = gate.recv_timeout(Duration::from_secs(10));
+                Ok(())
+            },
+            |_, _| {},
+        );
+        assert!(!ready(Some(&init), true), "still scanning: GStreamer says initialised, but playbin may not be registered yet");
+        assert!(!ready(Some(&init), false));
+        release.send(()).unwrap();
+        while !init.is_finished() {
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        assert!(ready(Some(&init), true));
+        assert!(ready(Some(&init), false), "finished is ready, whatever the flag");
+    }
+
+    #[test]
+    fn without_a_background_initialisation_the_process_flag_decides() {
+        assert!(ready(None, true), "something initialised GStreamer synchronously");
+        assert!(!ready(None, false));
     }
 
     #[test]

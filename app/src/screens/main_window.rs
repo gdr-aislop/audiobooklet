@@ -243,8 +243,11 @@ pub fn build(
     // The shell doesn't wait for GStreamer: until it is ready the player holds the silent backend,
     // Item Detail's Play/chapter taps are disabled (`gst_ready::is_ready`), and the real backend
     // is swapped in the moment it is. Nothing is loaded before then, so no playback is lost.
-    let audio_ready = std::rc::Rc::new(std::cell::Cell::new(crate::gst_ready::is_ready()));
-    let backend = if audio_ready.get() { player::real_backend() } else { player::silent_backend() };
+    // A real backend that can't be built is not "ready": the silent one stays and the next Play
+    // tries again (`ensure_audio`), rather than the failure being final for the whole run.
+    let first_backend = if crate::gst_ready::is_ready() { player::try_real_backend().ok() } else { None };
+    let audio_ready = std::rc::Rc::new(std::cell::Cell::new(first_backend.is_some()));
+    let backend = first_backend.unwrap_or_else(player::silent_backend);
     let mini_bar = player::build_mini_bar(pool.clone(), paths.clone(), backend);
     // Idempotent; true once the real backend is in. Also called by `start_playback`, in case a
     // tap lands before the swap's own callback has run.
@@ -259,7 +262,7 @@ pub fn build(
             if !crate::gst_ready::is_ready() || controller.is_retired() {
                 return false;
             }
-            audio_ready.set(controller.replace_backend(player::real_backend()));
+            audio_ready.set(player::install_real_backend(&controller, player::try_real_backend));
             tracing::info!(waited_ms = built.elapsed().as_millis() as u64, swapped = audio_ready.get(), "audio backend ready");
             audio_ready.get()
         })
@@ -634,9 +637,10 @@ pub fn build(
         let ensure_audio = ensure_audio.clone();
         move |request: PlayRequest, start_chapter: Option<usize>| {
             if !ensure_audio() {
-                // Item Detail's Play and chapter rows are disabled until the audio is ready, so
-                // this is a safety net, not a path a tap can take.
-                tracing::warn!("asked to play before the audio was ready; ignored");
+                // Item Detail's Play and chapter rows are disabled until GStreamer is ready, so a
+                // tap normally gets here only when building the audio engine failed (the line
+                // above it in the log says why); the next tap tries to build it again.
+                tracing::warn!("asked to play but the audio engine isn't available; ignored");
                 return;
             }
             // The default speed is read at call time, not captured — a "Default speed" change in
